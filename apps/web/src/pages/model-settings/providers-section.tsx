@@ -1,4 +1,5 @@
 import { Trans, useLingui } from "@lingui/react/macro";
+import type { ModelCatalogSourceStatus } from "@rakazo/contracts";
 import { MAX_MODEL_CONNECTION_LABEL } from "@rakazo/contracts";
 import {
   Button,
@@ -13,8 +14,9 @@ import {
   PopoverContent,
   PopoverTrigger,
   SectionHeading,
+  Spinner,
 } from "@rakazo/ui-web";
-import { ChevronRight, Plus } from "lucide-react";
+import { ChevronRight, Plus, RefreshCw } from "lucide-react";
 import type { ReactNode } from "react";
 import { useId, useRef, useState } from "react";
 import type { ModelCredential } from "../../lib/model-auth";
@@ -33,6 +35,10 @@ export function ProvidersSection({
   onOpen,
   panel,
   panelAt,
+  sources,
+  sourceError,
+  syncingSources,
+  onSync,
 }: {
   credentials: ModelCredential[];
   /** Every provider that can be connected, connected ones included. */
@@ -46,9 +52,76 @@ export function ProvidersSection({
   panel?: ReactNode;
   /** The connection id the form belongs to, or "add" for a new one. */
   panelAt?: string | null;
+  sources: ModelCatalogSourceStatus[];
+  sourceError: string | null;
+  syncingSources: boolean;
+  onSync: (sourceId?: string) => void;
 }) {
+  const { t } = useLingui();
   return (
     <section className="mb-8" data-testid="model-providers">
+      {sources.length || sourceError ? (
+        <div className="mb-5 space-y-3" data-testid="model-sources">
+          {sources.map((source) => (
+            <div key={source.id} className="flex items-start gap-3">
+              <div className="min-w-0 flex-1">
+                <p className="break-words text-body font-medium text-foreground">
+                  {source.label}
+                  <span className="ms-2 font-normal text-muted-foreground">{source.group}</span>
+                </p>
+                <p className="text-body-sm text-muted-foreground">
+                  {source.lastSyncedAt ? (
+                    <Trans>
+                      Synced{" "}
+                      <time dateTime={source.lastSyncedAt}>
+                        {new Date(source.lastSyncedAt).toLocaleString()}
+                      </time>
+                    </Trans>
+                  ) : (
+                    <Trans>Not synced</Trans>
+                  )}
+                </p>
+                {source.error ? (
+                  <p className="break-words text-body-sm text-warning" role="status">
+                    {source.error}
+                  </p>
+                ) : null}
+              </div>
+              <Button
+                type="button"
+                variant="ghost"
+                size="icon-sm"
+                className="shrink-0"
+                aria-label={t`Refresh ${source.label}`}
+                title={t`Refresh ${source.label}`}
+                disabled={syncingSources || disabled}
+                aria-busy={syncingSources}
+                onClick={() => onSync(source.id)}
+              >
+                {syncingSources ? <Spinner /> : <RefreshCw />}
+              </Button>
+            </div>
+          ))}
+          {sourceError ? (
+            <div className="flex items-center gap-3">
+              <p className="min-w-0 flex-1 break-words text-body-sm text-warning" role="alert">
+                {sourceError}
+              </p>
+              <Button
+                type="button"
+                variant="ghost"
+                size="icon-sm"
+                aria-label={t`Retry sync`}
+                title={t`Retry sync`}
+                disabled={syncingSources || disabled}
+                onClick={() => onSync()}
+              >
+                <RefreshCw />
+              </Button>
+            </div>
+          ) : null}
+        </div>
+      ) : null}
       <SectionHeading className="mb-2.5">
         <Trans>Providers</Trans>
       </SectionHeading>
@@ -64,8 +137,19 @@ export function ProvidersSection({
                 onClick={() => onOpen(credential)}
                 className="flex min-h-[52px] w-full items-center gap-2.5 py-2 ps-3 pe-3 text-start outline-none first:rounded-t-xl hover:bg-accent/50 focus-visible:ring-3 focus-visible:ring-ring/50"
               >
-                <span className="min-w-0 flex-1 truncate text-body-lg text-foreground">
-                  {nameOf(credential)}
+                <span className="min-w-0 flex-1">
+                  <span className="block truncate text-body-lg text-foreground">
+                    {nameOf(credential)}
+                  </span>
+                  {credential.catalogSource && !credential.catalogSource.available ? (
+                    <span className="block text-body-sm text-warning">
+                      <Trans>Unavailable</Trans>
+                    </span>
+                  ) : credential.catalogSource?.unavailableModelIds.length ? (
+                    <span className="block text-body-sm text-warning">
+                      <Trans>Some models unavailable</Trans>
+                    </span>
+                  ) : null}
                 </span>
                 {credential.reconnectRequired ? (
                   <span className="shrink-0 text-body-sm text-warning">

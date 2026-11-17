@@ -4,6 +4,7 @@ import {
   forgetPageShareSecrets,
   removeAgentHome,
   removeDeletedBotsFromLegacyTeamHome,
+  syncSemanticMemorySpace,
   toComputerRef,
 } from "@rakazo/adapters";
 import { anySignal, requestDeadline, withAbort } from "@rakazo/core";
@@ -277,6 +278,12 @@ async function deleteClaimedSpaces(
 ): Promise<void> {
   const context = (spaceId: string, botId?: string) =>
     adapterContext(input.operationId, input.userId, spaceId, botId, input.signal);
+  // Only claimed Spaces are going away. Invited Spaces handed to surviving
+  // members are deliberately absent, so their shared facts are not purged.
+  for (const spaceId of input.spaceIds) {
+    input.signal?.throwIfAborted();
+    await deps.semanticFacts?.retireScope({ spaceId }, context(spaceId));
+  }
   const bots = await deps.prisma.bot.findMany({
     where: input.bots,
     select: {
@@ -332,6 +339,15 @@ async function deleteClaimedSpaces(
 
   for (const spaceId of input.spaceIds) {
     // Teardown abandoned at a deadline that finishes later leaves the rest to the next attempt.
+    input.signal?.throwIfAborted();
+    // Credentials and the content key must survive failed physical index cleanup.
+    await syncSemanticMemorySpace(
+      {
+        prisma: deps.prisma,
+        memoryProviders: deps.memoryProviders ?? { resolve: async () => null },
+      },
+      spaceId,
+    );
     input.signal?.throwIfAborted();
     const deleted = await deleteClaimedSpace(deps.prisma, {
       spaceId,

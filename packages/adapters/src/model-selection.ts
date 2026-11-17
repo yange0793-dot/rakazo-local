@@ -498,6 +498,10 @@ export function enabledOpenAiCompatibleModelIds(
   secret: StoredModelSecret | undefined,
   defaultModel: string | null | undefined,
 ): string[] {
+  if (secret?.kind === "openai_compatible" && secret.managedCatalog)
+    return secret.managedCatalog.availableModelIds.filter(
+      (id) => !secret.managedCatalog!.disabledModelIds?.includes(id),
+    );
   const listed = secret?.kind === "openai_compatible" ? (secret.enabledModelIds ?? []) : [];
   const ids = [defaultModel, ...listed].map((id) => usableModelId(id));
   return [...new Set(ids.filter((id): id is string => id !== null))];
@@ -764,7 +768,7 @@ export function compatibleThinkingLevels(
   if (plaintext !== undefined) {
     try {
       parsed = parseModelSecret(plaintext);
-      levels = modelCredentialDto(row, plaintext).thinkingLevels;
+      levels = modelCredentialDto({ ...row, defaultModel: modelId }, plaintext).thinkingLevels;
     } catch {
       // Unreadable connections must not advertise reasoning support.
     }
@@ -831,8 +835,14 @@ export async function validateConnectedModelChoice(
     },
     select: { credentialId: true },
   });
-  if (savedChoice) return undefined;
   const secret = await loadModelSecret(prisma, secretStore, actor.userId, credential.secretId);
+  if (secret?.kind === "openai_compatible" && secret.managedCatalog)
+    return enabledOpenAiCompatibleModelIds(secret, credential.defaultModel).includes(
+      secret.managedCatalog.aliases[modelId] ?? modelId,
+    )
+      ? undefined
+      : "This model is no longer available from its catalog source";
+  if (savedChoice) return undefined;
   if (secret?.kind === "openai_compatible" && secret.enabledModelIds === undefined)
     return undefined;
   const enabled = secret && enabledOpenAiCompatibleModelIds(secret, credential.defaultModel);

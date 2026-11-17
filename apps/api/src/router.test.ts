@@ -7277,9 +7277,26 @@ describe("bot model auth on save", () => {
       preferenceFindFirst,
       secretFindFirst,
       botUpdate,
+      eventCreate: tx.event.create,
+      notify: deps.events.notify,
       handler: new RPCHandler(createRouter(deps)),
     };
   }
+
+  it("publishes a model settings change so other clients refresh", async () => {
+    const { handler, eventCreate, notify } = saveDeps({ modelId: spark, preferences: () => null });
+    const response = await call(handler, "bots/update", {
+      botId: "bot-1",
+      modelProvider: "openai-codex",
+      modelId: spark,
+      thinkingLevel: null,
+    });
+    expect(response.status).toBe(200);
+    expect(eventCreate).toHaveBeenCalledWith(
+      expect.objectContaining({ data: expect.objectContaining({ type: "bot.updated" }) }),
+    );
+    expect(notify).toHaveBeenCalledWith("thread-1", 1);
+  });
 
   it("persists the daily check-in preference through the bot update route", async () => {
     const { botUpdate, handler } = saveDeps({ modelId: spark, preferences: () => null });
@@ -7995,6 +8012,26 @@ describe("routines.update", () => {
     nextRunAt: new Date("2026-09-02T09:00:00.000Z"),
   };
 
+  it("converts a recurring schedule to one-time using the supplied future time", async () => {
+    const { call, update, enqueue } = fixture(false, false, {
+      ...recurring,
+      lastRunAt: new Date("2026-09-01T09:00:00.000Z"),
+    });
+    const runAt = new Date(Date.now() + 60_000).toISOString();
+    expect((await call({ crons: ["@once"], runAt })).status).toBe(200);
+    expect(update.mock.calls[0]![0].data).toMatchObject({
+      crons: ["@once"],
+      nextRunAt: new Date(runAt),
+    });
+    expect(enqueue).toHaveBeenCalledWith(expect.objectContaining({ availableAt: new Date(runAt) }));
+  });
+
+  it("requires a future time when converting a recurring schedule to one-time", async () => {
+    const { call, update } = fixture(false, false, recurring);
+    expect((await call({ crons: ["@once"], runAt: undefined })).status).toBe(400);
+    expect(update).not.toHaveBeenCalled();
+  });
+
   it("leaves the schedule alone when an edit does not change it", async () => {
     const { call, update, enqueue } = fixture(false, false, recurring);
     expect((await call({ name: "Renamed", runAt: undefined })).status).toBe(200);
@@ -8389,6 +8426,8 @@ describe("openai-compatible enabled models", () => {
         deleteMany: vi.fn(async () => ({ count: 1 })),
       },
       deploymentSettings: { findUnique: vi.fn(async () => null) },
+      thread: { update: vi.fn(async () => ({ nextEventSeq: 2 })) },
+      event: { create: vi.fn(async () => ({ seq: 1 })) },
       user: {
         findUniqueOrThrow: vi.fn(async () => ({
           email: actor.email,

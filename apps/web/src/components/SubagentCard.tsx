@@ -33,7 +33,8 @@ export function SubagentCard({
   const [open, setOpen] = useState(() => openHelpers.has(block.agentId));
   const [stopping, setStopping] = useState(false);
   const running = block.status === "running";
-  const { stopped, failed, body } = helperCardState(block);
+  const { stopped, failed, waiting, body } = helperCardState(block);
+  const active = running || waiting;
   return (
     <Collapsible
       open={open}
@@ -56,7 +57,7 @@ export function SubagentCard({
             className={`${running ? "motion-safe:animate-[rkPulse_1.2s_ease-in-out_infinite]" : ""} shrink-0 rounded-full px-[11px] py-1 text-body-sm ${
               failed
                 ? "bg-destructive/15 text-destructive"
-                : running
+                : active
                   ? "bg-warning/15 text-warning"
                   : stopped
                     ? "bg-muted-foreground/15 text-muted-foreground"
@@ -65,6 +66,8 @@ export function SubagentCard({
           >
             {running ? (
               <Trans>Running</Trans>
+            ) : waiting ? (
+              <Trans>Waiting</Trans>
             ) : stopped ? (
               <Trans>Stopped</Trans>
             ) : failed ? (
@@ -91,7 +94,7 @@ export function SubagentCard({
           {block.task}
         </span>
       </CollapsibleTrigger>
-      {running && onStop ? (
+      {active && onStop ? (
         <Button
           variant="outline"
           size="sm"

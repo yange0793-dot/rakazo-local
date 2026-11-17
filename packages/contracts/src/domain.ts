@@ -4,7 +4,14 @@ import { BotAvatarSetSchema, BotAvatarValueSchema } from "./bot-avatar.js";
 import { DisabledBuiltinToolsSchema } from "./builtin-tools.js";
 import { ComputerModeSchema, ComputerStatusSchema } from "./computer.js";
 import { BotSettingsValuesSchema, ThreadMessageSchema } from "./events.js";
-import { Id, MemoryScope, ReplyModeSchema, RunStatus, ThinkingLevelSchema } from "./ids.js";
+import {
+  Id,
+  IsoDate,
+  MemoryScope,
+  ReplyModeSchema,
+  RunStatus,
+  ThinkingLevelSchema,
+} from "./ids.js";
 import { NavLinkSchema } from "./nav-links.js";
 import { RoutineWatchSchema, RoutineWatchStateSchema } from "./routine-watch.js";
 import { RunTriggerSchema } from "./runs.js";
@@ -107,6 +114,8 @@ export const BotSchema = z.object({
   runErrorId: Id.nullable().default(null),
   computerMode: ComputerModeSchema,
   updatedAt: z.string(),
+  /** Settings revision, independent of the last message shown in the roster. */
+  settingsUpdatedAt: z.string().optional(),
   createdAt: z.string(),
   voiceId: z.string().nullable(),
   autoSpeak: z.boolean(),
@@ -604,6 +613,7 @@ export const CreateRoutineInput = z
     prompt: z.string().min(1),
     crons: z.array(z.string().min(1)).default([]),
     timezone: TimeZoneSchema.default("UTC"),
+    runAt: IsoDate.optional(),
     notify: z.boolean().default(true),
     active: z.boolean().default(false),
     webhookEnabled: z.boolean().default(false),
@@ -1154,7 +1164,9 @@ export const UsageRecordSchema = z.object({
   usageSource: z.string().nullable().optional(),
   callId: z.string().nullable().optional(),
   operationId: z.string().nullable().optional(),
-  operationKind: z.enum(["answer", "setup", "retrieval", "subagent", "compaction"]).optional(),
+  operationKind: z
+    .enum(["answer", "setup", "retrieval", "subagent", "compaction", "learning"])
+    .optional(),
   parentRunId: z.string().nullable().optional(),
   agentId: z.string().nullable().optional(),
   createdAt: z.string(),

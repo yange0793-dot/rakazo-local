@@ -175,7 +175,7 @@ describe("builtin tools", () => {
     for (const name of FLEET_TOOL_NAMES) expect(DELEGATION_TOOL_NAMES.has(name), name).toBe(true);
   });
 
-  it("gives a background helper only tools that read, never the computer, memory, skills or routines", () => {
+  it("gives a background helper workspace and page tools, not desktop or memory writes", () => {
     const options = {
       graphicalToolsAllowed: true,
       pageBrowserAllowed: true,
@@ -195,21 +195,25 @@ describe("builtin tools", () => {
     expect(helper.sort()).toEqual(
       [
         "board_tickets",
+        "browser_act",
+        "browser_navigate",
+        "browser_snapshot",
         "cloud_agent_status",
+        "list_files",
+        "read_file",
         "recall_memory",
         "scratchpad_list",
+        "shell",
         "skill_read",
         "task_catalog",
         "ticket_get",
         "web_fetch",
         "web_search",
+        "write_file",
       ].sort(),
     );
     for (const name of [
-      "shell",
       "computer_act",
-      "browser_act",
-      "write_file",
       "save_memory",
       "remember",
       "skill_create",

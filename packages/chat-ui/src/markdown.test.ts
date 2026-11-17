@@ -92,6 +92,15 @@ describe("plainTextLinkParts", () => {
     expect(visible(wrapped)).toBe(wrapped);
   });
 
+  it("stops at CJK punctuation without losing prose or Unicode URL paths", () => {
+    const text = "打开 https://example.com/，然后看（https://example.com/报告）。";
+    expect(plainTextLinkParts(text).filter((part) => part.type === "link")).toEqual([
+      { type: "link", value: "https://example.com/", href: "https://example.com/" },
+      { type: "link", value: "https://example.com/报告", href: "https://example.com/报告" },
+    ]);
+    expect(visible(text)).toBe(text);
+  });
+
   it("matches bot autolinks when parentheses are nested or trailing", () => {
     const samples = [
       "https://en.wikipedia.org/wiki/Foo_(bar)",

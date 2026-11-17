@@ -47,6 +47,7 @@ function props(compatibleRows: string[], enabledModelIds: string[], modelId = ""
     busy: false,
     cancelOAuthAttempt: () => {},
     compatibleRows,
+    compatibleEffortLevels: ["minimal", "low", "medium", "high", "xhigh", "max"] as const,
     contextWindow: "128000",
     defaultModelOptions: [],
     effectiveBaseUrl: "http://127.0.0.1:8000/v1",

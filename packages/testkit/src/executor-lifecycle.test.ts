@@ -1307,6 +1307,155 @@ describeIntegration("run executor lifecycle", () => {
     }
   });
 
+  it("keeps a helper that never uses the computer off the lease and leaves the chat free", async () => {
+    const seeded = await seedRun("helper-lazy-idle", "unused", {}, "team");
+    const helper = await seedHelperRun(seeded, "this is a safe test");
+    // The seed's queued run would otherwise be woken when the chat turn settles.
+    await db.run.update({
+      where: { id: seeded.run.id },
+      data: { status: "cancelled", completedAt: new Date() },
+    });
+    const chatRun = await createRunForBot(seeded, "this is a safe test", {
+      status: "queued",
+      leaseFence: 0,
+    });
+
+    await Promise.all([
+      runAsSystem("background job run.continue", () =>
+        handles.executor.continueRun(helper.run.id, "helper-idle-worker"),
+      ),
+      runAsSystem("background job run.continue", () =>
+        handles.executor.continueRun(chatRun.id, "chat-worker"),
+      ),
+    ]);
+
+    const [helperRun, chatTurn, chatAttempts] = await Promise.all([
+      db.run.findUniqueOrThrow({ where: { id: helper.run.id } }),
+      db.run.findUniqueOrThrow({ where: { id: chatRun.id } }),
+      db.attempt.findMany({ where: { runId: chatRun.id } }),
+    ]);
+    expect(helperRun.status).toBe("completed");
+    expect(chatTurn.status).toBe("completed");
+    expect(chatAttempts).toHaveLength(1);
+    expect(await db.computerExecutionLease.count({ where: { runId: helper.run.id } })).toBe(0);
+  });
+
+  it("takes the computer lease only when a helper's first computer tool runs", async () => {
+    const seeded = await seedRun("helper-lazy-lease", "unused", {}, "team");
+    const helper = await seedHelperRun(seeded, "run the shell command echo lazy-lease");
+    await db.run.update({
+      where: { id: seeded.run.id },
+      data: { status: "cancelled", completedAt: new Date() },
+    });
+    expect(await db.computerExecutionLease.count({ where: { runId: helper.run.id } })).toBe(0);
+
+    await runAsSystem("background job run.continue", () =>
+      handles.executor.continueRun(helper.run.id, "helper-lease-worker"),
+    );
+
+    const run = await db.run.findUniqueOrThrow({ where: { id: helper.run.id } });
+    expect(run.status).toBe("completed");
+    const leases = await db.computerExecutionLease.findMany({ where: { runId: helper.run.id } });
+    expect(leases).toHaveLength(1);
+    expect(leases[0]).toMatchObject({
+      computerId: helper.computerId,
+      botId: seeded.bot.id,
+      runId: helper.run.id,
+    });
+    // Released at the end of the run: the row stays as an epoch tombstone.
+    expect(leases[0]?.expiresAt.getTime()).toBe(0);
+    const toolEvents = await db.event.findMany({
+      where: { runId: helper.run.id, type: "agent.tool.completed" },
+      select: { payload: true },
+    });
+    expect(
+      toolEvents.map((event) => event.payload as { name?: string; outcome?: string }),
+    ).toContainEqual(expect.objectContaining({ name: "shell", outcome: "succeeded" }));
+  });
+
+  it("reports a computer held by another run as a tool error without failing the helper", async () => {
+    const seeded = await seedRun("helper-busy-computer", "unused", {}, "team");
+    const helper = await seedHelperRun(seeded, "run the shell command echo busy");
+    const heldUntil = new Date(Date.now() + 60_000);
+    await db.run.update({
+      where: { id: seeded.run.id },
+      data: {
+        status: "running",
+        leaseOwner: "blocking-worker",
+        leaseFence: 1,
+        leaseExpiresAt: heldUntil,
+        startedAt: new Date(),
+      },
+    });
+    await db.computerExecutionLease.create({
+      data: {
+        computerId: helper.computerId,
+        botId: seeded.bot.id,
+        runId: seeded.run.id,
+        fence: 1,
+        expiresAt: heldUntil,
+      },
+    });
+
+    await runAsSystem("background job run.continue", () =>
+      handles.executor.continueRun(helper.run.id, "helper-busy-worker"),
+    );
+
+    const run = await db.run.findUniqueOrThrow({ where: { id: helper.run.id } });
+    expect(run.status).toBe("completed");
+    expect(await db.computerExecutionLease.count({ where: { runId: helper.run.id } })).toBe(0);
+    await expect(
+      db.computerExecutionLease.findUniqueOrThrow({
+        where: { computerId_botId: { computerId: helper.computerId, botId: seeded.bot.id } },
+      }),
+    ).resolves.toMatchObject({ runId: seeded.run.id, expiresAt: heldUntil });
+    const toolEvents = await db.event.findMany({
+      where: { runId: helper.run.id, type: "agent.tool.completed" },
+      select: { payload: true },
+    });
+    const shell = toolEvents
+      .map((event) => event.payload as { name?: string; outcome?: string; error?: string })
+      .find((payload) => payload.name === "shell");
+    expect(shell).toMatchObject({ outcome: "error" });
+    expect(shell?.error).toContain(
+      "The bot's computer is busy with another run right now. Please try again in a moment.",
+    );
+  });
+
+  async function seedHelperRun(seeded: Awaited<ReturnType<typeof seedRun>>, prompt: string) {
+    const bot = await db.bot.findUniqueOrThrow({
+      where: { id: seeded.bot.id },
+      select: { computerId: true },
+    });
+    const computerId = bot.computerId;
+    if (!computerId) throw new Error(`Seeded bot ${seeded.bot.id} has no computer`);
+    const thread = await db.thread.create({
+      data: { spaceId: seeded.me.spaceId, userId: seeded.me.userId, helperBotId: seeded.bot.id },
+    });
+    const task = await db.task.create({
+      data: {
+        spaceId: seeded.me.spaceId,
+        botId: seeded.bot.id,
+        threadId: thread.id,
+        userId: seeded.me.userId,
+        prompt,
+        status: "queued",
+      },
+    });
+    const run = await db.run.create({
+      data: {
+        spaceId: seeded.me.spaceId,
+        botId: seeded.bot.id,
+        threadId: thread.id,
+        taskId: task.id,
+        userId: seeded.me.userId,
+        status: "queued",
+        trigger: "helper",
+      },
+    });
+    return { thread, task, run, computerId };
+  }
+
   async function seedRun(
     label: string,
     prompt: string,

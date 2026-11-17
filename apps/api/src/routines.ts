@@ -21,15 +21,24 @@ export function assertRoutineSchedule(input: CreateRoutineInput): void {
     });
   }
   if (input.active && isOneShotRoutineCrons(input.crons)) {
-    throw new ORPCError("BAD_REQUEST", {
-      message: "One-shot schedules must be created from chat.",
-    });
+    if (!input.runAt) {
+      throw new ORPCError("BAD_REQUEST", { message: "Add a run time for this one-shot." });
+    }
+    if (new Date(input.runAt).getTime() <= Date.now()) {
+      throw new ORPCError("BAD_REQUEST", { message: "Run time must be in the future." });
+    }
+  }
+  if (input.runAt && !isOneShotRoutineCrons(input.crons)) {
+    throw new ORPCError("BAD_REQUEST", { message: "A run time is only for one-time schedules." });
   }
 }
 
 export function routineNextRunAt(input: CreateRoutineInput): Date | null {
-  // Validate every recurring cron even when inactive; @once and webhook-only have no next date.
-  let nextRunAt: Date | null = null;
+  // Paused schedules stay inert until explicitly enabled.
+  let nextRunAt: Date | null =
+    input.active && isOneShotRoutineCrons(input.crons) && input.runAt
+      ? new Date(input.runAt)
+      : null;
   if (input.crons.length > 0 && !isOneShotRoutineCrons(input.crons)) {
     const computedNextRunAt = nextRoutineDate(input.crons, input.timezone);
     nextRunAt = input.active ? computedNextRunAt : null;
@@ -171,7 +180,28 @@ export async function routineTestTarget(
   if (!routine) throw new IsolationError();
   const bot = await repos.getBot(actor, routine.botId);
   if (!bot.thread) throw new IsolationError();
-  return { routine, botId: bot.id, threadId: bot.thread.id };
+  // A test run belongs in the conversation the routine runs in. Use its stored thread only
+  // while this bot can still run there (the same eligibility wakeRoutine applies), and keep
+  // the established bot-chat fallback for a missing or stale one.
+  const storedThread = routine.threadId
+    ? await prisma.thread.findFirst({
+        where: {
+          id: routine.threadId,
+          spaceId: routine.spaceId,
+          OR: [
+            { botId: bot.id },
+            {
+              group: {
+                archivedAt: null,
+                members: { some: { botId: bot.id } },
+              },
+            },
+          ],
+        },
+        select: { id: true },
+      })
+    : null;
+  return { routine, botId: bot.id, threadId: storedThread?.id ?? bot.thread.id };
 }
 
 /**

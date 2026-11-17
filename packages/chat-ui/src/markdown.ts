@@ -196,7 +196,10 @@ export function plainTextLinkParts(text: string): PlainTextPart[] {
 }
 
 function urlLinkParts(text: string): PlainTextPart[] {
-  const matches = plainTextLinkify.match(text);
+  // CJK prose punctuation separates bare links too; keep offsets in the original text.
+  const matches = plainTextLinkify.match(
+    text.replace(/[\u3001\u3002\u3008-\u3011\uFF01\uFF08\uFF09\uFF0C\uFF1B\uFF1F]/g, " "),
+  );
   if (!matches || matches.length === 0) return [{ type: "text", value: text }];
 
   const parts: PlainTextPart[] = [];

@@ -86,6 +86,23 @@ export function buildModelConnectPlaintext(
     assertHeaderSafeApiKey(prepared.apiKey);
     const sameEndpoint =
       previous?.kind === "openai_compatible" && previous.baseUrl === prepared.baseUrl;
+    if (
+      previous?.kind === "openai_compatible" &&
+      previous.managedCatalog &&
+      (!sameEndpoint ||
+        (input.apiProtocol !== undefined && input.apiProtocol !== previous.apiProtocol))
+    ) {
+      throw new Error("The catalog source manages this connection's endpoint and protocol");
+    }
+    if (
+      previous?.kind === "openai_compatible" &&
+      previous.managedCatalog &&
+      !previous.managedCatalog.availableModelIds.includes(
+        previous.managedCatalog.aliases[prepared.modelId] ?? prepared.modelId,
+      )
+    ) {
+      throw new Error("This model is no longer available from its catalog source");
+    }
     const compatiblePrevious = sameEndpoint ? previous : undefined;
     if (input.apiKey === undefined && sameEndpoint) {
       // Revalidate the inherited key too: public endpoints must still use HTTPS.
@@ -148,7 +165,15 @@ export function buildModelConnectPlaintext(
       ...(compatibleCacheCapabilities !== undefined
         ? { cacheCapabilities: compatibleCacheCapabilities }
         : {}),
-      ...(input.reasoning !== undefined ? { reasoning: input.reasoning } : {}),
+      ...(input.reasoning !== undefined || compatiblePrevious?.reasoning !== undefined
+        ? { reasoning: input.reasoning ?? compatiblePrevious?.reasoning }
+        : {}),
+      ...((input.reasoningCapabilities ?? compatiblePrevious?.reasoningCapabilities)
+        ? {
+            reasoningCapabilities:
+              input.reasoningCapabilities ?? compatiblePrevious?.reasoningCapabilities,
+          }
+        : {}),
       ...(thinkingLevel !== undefined ? { thinkingLevel } : {}),
       ...(maxTokens !== undefined ? { maxTokens } : {}),
       ...(contextWindow !== undefined ? { contextWindow } : {}),
@@ -161,6 +186,20 @@ export function buildModelConnectPlaintext(
         enabledModelIds.length > MAX_ENABLED_MODEL_IDS
           ? enabledModelIds.filter((id) => id !== prepared.modelId)
           : enabledModelIds,
+      ...(compatiblePrevious?.managedCatalog
+        ? {
+            managedCatalog: {
+              ...compatiblePrevious.managedCatalog,
+              ...(input.enabledModelIds !== undefined
+                ? {
+                    disabledModelIds: compatiblePrevious.managedCatalog.availableModelIds.filter(
+                      (id) => !enabledModelIds.includes(id),
+                    ),
+                  }
+                : {}),
+            },
+          }
+        : {}),
       ...(maxImagesPerPrompt !== undefined ? { maxImagesPerPrompt } : {}),
     };
     return serializeModelSecret(secret);
@@ -333,11 +372,41 @@ export function modelCredentialDto(
   if (parsed.kind !== "openai_compatible") {
     return { ...compatibleCredential, authKind: modelCredentialAuthKind(parsed) };
   }
+  const catalogModelId = parsed.managedCatalog?.aliases[row.defaultModel ?? ""] ?? row.defaultModel;
+  const sourceCapabilities = parsed.managedCatalog?.capabilities[catalogModelId ?? ""];
+  const reasoningCapabilities =
+    parsed.reasoningCapabilities ??
+    (sourceCapabilities?.thinkingLevels || sourceCapabilities?.reasoningMode
+      ? { levels: sourceCapabilities.thinkingLevels, mode: sourceCapabilities.reasoningMode }
+      : undefined);
   return {
     ...compatibleCredential,
     authKind: "openai_compatible",
-    supportsImages:
-      parsed.visionModelIds !== undefined
+    ...(parsed.managedCatalog
+      ? {
+          catalogSource: {
+            id: parsed.managedCatalog.sourceId,
+            label: parsed.managedCatalog.sourceLabel,
+            group: parsed.managedCatalog.group,
+            providerId: parsed.managedCatalog.providerId,
+            available: parsed.managedCatalog.availableModelIds.length > 0,
+            unavailableModelIds: [
+              ...new Set([
+                ...parsed.managedCatalog.unavailableModelIds,
+                ...(row.defaultModel &&
+                !parsed.managedCatalog.availableModelIds.includes(
+                  parsed.managedCatalog.aliases[row.defaultModel] ?? row.defaultModel,
+                )
+                  ? [row.defaultModel]
+                  : []),
+              ]),
+            ],
+          },
+        }
+      : {}),
+    supportsImages: parsed.managedCatalog
+      ? compatibleModelSeesImages(row, parsed, row.defaultModel ?? "")
+      : parsed.visionModelIds !== undefined
         ? modelIdSupportsImages(parsed.visionModelIds, row.defaultModel)
         : compatibleCredential.supportsImages,
     baseUrl: parsed.baseUrl,
@@ -345,11 +414,14 @@ export function modelCredentialDto(
     ...(parsed.apiProtocol !== undefined ? { apiProtocol: parsed.apiProtocol } : {}),
     ...(parsed.headers !== undefined ? { headerNames: Object.keys(parsed.headers) } : {}),
     reasoning: parsed.reasoning ?? false,
+    ...(reasoningCapabilities ? { reasoningCapabilities } : {}),
     ...(credential.thinkingLevel !== undefined || parsed.thinkingLevel !== undefined
       ? { thinkingLevel: credential.thinkingLevel ?? parsed.thinkingLevel }
       : {}),
     ...(parsed.maxTokens !== undefined ? { maxTokens: parsed.maxTokens } : {}),
-    ...(parsed.contextWindow !== undefined ? { contextWindow: parsed.contextWindow } : {}),
+    ...(parsed.contextWindow !== undefined || sourceCapabilities?.contextWindow !== undefined
+      ? { contextWindow: parsed.contextWindow ?? sourceCapabilities?.contextWindow }
+      : {}),
     cacheCapabilities: parsed.cacheCapabilities,
     ...(parsed.maxImagesPerPrompt !== undefined
       ? { maxImagesPerPrompt: parsed.maxImagesPerPrompt }
@@ -369,6 +441,7 @@ export function modelCredentialDto(
         undefined,
         undefined,
         parsed.apiProtocol,
+        reasoningCapabilities,
       ),
     ) as ThinkingLevel[],
     modelId: row.defaultModel ?? undefined,

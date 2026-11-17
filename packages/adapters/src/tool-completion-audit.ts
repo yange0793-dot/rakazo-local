@@ -70,8 +70,14 @@ export function toolCompletionAuditPayload(
     name: redactSecrets(completion.name, secrets),
     executionId: redactSecrets(completion.executionId, secrets),
     durationMs,
-    outcome: completion.paused ? "paused" : error === undefined ? "succeeded" : "error",
+    outcome: completion.paused
+      ? "paused"
+      : toolCompletionOutcome(completion) === "failed"
+        ? "error"
+        : "succeeded",
   };
+  const code = exitCode(completion.result);
+  if (code !== undefined) payload.exitCode = code;
   if (error !== undefined) {
     payload.error = sanitizeConnectorError(error, secrets);
   }

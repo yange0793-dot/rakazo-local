@@ -127,6 +127,16 @@ export interface ClearThreadInput {
   /** Event author and the bot-scoped target for one-to-one chats. */
   botId: string;
   groupId?: string;
+  /** A pre-clear archive drained this exact source generation and conversation head. */
+  expectedGeneration?: number;
+  expectedNextMessageSeq?: number;
+}
+
+export class ThreadClearConflictError extends Error {
+  constructor() {
+    super("The conversation changed during memory archiving. Clear it again to include the new messages.");
+    this.name = "ThreadClearConflictError";
+  }
 }
 
 export interface ClearThreadResult {
@@ -137,6 +147,11 @@ export interface ClearThreadResult {
 
 export interface FinalizeRunResult {
   continuationRunId: string | null;
+  /**
+   * The chat a paused card was shown in when that is not the run's own thread: a background
+   * helper asks in the chat that started it.
+   */
+  cardThreadId?: string;
 }
 
 interface FinalizeRunBase {
@@ -260,19 +275,29 @@ export async function clearThread(
       data: { nextMessageSeq: { increment: 0 } },
       select: { nextMessageSeq: true, historyCompactionGeneration: true, userId: true },
     });
+    if (
+      (input.expectedGeneration !== undefined &&
+        thread.historyCompactionGeneration !== input.expectedGeneration) ||
+      (input.expectedNextMessageSeq !== undefined &&
+        thread.nextMessageSeq !== input.expectedNextMessageSeq)
+    ) {
+      throw new ThreadClearConflictError();
+    }
     await clearThreadReads(tx, input.threadId);
+    // Background helpers this chat started work in threads of their own, group chats included.
+    const helpers = {
+      trigger: BACKGROUND_HELPER_TRIGGER,
+      sourceMessage: { threadId: input.threadId },
+    };
     const activeRuns = await tx.run.findMany({
       where: {
         spaceId: input.spaceId,
-        ...(input.groupId
-          ? { threadId: input.threadId }
-          : {
-              OR: [
-                { threadId: input.threadId, botId: input.botId },
-                // Background helpers this chat started work in threads of their own.
-                { trigger: BACKGROUND_HELPER_TRIGGER, sourceMessage: { threadId: input.threadId } },
-              ],
-            }),
+        OR: [
+          input.groupId
+            ? { threadId: input.threadId }
+            : { threadId: input.threadId, botId: input.botId },
+          helpers,
+        ],
         status: { in: ["queued", "leased", "running", "waiting_input", "waiting_takeover"] },
       },
       select: { id: true, taskId: true, userId: true, spaceId: true },
@@ -281,17 +306,34 @@ export async function clearThread(
     const runIds = (await cancelRunsInTransaction(tx, activeRuns, now)).map((run) => run.id);
     // Expire as tombstones so a still-open provider screen claim cannot reset fencing to 1.
     await expireComputerExecutionLeases(tx, { runId: { in: runIds } });
-    // Helpers start only from the bot's own chat, so every thread the bot's helpers wrote goes
-    // with it, including imported ones that have no runs.
-    const helperThreads = { spaceId: input.spaceId, helperBotId: input.botId };
-    const cleared = input.groupId
-      ? { threadId: input.threadId }
-      : { OR: [{ threadId: input.threadId }, { thread: helperThreads }] };
+    // Only the helper threads this chat started keep their history with it: clear is read
+    // before the source messages go, which would cut the link. A helper another chat started
+    // stays that chat's to clear. Imported threads predate runs, so a private chat keeps
+    // taking its bot's run-less ones along.
+    const helperThreads = await tx.thread.findMany({
+      where: {
+        spaceId: input.spaceId,
+        id: { not: input.threadId },
+        ...(input.groupId ? {} : { helperBotId: input.botId }),
+        ...(input.groupId
+          ? { runs: { some: helpers } }
+          : {
+              OR: [{ runs: { some: helpers } }, { runs: { none: {} } }],
+            }),
+      },
+      select: { id: true },
+    });
+    const helperThreadIds = helperThreads.map((thread) => thread.id);
+    const cleared = { threadId: { in: [input.threadId, ...helperThreadIds] } };
     await tx.message.deleteMany({ where: cleared });
     await tx.event.deleteMany({ where: cleared });
-    if (!input.groupId) {
+    if (helperThreadIds.length > 0) {
+      // Their history went too, so compaction has nothing left to summarize.
       await tx.thread.updateMany({
-        where: { ...helperThreads, historyCompactionSummary: { not: null } },
+        where: {
+          id: { in: helperThreadIds },
+          historyCompactionSummary: { not: null },
+        },
         data: { historyCompactionSummary: null, historyCompactionGeneration: { increment: 1 } },
       });
     }
@@ -655,9 +697,10 @@ async function insertEventAlone(prisma: PrismaClient, input: AppendEventInput) {
       FOR SHARE OF r
     ),
     inserted AS (
-      INSERT INTO events (id, "spaceId", "threadId", "botId", seq, type, payload, "runId")
+      INSERT INTO events (id, "spaceId", "threadId", "botId", seq, type, payload, "runId", "createdAt")
       SELECT ${row.id}, ${input.spaceId}, ${input.threadId}, ${input.botId}, next.seq,
-        ${input.type}, ${JSON.stringify(stored.payload)}::jsonb, ${runId ?? null}
+        ${input.type}, ${JSON.stringify(stored.payload)}::jsonb, ${runId ?? null},
+        CURRENT_TIMESTAMP AT TIME ZONE 'UTC'
       FROM next
       WHERE ${runId ? Prisma.sql`EXISTS (SELECT 1 FROM run)` : Prisma.sql`TRUE`}
       RETURNING id, seq, "createdAt", "runId"

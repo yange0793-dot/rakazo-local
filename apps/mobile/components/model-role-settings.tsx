@@ -20,10 +20,14 @@ import {
   connectionDisplayName,
   MAX_MODEL_BACKUPS,
   modelRoleChoiceKey,
-  OPENAI_COMPATIBLE_PROVIDER_ID,
   withConnectionName,
 } from "@rakazo/contracts";
-import { createModelRoleSettings, modelRoleListPatch } from "@rakazo/core";
+import {
+  clampCatalogThinkingLevel,
+  createModelRoleSettings,
+  credentialForModel,
+  modelRoleListPatch,
+} from "@rakazo/core";
 import type { Href } from "expo-router";
 import type { ReactNode } from "react";
 import { useEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
@@ -133,7 +137,35 @@ export function ModelRoleSettings({
         canonicalPiProviderId(entry.provider) === canonicalPiProviderId(choice.provider) &&
         entry.id === choice.modelId,
     );
-  const options = connectedBackupOptions(state.catalog, credentials, role === "computer");
+  const connectionFor = (choice: ModelRoleChoice) =>
+    choice.credentialId
+      ? credentials.find((entry) => entry.id === choice.credentialId)
+      : (credentialForModel(credentials, choice.provider, choice.modelId) ??
+        credentials.find(
+          (entry) =>
+            entry.provider === choice.provider &&
+            (entry.modelId === choice.modelId ||
+              entry.catalogSource?.unavailableModelIds.includes(choice.modelId)),
+        ) ??
+        credentials.find(
+          (entry) =>
+            canonicalPiProviderId(entry.provider) === canonicalPiProviderId(choice.provider) &&
+            !entry.catalogSource,
+        ));
+  const unavailable = (choice: ModelRoleChoice) => {
+    const source = connectionFor(choice)?.catalogSource;
+    return Boolean(
+      source && (!source.available || source.unavailableModelIds.includes(choice.modelId)),
+    );
+  };
+  const options = connectedBackupOptions(state.catalog, credentials, role === "computer")
+    .filter((choice) => !unavailable(choice))
+    .map((choice) => ({
+      ...choice,
+      connectionName: connectionFor(choice)?.catalogSource
+        ? connectionFor(choice)!.label
+        : choice.connectionName,
+    }));
   const optionFor = (choice: ModelRoleChoice) =>
     options.find((option) => backupChoiceKey(option) === backupChoiceKey(choice));
   const modelLabel = (choice: ModelRoleChoice) =>
@@ -146,28 +178,24 @@ export function ModelRoleSettings({
   // What runs when the member chose no first model; named in the empty row.
   const deployment = state.settings?.deploymentPrimary ?? null;
   const deploymentName = deployment ? modelLabel(deployment) : null;
-  /** The row's own connection, or the provider's newest for rows that name none. */
-  const connectionFor = (choice: ModelRoleChoice) =>
-    choice.credentialId
-      ? credentials.find((entry) => entry.id === choice.credentialId)
-      : credentials.find(
-          (entry) =>
-            canonicalPiProviderId(entry.provider) === canonicalPiProviderId(choice.provider),
-        );
   const connectionName = (choice: ModelRoleChoice) => {
-    const connection = choice.credentialId ? connectionFor(choice) : undefined;
+    const connection = connectionFor(choice);
     return connection
-      ? connectionDisplayName(connection, providerName(choice))
+      ? connection.catalogSource
+        ? connection.label
+        : connectionDisplayName(connection, providerName(choice))
       : providerName(choice);
   };
   const isPrimarySlot = (slot: Slot) => slot === "empty" || (slot === 0 && primary !== null);
 
-  // Compatible endpoints keep their effort with the connection.
   const thinkingLevels =
-    role === "main" && primary && primary.provider !== OPENAI_COMPATIBLE_PROVIDER_ID
+    role === "main" && primary
       ? (entryFor(primary)?.thinkingLevels ?? []).filter((level) => level !== "off")
       : [];
-  const thinking = primary?.thinkingLevel ?? null;
+  const thinking = clampCatalogThinkingLevel(
+    primary?.thinkingLevel,
+    thinkingLevels,
+  ) as ThinkingLevel | null;
 
   async function save(update: (current: Settings) => Partial<Settings>) {
     let primaryChanged = false;
@@ -367,9 +395,10 @@ export function ModelRoleSettings({
       )}
       {rows.map((choice, index) => {
         const name = modelLabel(choice);
+        const missing = unavailable(choice);
         const showThinking = role === "main" && index === 0 && primary !== null;
         const thinkingMenu: MenuAction[] =
-          showThinking && thinkingLevels.length
+          showThinking && !missing && thinkingLevels.length
             ? [
                 {
                   id: "thinking",
@@ -408,8 +437,8 @@ export function ModelRoleSettings({
               : [{ name: action.id ?? action.title, label: action.title }],
         );
         const detail = [
-          connectionName(choice),
-          ...(showThinking && thinking
+          missing ? t`Unavailable` : connectionName(choice),
+          ...(showThinking && !missing && thinking
             ? [t`Thinking: ${ph({ level: thinkingLevelLabel(thinking) })}`]
             : []),
         ].join(", ");

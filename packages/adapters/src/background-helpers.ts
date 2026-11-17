@@ -16,10 +16,13 @@ import {
   THREAD_LOCK_TRANSACTION_OPTIONS,
 } from "@rakazo/db";
 import { getLogger } from "@rakazo/logging";
+import { resolveDeploymentModel } from "./deployment-model.js";
 import type { ExecutorDeps } from "./executor-deps.js";
+import { validateConnectedModelChoice } from "./model-selection.js";
 import { helperResultText, MAX_PARALLEL_SUBAGENTS } from "./pi-runtime-subagent.js";
 import type { RunContext } from "./run-context.js";
 import { runLeaseFor } from "./run-messages.js";
+import { modelCreditBillingEnabled } from "./run-model.js";
 
 /** Opens every background helper's task; the helper reads it as its brief. */
 export const BACKGROUND_HELPER_TASK_CUE = "You are a background helper";
@@ -29,7 +32,7 @@ const RESULT_LIMIT = 12_000;
 // Stop only settles a card, so it brings no job queue.
 type HelperDeps = Pick<ExecutorDeps, "prisma"> & {
   events: Pick<ExecutorDeps["events"], "notify">;
-  jobs?: ExecutorDeps["jobs"];
+  jobs?: Pick<ExecutorDeps["jobs"], "enqueue">;
 };
 type HelperBlock = Extract<MessageBlock, { kind: "subagent" }>;
 
@@ -47,8 +50,9 @@ export function backgroundHelpersAllowed(turn: {
   botId: string;
   trigger: string;
 }): boolean {
+  // Any chat the person talks in — the bot's own or a group — can start one; its card and
+  // result belong to that chat. A messaging channel and a helper result never start another.
   return (
-    turn.threadBotId === turn.botId &&
     turn.trigger !== "messaging" &&
     turn.trigger !== HELPER_RESULT_TRIGGER &&
     isConversationalRun(turn.trigger)
@@ -73,12 +77,45 @@ export async function startBackgroundHelper(
   ) {
     return {
       error:
-        "Background helpers start only from the user's own app chat with you. Run the helper inside this turn instead.",
+        "A helper starts only from a chat with a person, not from a messaging channel, a routine, or another bot's request.",
     };
   }
   if (Boolean(input.modelProvider) !== Boolean(input.modelId)) {
     return { error: "model_provider and model_id must both be set" };
   }
+  const explicitModel = Boolean(input.modelProvider);
+  if (
+    explicitModel &&
+    (input.modelProvider !== ctx.model.provider || input.modelId !== ctx.model.id)
+  ) {
+    const error = await validateConnectedModelChoice(
+      deps.prisma,
+      deps.secretStore,
+      run,
+      input.modelProvider,
+      input.modelId,
+      {
+        hostedProvider: (await modelCreditBillingEnabled(deps))
+          ? resolveDeploymentModel().provider
+          : undefined,
+        codexCatalog: deps.codexCatalog,
+      },
+    );
+    if (error) {
+      return {
+        error: `${error}. To inherit the current model, omit both model_provider and model_id. Model IDs are opaque; do not split prefixes. No helper was started.`,
+      };
+    }
+  }
+  const sameModel =
+    !explicitModel ||
+    (input.modelProvider === ctx.model.provider && input.modelId === ctx.model.id);
+  const model = {
+    modelProvider: explicitModel ? input.modelProvider : ctx.model.provider,
+    modelId: explicitModel ? input.modelId : ctx.model.id,
+    thinkingLevel: sameModel ? ctx.model.thinkingLevel : null,
+    modelPinned: true,
+  };
   const clientNonce = `background-helper:${input.effectKey}`;
   const started = { ok: true as const, name: input.name, note: startedNote(input.name) };
   const card: HelperBlock = {
@@ -148,9 +185,7 @@ export async function startBackgroundHelper(
         trigger: BACKGROUND_HELPER_TRIGGER,
         sourceMessageId: message.id,
         clientNonce,
-        ...(input.modelProvider
-          ? { modelProvider: input.modelProvider, modelId: input.modelId, modelPinned: true }
-          : {}),
+        ...model,
       },
       select: { id: true },
     });
@@ -179,7 +214,7 @@ function startedNote(name: string) {
 export function helperPrompt(input: { name: string; task: string; instructions: string }) {
   return [
     `${BACKGROUND_HELPER_TASK_CUE} named "${input.name}", working for this bot while it keeps talking with the user.`,
-    "You cannot talk to the user, ask them anything, use the computer, or change memory, skills or routines. Finish with a concise result for the bot; name anything it should ask the user or change itself.",
+    "Do the work with the tools your task needs — read and write files, run commands, use the page browser, and use this bot's computer when the task needs it; work that shares the computer waits its turn. A tool that changes something, or a site the owner has not allowed, runs only after the owner approves: its card goes to the chat that started you, and you continue once it is answered — never retry it another way or work around it. You cannot talk to the user, ask them anything, buy anything, type saved logins or cards, or change memory, skills or routines. Finish with a concise result for the bot; include the exact workspace paths of requested deliverables and name anything it should ask the user or change itself.",
     input.instructions,
     `Task from the bot (not from the user):\n${input.task || "Complete the delegated task."}`,
   ]
@@ -315,6 +350,6 @@ export function resultPrompt(name: string, status: "completed" | "failed", resul
     "",
     failed
       ? "Tell the user briefly that it could not finish and why."
-      : "Pass it on to the user now with its actual substance. If it says memory, skills or routines should change, make that change yourself only when the user asked for it.",
+      : "Pass it on to the user now with its actual substance. If the user requested a file and the result names its workspace path, verify the file and attach it with attach_file so the user can open it. If it says memory, skills or routines should change, make that change yourself only when the user asked for it.",
   ].join("\n");
 }

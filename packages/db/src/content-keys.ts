@@ -159,6 +159,8 @@ export type SpaceSource =
   | "events"
   | "memory_documents"
   | "memory_revisions"
+  | "semantic_facts"
+  | "semantic_fact_revisions"
   | "bot_email_messages";
 
 export interface SpaceKeyStore {
@@ -188,6 +190,8 @@ export const ROW_OWNER: Record<SpaceSource, string> = {
   events: "threadId",
   memory_documents: "userId",
   memory_revisions: "documentId",
+  semantic_facts: "userId",
+  semantic_fact_revisions: "factId",
   bot_email_messages: "botId",
 };
 
@@ -202,6 +206,8 @@ const ROW_CONTEXT: Record<SpaceSource, string> = {
   memory_documents: `SELECT "spaceId", "userId" AS owner FROM memory_documents WHERE id = $1`,
   messages: `SELECT t."spaceId", m."threadId" AS owner FROM messages m JOIN threads t ON t.id = m."threadId" WHERE m.id = $1`,
   memory_revisions: `SELECT d."spaceId", r."documentId" AS owner FROM memory_revisions r JOIN memory_documents d ON d.id = r."documentId" WHERE r.id = $1`,
+  semantic_facts: `SELECT "spaceId", "userId" AS owner FROM semantic_facts WHERE id = $1`,
+  semantic_fact_revisions: `SELECT "spaceId", "factId" AS owner FROM semantic_fact_revisions WHERE id = $1`,
   bot_email_messages: `SELECT "spaceId", "botId" AS owner FROM bot_email_messages WHERE id = $1`,
 };
 

@@ -470,6 +470,8 @@ const ComposerBody = memo(function Composer({
     const text = serializeComposerPrompt(submitted.text, selectedSkill);
     const mentions = composerMentionsForPrompt(submitted.text, selectedSkill, submitted.bindings);
     const submission = beginComposerDraftSubmission(draftKey, draft);
+    // A reload can lose the request's answer before either settlement callback runs.
+    if (nonceRecoverable) keepComposerRetryNonce(draftKey, submission, clientNonce);
     commitComposition({ text: "", bindings: [] }, false);
     setMentionQuery(null);
     setMentionHighlightKey(null);

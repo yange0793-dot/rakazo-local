@@ -221,6 +221,57 @@ describe("bot management approval cards", () => {
   });
 });
 
+describe("page action context", () => {
+  it("shows the page and elements a browser action would touch", () => {
+    const block = buildApprovalAskBlock(
+      "effect-1",
+      "browser_act",
+      { actions: [{ kind: "click", ref: "e2" }] },
+      ["fake-token"],
+      {
+        onceOnly: true,
+        browserAction: {
+          url: "https://shop.example.test/checkout?token=fake-token",
+          steps: [
+            { kind: "click", role: "button", name: "Pay fake-token" },
+            { kind: "fill", role: "textbox", name: "Email" },
+          ],
+        },
+      },
+    );
+    expect(block).toMatchObject({
+      kind: "ask",
+      text: "Review before browser_act → shop.example.test",
+      actions: [
+        { id: "allow", label: "Allow once" },
+        { id: "deny", label: "Deny" },
+      ],
+    });
+    if (block.kind !== "ask") throw new Error("expected ask block");
+    expect(block.detail?.split("\n")).toEqual([
+      "url: https://shop.example.test/checkout?token=[redacted]",
+      'click button "Pay [redacted]"',
+      'fill textbox "Email"',
+    ]);
+    expect(JSON.stringify(block)).not.toContain("fake-token");
+  });
+
+  it("keeps the raw-argument card when the browser has no description", () => {
+    const block = buildApprovalAskBlock(
+      "effect-1",
+      "browser_act",
+      { actions: [{ kind: "click", ref: "e2" }] },
+      [],
+    );
+    expect(block).toMatchObject({
+      kind: "ask",
+      text: "Review before browser_act",
+    });
+    if (block.kind !== "ask") throw new Error("expected ask block");
+    expect(block.detail).toContain("actions:");
+  });
+});
+
 describe("agent connection response cards", () => {
   it.each([true, false])("shows the captured requester and decision (accept: %s)", (accept) => {
     const block = buildApprovalAskBlock(

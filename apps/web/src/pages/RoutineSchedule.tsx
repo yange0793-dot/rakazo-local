@@ -5,6 +5,7 @@ import {
   clampIntervalAmount,
   cronFromPreset,
   cronIntervalAmounts,
+  isOneShotRoutineCron,
   localizedClock,
   russianIntervalUnit,
 } from "@rakazo/core";
@@ -44,6 +45,7 @@ export function RoutineSchedule({
   const { i18n, t } = useLingui();
   const times = TIMES.includes(value.time) ? TIMES : [...TIMES, value.time];
   const numbers = cronIntervalAmounts(value.unit, value.n);
+  const oneTime = value.freq === "Advanced" && isOneShotRoutineCron(value.cron);
 
   function patch(partial: Partial<CronPreset>) {
     onChange({ ...value, ...partial });
@@ -117,17 +119,22 @@ export function RoutineSchedule({
       <div className="mt-2.5 flex flex-wrap items-center gap-2 text-body text-muted-foreground">
         <NativeSelect
           size="sm"
-          value={value.freq}
+          value={oneTime ? "once" : value.freq}
           aria-label={t`How often`}
           onChange={(event) => {
+            if (event.target.value === "once") {
+              patch({ freq: "Advanced", cron: "@once" });
+              return;
+            }
             const freq = event.target.value as CronFreq;
             if (freq === "Advanced") {
-              patch({ freq, cron: cronFromPreset(value) });
+              patch({ freq, cron: oneTime ? "0 9 * * *" : cronFromPreset(value) });
               return;
             }
             patch({ freq });
           }}
         >
+          <NativeSelectOption value="once">{t`One-time`}</NativeSelectOption>
           {CRON_FREQS.map((freq) => (
             <NativeSelectOption key={freq} value={freq}>
               {cronFreqLabel(freq)}
@@ -146,7 +153,7 @@ export function RoutineSchedule({
           )
         ) : null}
         {TIMED.includes(value.freq) ? <Trans>at {timeSelect}</Trans> : null}
-        {value.freq === "Advanced" ? (
+        {value.freq === "Advanced" && !oneTime ? (
           <Input
             value={value.cron}
             placeholder="*/3 * * * *"

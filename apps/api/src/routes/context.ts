@@ -380,7 +380,14 @@ export function createRouterContext(deps: RouterDeps) {
           choice.modelId,
           resolution,
         );
-        if (allowed && !allowed.includes(choice.thinkingLevel))
+        // A unified-effort build offers the whole six-stop scale for every model; a
+        // protocol whose budget tops out lower clamps the level when the run starts.
+        if (
+          allowed &&
+          !allowed.includes(choice.thinkingLevel) &&
+          choice.thinkingLevel !== "xhigh" &&
+          choice.thinkingLevel !== "max"
+        )
           throw new ORPCError("BAD_REQUEST", {
             message: `Thinking level must be one of: ${allowed.join(", ")}`,
           });

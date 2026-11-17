@@ -17,6 +17,7 @@ import {
   HISTORY_WINDOW_SIZE,
   historyWindowSize,
   MAX_COMPACTED_SUMMARY_CHARS,
+  MAX_RECALLED_MEMORY_BYTES,
   MAX_SUMMARIZE_PROMPT_CHARS,
   MAX_TRANSCRIPT_CHARS,
   nextCompactionBatchRange,
@@ -208,11 +209,22 @@ describe("formatRecalledMemory", () => {
     expect(block).toContain("</recalled_memory>");
   });
 
-  it("caps injected results at 5", () => {
-    const results = Array.from({ length: 8 }, (_, i) => ({ memory: `fact ${i}` }));
+  it("includes useful facts beyond the former five-result cap and reports the selection", () => {
+    const results = Array.from({ length: 25 }, (_, i) => ({ memory: `fact ${i}.` }));
     const block = formatRecalledMemory(results);
-    expect(block).toContain("fact 4");
-    expect(block).not.toContain("fact 5");
+    expect(block).toContain("fact 19.");
+    expect(block).not.toContain("fact 20.");
+    expect(block).toContain("Showing 20 of 25 recalled facts; 5 omitted");
+  });
+
+  it("does not let repeated citations consume the budget for different facts", () => {
+    const block = formatRecalledMemory([
+      ...Array.from({ length: 20 }, () => ({ memory: "Repeated", id: "same", revision: 1 })),
+      { memory: "Different useful fact", id: "other", revision: 1 },
+    ]);
+    expect(block.match(/- Repeated/g)).toHaveLength(1);
+    expect(block).toContain("Different useful fact");
+    expect(block).toContain("Showing 2 of 21");
   });
 
   it("keeps recalled text from closing its data boundary", () => {
@@ -226,6 +238,61 @@ describe("formatRecalledMemory", () => {
 
   it("returns an empty string for no results", () => {
     expect(formatRecalledMemory([])).toBe("");
+  });
+
+  it("keeps whole citations including revisions inside the UTF-8 budget", () => {
+    const block = formatRecalledMemory([
+      { memory: "中🚲&<".repeat(3_000), id: "oversized", revision: 1 },
+      {
+        memory: "Use the preview build.",
+        id: "fact-2",
+        provenance: "thread-1/message-2",
+        entity: "isolated:bot-1",
+        revision: 3,
+      },
+    ]);
+    expect(Buffer.byteLength(block, "utf8")).toBeLessThanOrEqual(MAX_RECALLED_MEMORY_BYTES);
+    expect(block).not.toContain("oversized");
+    expect(block).toContain("Use the preview build.");
+    expect(block).toContain("id: fact-2");
+    expect(block).toContain("revision: 3");
+    expect(block).toContain("provenance: thread-1/message-2");
+    expect(block.endsWith("</recalled_memory>")).toBe(true);
+  });
+
+  it("charges escaping and secret redaction against the aggregate byte limit", () => {
+    const block = formatRecalledMemory(
+      Array.from({ length: 5 }, (_, index) => ({
+        memory: `A${"&<中🚲".repeat(170)}Z <secret>`,
+        id: `fact-${index}`,
+        provenance: "<secret>/message-1",
+        revision: index + 1,
+      })),
+      ["<secret>"],
+    );
+    expect(Buffer.byteLength(block, "utf8")).toBeLessThanOrEqual(MAX_RECALLED_MEMORY_BYTES);
+    expect(block).not.toContain("secret");
+    expect(block).toContain("[redacted]");
+    expect(block).toContain("&amp;&lt;");
+    expect(block.match(/id: fact-/g)?.length).toBeLessThan(5);
+    expect(block.match(/<\/recalled_memory>/g)).toHaveLength(1);
+  });
+
+  it("returns no block if a fact or its citation cannot fit intact", () => {
+    expect(formatRecalledMemory([{ memory: "x".repeat(MAX_RECALLED_MEMORY_BYTES) }])).toBe("");
+    expect(
+      formatRecalledMemory([{ memory: "Small fact", id: "x".repeat(MAX_RECALLED_MEMORY_BYTES) }]),
+    ).toBe("");
+  });
+
+  it("redacts before escaping angle brackets in both facts and citations", () => {
+    const block = formatRecalledMemory(
+      [{ memory: "key <fake-token> then </recalled_memory>", id: "<fake-token>", revision: 4 }],
+      ["<fake-token>"],
+    );
+    expect(block).not.toContain("fake-token");
+    expect(block).toContain("id: [redacted]; revision: 4");
+    expect(block).toContain("&lt;/recalled_memory&gt;");
   });
 
   it("preserves Serenity citations alongside the fact text", () => {
@@ -563,7 +630,7 @@ describe("compactHistory", () => {
         content: "Summary of 50 messages.",
         scope: "isolated",
         botId: "bot-1",
-        source: { kind: "history", generation: 0 },
+        source: { kind: "history", generation: 0, threadId: "thread-1" },
       },
       expect.objectContaining({ spaceId: "workspace-1", botId: "bot-1" }),
     );
@@ -602,7 +669,7 @@ describe("compactHistory", () => {
       expect.objectContaining({
         content: "Summary of 50 messages.",
         scope: "isolated",
-        source: { kind: "history", generation: 0 },
+        source: { kind: "history", generation: 0, threadId: "thread-1" },
       }),
       expect.any(Object),
     );
@@ -809,7 +876,7 @@ describe("compactHistory", () => {
     expect(harness.saveMemory).toHaveBeenCalledWith(
       expect.objectContaining({
         content: "Summary of 50 messages.",
-        source: { kind: "history", generation: 1 },
+        source: { kind: "history", generation: 1, threadId: "thread-1" },
       }),
       expect.any(Object),
     );
@@ -951,12 +1018,12 @@ describe("compactHistory", () => {
     expect(harness.saveMemory).toHaveBeenCalledWith(
       expect.objectContaining({
         content: "Summary of 50 messages.",
-        source: { kind: "history", generation: 0 },
+        source: { kind: "history", generation: 0, threadId: "thread-1" },
       }),
       expect.any(Object),
     );
     expect(harness.purgeHistory).toHaveBeenCalledWith(
-      { botId: "bot-1", generations: [0] },
+      { botId: "bot-1", threadId: "thread-1", generations: [0] },
       expect.any(Object),
     );
   });

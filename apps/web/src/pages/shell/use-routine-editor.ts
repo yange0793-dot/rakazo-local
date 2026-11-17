@@ -1,12 +1,13 @@
 import { useLingui } from "@lingui/react/macro";
 import type { Bot, Routine, ThinkingLevel, ThreadSnapshot } from "@rakazo/contracts";
 import { isIdentityConfirmationRequired } from "@rakazo/contracts";
-import { cronFromPreset } from "@rakazo/core";
+import { cronFromPreset, isOneShotRoutineCrons, zonedDateTime } from "@rakazo/core";
 import type { ComponentProps, Dispatch, RefObject, SetStateAction } from "react";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { REVEAL_MS } from "../../components/vault/VaultItemDetail";
 import { localTimezone } from "../../lib/local-timezone";
 import { parseModelOptionKey } from "../../lib/model-catalog";
+import { queryClient, useSpaceQueries } from "../../lib/query";
 import type { Panel } from "../../lib/right-panel-state";
 import type { RoutineDraftState } from "../../lib/routine-draft";
 import {
@@ -40,10 +41,34 @@ export function useRoutineEditor({
   setPanel: (panel: Panel) => void;
 }) {
   const { t } = useLingui();
+  const queries = useSpaceQueries();
   const [routineDraft, setRoutineDraft] = useState<RoutineDraftState>(emptyRoutineDraftState());
   const [revealedWebhookSecrets, setRevealedWebhookSecrets] = useState<Record<string, string>>({});
   const routineWebhookSecret = (active && revealedWebhookSecrets[active.id]) || null;
   const [editingRoutine, setEditingRoutine] = useState<Routine | null>(null);
+  const syncSchedule = useCallback(
+    (latest: Routine) => {
+      if (
+        !editingRoutine ||
+        latest.id !== editingRoutine.id ||
+        (latest.active === editingRoutine.active &&
+          latest.nextRunAt === editingRoutine.nextRunAt &&
+          latest.lastRunAt === editingRoutine.lastRunAt)
+      ) {
+        return;
+      }
+      setRoutineDraft((current) =>
+        current.active === editingRoutine.active ? { ...current, active: latest.active } : current,
+      );
+      setEditingRoutine({
+        ...editingRoutine,
+        active: latest.active,
+        nextRunAt: latest.nextRunAt,
+        lastRunAt: latest.lastRunAt,
+      });
+    },
+    [editingRoutine],
+  );
   const [deleteRoutineTarget, setDeleteRoutineTarget] = useState<Routine | null>(null);
   const [savingRoutine, setSavingRoutine] = useState(false);
   const [runningRoutine, setRunningRoutine] = useState(false);
@@ -135,6 +160,7 @@ export function useRoutineEditor({
         bot: { id: active.id, name: active.name },
         draft: routineDraft,
         onChange: setRoutineDraft,
+        onScheduleUpdate: syncSchedule,
         editing: editingRoutine,
         timezone: editingRoutine?.timezone ?? timezone ?? localTimezone(),
         webhook: {
@@ -240,22 +266,29 @@ export function useRoutineEditor({
                 ? routineDraft.thinkingLevel
                 : null) as ThinkingLevel | null,
             };
+            const armOneShot =
+              routineDraft.active &&
+              (targetRoutine
+                ? routineNeedsOneShotArm(targetRoutine, crons)
+                : isOneShotRoutineCrons(crons));
+            let runAt: string | undefined;
+            if (armOneShot) {
+              if (!routineDraft.runAtLocal) {
+                setRoutineError(t`Add a run time for this one-shot.`);
+                return;
+              }
+              const parsed = zonedDateTime(
+                routineDraft.runAtLocal,
+                targetRoutine?.timezone ?? timezone ?? localTimezone(),
+              );
+              if (!parsed || parsed.getTime() <= Date.now()) {
+                setRoutineError(t`Run time must be in the future.`);
+                return;
+              }
+              runAt = parsed.toISOString();
+            }
             let saved: Routine;
             if (targetRoutine) {
-              const armOneShot = routineNeedsOneShotArm(targetRoutine, crons);
-              let runAt: string | undefined;
-              if (armOneShot) {
-                if (!routineDraft.runAtLocal) {
-                  setRoutineError(t`Add a run time for this one-shot.`);
-                  return;
-                }
-                const parsed = new Date(routineDraft.runAtLocal);
-                if (!Number.isFinite(parsed.getTime()) || parsed.getTime() <= Date.now()) {
-                  setRoutineError(t`Run time must be in the future.`);
-                  return;
-                }
-                runAt = parsed.toISOString();
-              }
               saved = await rpc.routines.update({
                 routineId: targetRoutine.id,
                 name: routineDraft.name || t`Routine`,
@@ -285,6 +318,7 @@ export function useRoutineEditor({
                 prompt: routineDraft.prompt || t`Check in.`,
                 crons,
                 timezone: timezone ?? localTimezone(),
+                ...(runAt ? { runAt } : {}),
                 active: routineDraft.active,
                 notify: true,
                 webhookEnabled: routineDraft.webhookEnabled,
@@ -296,6 +330,10 @@ export function useRoutineEditor({
               });
             }
             if (routineSaveRequest.current === saveRequest && activeBotId.current === targetBotId) {
+              queryClient.setQueryData(
+                queries.routines.list.queryKey({ input: { botId: targetBotId } }),
+                (current) => current?.map((routine) => (routine.id === saved.id ? saved : routine)),
+              );
               setEditingRoutine(saved);
               // Fields edited while the save was in flight keep the newer value.
               const fresh = draftStateFromRoutine(saved);

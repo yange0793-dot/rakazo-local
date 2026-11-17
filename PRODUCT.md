@@ -9,7 +9,7 @@ Update the relevant section when a product decision changes; Git history preserv
 
 The recorded decisions below carry forward the existing product requirements from VISION.md without a new implementation audit.
 They define expected behavior, not proof that every path already conforms.
-The subagent section separately records the intended change agreed during review of [PR #3101](https://github.com/elie222/rakazo/pull/3101); it is not a claim that the change has shipped.
+The subagent section carries the intended behavior agreed during review of [PR #3101](https://github.com/elie222/rakazo/pull/3101). Implementation notes describe the current working tree, not a released version.
 Keep implementation gaps explicit when adding a capability, and keep technical plans and verification evidence in the relevant PR or technical documentation.
 
 ## Conversation
@@ -24,7 +24,7 @@ Activity replaces the whole regular list, including pinned chats and the archive
 
 ## Subagents
 
-Status: intended behavior; implementation remains to be aligned.
+Status: background execution and parent-chat approvals are implemented in the working tree; remaining capability boundaries are noted below.
 
 A subagent is delegated work for the parent bot, not a separately configured bot or a second user-facing conversation.
 Subagents run independently while the parent remains available to respond to new messages and handle new requests.
@@ -39,8 +39,9 @@ The parent accounts for changed instructions and cancellation before acting on a
 
 For example, a bot comparing three options can delegate their research, answer a new question while that research continues, and give its recommendation once the needed results arrive.
 
-Implementation gap: the existing in-turn subagent call waits for its result before the parent continues.
-PR #3101 proposes optional background execution with read-only helpers; that proposal does not yet provide the single behavior and action capabilities defined here.
+Implementation: delegated work runs in a separate background run. Required action approvals appear in the originating chat, identify the helper and resume only that helper when its initiating user answers. Waiting releases the computer lease and does not block new conversation. Connector actions follow the user's rules and approval mode; an automatic reviewer cannot treat a helper's own task brief as user authorization for a write. Page-browser tools use the same computer lease and approval checks as the parent.
+
+Helpers still do not speak directly to the user, change memory, skills or routines, or use protected-input, payment or user-desktop tools. Their results return to the parent for those decisions. A native page-browser action still requires one-time approval in every mode, and a lost snapshot binding requires fresh observation rather than replaying an old action.
 
 ## Computers
 

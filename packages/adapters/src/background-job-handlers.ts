@@ -1,4 +1,5 @@
 import type {
+  AdapterContext,
   AgentHomeStore,
   AgentRuntime,
   ArtifactStore,
@@ -37,6 +38,7 @@ import {
   mirrorMessagingProgress,
 } from "./messaging-delivery.js";
 import { pollPurchase } from "./purchase-poll.js";
+import { syncSemanticMemorySpace } from "./semantic-memory-sync.js";
 import { expireTaughtSkillTeaching } from "./teaching-session.js";
 
 type Tenant = { spaceId: string; userId: string };
@@ -74,6 +76,10 @@ export function createBackgroundJobHandlers(deps: {
   runtime: AgentRuntime;
   secretStore: SecretStore;
   memoryProviders: MemoryProviderResolver;
+  archiveConversationMemory?: (
+    input: { threadId: string; botId: string; userId: string },
+    context: AdapterContext,
+  ) => Promise<void>;
   deploymentModelKey?: string;
   deploymentModelConfigured?: boolean;
   messaging?: MessagingSurface;
@@ -241,6 +247,27 @@ export function createBackgroundJobHandlers(deps: {
     "push.receipt": async (payload) => {
       await runAsSystem("check a push receipt", () => deps.notifications?.checkReceipt(payload));
     },
+    "memory.sync": async ({ spaceId }) => {
+      await syncSemanticMemorySpace(deps, spaceId);
+    },
+    "memory.extract": asOwner(thread, async (payload) => {
+      if (!deps.archiveConversationMemory) {
+        throw new Error("Automatic memory extraction is not configured.");
+      }
+      const source = await deps.prisma.thread.findUnique({
+        where: { id: payload.threadId },
+        select: { spaceId: true, userId: true, botId: true },
+      });
+      if (!source || source.botId !== payload.botId || source.userId !== payload.userId) return;
+      await deps.archiveConversationMemory(payload, {
+        operationId: `memory.extract:${payload.threadId}`,
+        traceId: `memory.extract:${payload.threadId}`,
+        spaceId: source.spaceId,
+        userId: source.userId,
+        botId: payload.botId,
+        signal: AbortSignal.timeout(8 * 60_000),
+      });
+    }),
     "history.compact": asOwner(thread, async (payload) => {
       // Retrieval policies use stored context without paid message-count compaction.
       // Skip legacy backlog work after a policy change.

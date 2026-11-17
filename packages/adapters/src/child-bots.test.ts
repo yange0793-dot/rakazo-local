@@ -281,6 +281,40 @@ describe("spawned bot archival", () => {
 });
 
 describe("destroyBot", () => {
+  it("refuses destructive teardown when bot-scoped semantic retirement fails", async () => {
+    const retireScope = vi.fn().mockRejectedValue(new Error("Semantic retirement unavailable"));
+    const removeForBot = vi.fn();
+    const findComputer = vi.fn();
+    const transaction = vi.fn();
+
+    await expect(
+      destroyBot(
+        {
+          prisma: {
+            computer: { findUnique: findComputer },
+            $transaction: transaction,
+          } as unknown as PrismaClient,
+          sandbox: {} as SandboxProvider,
+          home: {} as AgentHomeStore,
+          jobs: {} as JobPublisher,
+          messagingInstallations: { removeForBot },
+          semanticFacts: { retireScope },
+        },
+        { id: "bot-1", spaceId: "workspace-1", userId: "user-1", name: "Gone", archivedAt: null },
+        { ...context, spaceId: "other-space" },
+        { deleteMemories: false },
+      ),
+    ).rejects.toThrow("Semantic retirement unavailable");
+
+    expect(retireScope).toHaveBeenCalledWith(
+      { spaceId: "workspace-1", botId: "bot-1" },
+      expect.objectContaining({ spaceId: "workspace-1", botId: "bot-1", userId: "user-1" }),
+    );
+    expect(removeForBot).not.toHaveBeenCalled();
+    expect(findComputer).not.toHaveBeenCalled();
+    expect(transaction).not.toHaveBeenCalled();
+  });
+
   it("removes its deleted pages' link tokens from the secret store once the delete commits", async () => {
     const order: string[] = [];
     const transaction = vi.fn(async (callback: (tx: unknown) => Promise<unknown>) => {
@@ -345,6 +379,7 @@ describe("destroyBot", () => {
   });
 
   it("moves bot memories into shared memory before the cascading delete", async () => {
+    const retireScope = vi.fn().mockResolvedValue(undefined);
     const createDeletion = vi.fn().mockResolvedValue({});
     const deleteBot = vi.fn().mockResolvedValue({});
     const executeRaw = vi.fn().mockResolvedValue(1);
@@ -395,6 +430,7 @@ describe("destroyBot", () => {
         home: {} as AgentHomeStore,
         jobs: { cancel: vi.fn() } as unknown as JobPublisher,
         artifacts: { remove: removeArtifact } as unknown as ArtifactStore,
+        semanticFacts: { retireScope },
       },
       {
         id: "bot-1",
@@ -407,6 +443,13 @@ describe("destroyBot", () => {
       { deleteMemories: false },
     );
 
+    expect(retireScope).toHaveBeenCalledWith(
+      { spaceId: "workspace-1", botId: "bot-1" },
+      expect.objectContaining({ spaceId: "workspace-1", botId: "bot-1" }),
+    );
+    expect(retireScope.mock.invocationCallOrder[0]).toBeLessThan(
+      transaction.mock.invocationCallOrder[0]!,
+    );
     expect(transaction).toHaveBeenCalledOnce();
     expect(releaseComputers).toHaveBeenCalledWith({
       where: {

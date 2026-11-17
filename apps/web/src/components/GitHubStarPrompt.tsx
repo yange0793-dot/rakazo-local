@@ -34,8 +34,10 @@ export function recordMessageSent(): void {
     id: TOAST_ID,
     // The default bottom-right corner covers the composer.
     position: "top-right",
-    duration: Number.POSITIVE_INFINITY,
+    duration: 8_000,
+    style: { pointerEvents: "none" },
     onDismiss: dismiss,
+    onAutoClose: dismiss,
   });
 }
 
@@ -60,11 +62,11 @@ function GitHubStarPrompt() {
         <Trans>Enjoying Rakazo?</Trans>
       </p>
       <div className="mt-3 flex items-center justify-end gap-2">
-        <Button variant="ghost" onClick={close}>
+        <Button variant="ghost" className="pointer-events-auto" onClick={close}>
           <Trans>Not now</Trans>
         </Button>
         <a
-          className={buttonVariants()}
+          className={buttonVariants({ className: "pointer-events-auto" })}
           href={REPOSITORY_URL}
           target="_blank"
           rel="noreferrer"

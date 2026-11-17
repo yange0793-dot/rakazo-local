@@ -598,7 +598,10 @@ describe("thread cards", () => {
     expect(styleOf(card).width).toBeUndefined();
   });
 
-  it("labels a running helper", () => {
+  it.each([
+    ["running", "Running"],
+    ["waiting", "Waiting"],
+  ] as const)("labels a %s helper", (status, label) => {
     const message = {
       id: "running-message",
       role: "bot",
@@ -608,16 +611,20 @@ describe("thread cards", () => {
           agentId: "running-helper",
           name: "writer",
           task: longQuestion,
-          status: "running",
+          status,
         },
       ],
     } as MobileMessage;
     act(() => root.render(<Bubble botId="bot-1" bots={[]} message={message} actionProps={{}} />));
-    expect(container.textContent).toContain("Running");
+    expect(container.textContent).toContain(label);
   });
 
-  it("stops a background helper from its saved card, and shows it as stopped", () => {
-    const helper = (id: string, status: "running" | "failed", result?: string) =>
+  it("stops a background helper from its saved card while it runs or waits", () => {
+    const helper = (
+      id: string,
+      status: "running" | "waiting" | "completed" | "failed",
+      result?: string,
+    ) =>
       ({
         id,
         role: "bot",
@@ -628,18 +635,50 @@ describe("thread cards", () => {
       [...container.querySelectorAll("button")].find((node) => node.textContent === "Stop");
     const show = (message: MobileMessage) =>
       act(() => root.render(<Bubble botId="bot-1" bots={[]} message={message} actionProps={{}} />));
-    show(helper("subagent:live", "running"));
+    show(helper("subagent:live", "waiting"));
     expect(stopButton()).toBeUndefined();
-    show(helper("card-1", "running"));
+    show(helper("card-1", "waiting"));
+    expect(container.textContent).toContain("Waiting");
     act(() => stopButton()?.click());
     expect(rpc).toHaveBeenCalledExactlyOnceWith("threads/stopHelper", {
       botId: "bot-1",
       messageId: "card-1",
     });
+    show(helper("card-1", "running"));
+    expect(container.textContent).toContain("Running");
+    expect(stopButton()).not.toBeUndefined();
+    show(helper("card-1", "completed"));
+    expect(container.textContent).toContain("Completed");
+    expect(stopButton()).toBeUndefined();
     show(helper("card-1", "failed", "stopped"));
     expect(container.textContent).toContain("Stopped");
     expect(container.textContent).not.toContain("Failed");
     expect(stopButton()).toBeUndefined();
+  });
+
+  it("stops a group helper using the group that owns its card", () => {
+    const message = {
+      id: "group-helper-card",
+      role: "bot",
+      botId: "bot-1",
+      blocks: [
+        { kind: "subagent", agentId: "helper-1", name: "Scout", task: "venues", status: "running" },
+      ],
+    } as MobileMessage;
+    act(() =>
+      root.render(
+        <Bubble botId="bot-1" groupId="group-1" bots={[]} message={message} actionProps={{}} />,
+      ),
+    );
+    act(() =>
+      [...container.querySelectorAll("button")]
+        .find((node) => node.textContent === "Stop")
+        ?.click(),
+    );
+    expect(rpc).toHaveBeenCalledExactlyOnceWith("threads/stopHelper", {
+      groupId: "group-1",
+      messageId: "group-helper-card",
+    });
   });
 
   it("folds a helper card to one line of the task until it is pressed, across its saved message", () => {

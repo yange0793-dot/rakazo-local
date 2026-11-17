@@ -84,6 +84,8 @@ export async function messageBot(
     message: string;
     intent?: BotMessageIntent;
     deliveryKey?: string;
+    /** A message in the recipient's chat this one answers, so it arrives as a reply. */
+    replyToId?: string;
     /** Attachments filed under the recipient's chat, shown there and copied to its computer. */
     files?: Array<Extract<MessageBlock, { kind: "image" | "file" }>>;
   },
@@ -131,11 +133,13 @@ export async function messageBot(
   // A tool call can be re-executed after a lease expiry, so a delivery has to be
   // replayable: without this the recipient is messaged twice and woken twice.
   const deliveryKey = input.deliveryKey ? `bot-message:${input.deliveryKey}` : undefined;
-  const replayed = () =>
+  const replayed = (messageId: string) =>
     ({
       ok: true as const,
+      status: "duplicate" as const,
       botId: target.id,
       name: target.name,
+      messageId,
       delivered: message,
       replayed: true as const,
       note: `Already sent to ${target.name} in this turn; it was not sent again.`,
@@ -154,6 +158,7 @@ export async function messageBot(
   let committed:
     | {
         ok: true;
+        messageId: string;
         runId: string;
         targetEventSeq: number;
         senderEventSeq: number;
@@ -165,6 +170,7 @@ export async function messageBot(
     | {
         ok: true;
         replayed: true;
+        messageId: string;
       };
   try {
     committed = await withTransactionRetry(() =>
@@ -181,7 +187,7 @@ export async function messageBot(
             where: { threadId_clientNonce: { threadId: targetThreadId, clientNonce: deliveryKey } },
             select: { id: true },
           });
-          if (already) return { ok: true as const, replayed: true as const };
+          if (already) return { ok: true as const, replayed: true as const, messageId: already.id };
         }
 
         const senderStillRunning = await tx.run.findFirst({
@@ -213,6 +219,20 @@ export async function messageBot(
         if (!stillAddressable)
           return { ok: false as const, error: `${target.name} is no longer available` };
 
+        // An explicit reply must point at something the recipient can see in its own chat.
+        // Validate before the sender echo is written; returning from this callback commits.
+        const explicitReplyTo = input.replyToId
+          ? await tx.message.findFirst({
+              where: { id: input.replyToId, threadId: targetThreadId },
+              select: { id: true },
+            })
+          : undefined;
+        if (input.replyToId && !explicitReplyTo)
+          return {
+            ok: false as const,
+            error: `reply_to_message_id does not name a message in ${target.name}'s chat`,
+          };
+
         // Echo into the sender's chat in the same transaction so a failed notify
         // cannot leave one side delivered and the other blank.
         const outbound = await createThreadMessageInTransaction(tx, {
@@ -239,9 +259,10 @@ export async function messageBot(
           role: "user",
           blocks: [inboundBlock, ...files],
           replyToMessageId:
-            sourceContext?.fromBotId === target.id && intent !== "fyi"
+            explicitReplyTo?.id ??
+            (sourceContext?.fromBotId === target.id && intent !== "fyi"
               ? sourceContext.returnToMessageId
-              : undefined,
+              : undefined),
           clientNonce: deliveryKey,
           markUnread: options?.forceUnread === true,
         });
@@ -251,7 +272,9 @@ export async function messageBot(
             botId: target.id,
             threadId: targetThreadId,
             userId: run.userId,
-            prompt: wakePrompt,
+            // The reply tool addresses the original sender's chat, so use the echo there,
+            // not the delivery message in the recipient's own chat.
+            prompt: `${wakePrompt}\n\nTo answer this sender directly, pass reply_to_message_id "${outbound.id}".`,
             status: "queued",
           },
         });
@@ -289,6 +312,7 @@ export async function messageBot(
         });
         return {
           ok: true as const,
+          messageId: inbound.id,
           runId: nextRun.id,
           targetEventSeq: inboundEvent.seq,
           senderEventSeq: outboundEvent.seq,
@@ -303,11 +327,11 @@ export async function messageBot(
         where: { threadId_clientNonce: { threadId: targetThreadId, clientNonce: deliveryKey } },
         select: { id: true },
       });
-      if (winner) return replayed();
+      if (winner) return replayed(winner.id);
     }
     throw error;
   }
-  if ("replayed" in committed) return replayed();
+  if ("replayed" in committed) return replayed(committed.messageId);
   if (!committed.ok) return committed;
 
   await deps.events.notify(targetThreadId, committed.targetEventSeq).catch((error) => {
@@ -322,8 +346,11 @@ export async function messageBot(
   });
   return {
     ok: true as const,
+    status: "delivered" as const,
     botId: target.id,
     name: target.name,
+    messageId: committed.messageId,
+    runId: committed.runId,
     delivered: message,
     note: `Sent to ${target.name}. Delivery is async; a reply wakes you later as a new message. Continue independent work; send another update later only if it adds something new.`,
   };

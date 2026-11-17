@@ -16,6 +16,7 @@ import {
   completedRunBlocks,
   finalizeRun,
   sendUserMessage,
+  ThreadClearConflictError,
 } from "./events.js";
 import { endTakeoverWaits } from "./expire-stuck-run.js";
 import { partialReplyClientNonce, RunHistoryWriteError } from "./messages.js";
@@ -545,6 +546,7 @@ describe("thread lock transaction budget", () => {
       },
       thread: {
         updateMany: vi.fn().mockResolvedValue({ count: 0 }),
+        findMany: vi.fn().mockResolvedValue([]),
         update: vi
           .fn()
           .mockResolvedValueOnce({
@@ -3572,6 +3574,7 @@ describe("answerRunInput approvals", () => {
             botId: "bot-1",
             userId: options.ownerId ?? "user-1",
             trigger: options.trigger ?? "message",
+            threadId: "thread-1",
             task: { prompt: "Sign in to the example site" },
           }),
           findUnique: vi.fn().mockResolvedValue({ status: "queued" }),
@@ -5226,6 +5229,31 @@ describe("claimSteering", () => {
 });
 
 describe("clearThread", () => {
+  it.each([
+    { expectedGeneration: 2, expectedNextMessageSeq: 42 },
+    { expectedGeneration: 1, expectedNextMessageSeq: 41 },
+  ])("keeps messages when the pre-archive source fence changed: %j", async (expected) => {
+    const removeMessages = vi.fn();
+    const tx = {
+      thread: {
+        update: vi.fn(async () => ({ nextMessageSeq: 42, historyCompactionGeneration: 1 })),
+      },
+      message: { deleteMany: removeMessages },
+    };
+    const prisma = {
+      $transaction: vi.fn(async (fn: (client: typeof tx) => unknown) => fn(tx)),
+    } as unknown as PrismaClient;
+    await expect(
+      clearThread(prisma, {
+        spaceId: "workspace-1",
+        threadId: "thread-1",
+        botId: "bot-1",
+        ...expected,
+      }),
+    ).rejects.toBeInstanceOf(ThreadClearConflictError);
+    expect(removeMessages).not.toHaveBeenCalled();
+  });
+
   it("reports a committed clear even when the legacy binding sweep fails", async () => {
     const tx = {
       $queryRaw: vi.fn(async () => []),
@@ -5237,6 +5265,7 @@ describe("clearThread", () => {
       externalEffect: { deleteMany: vi.fn(async () => ({ count: 0 })) },
       thread: {
         updateMany: vi.fn().mockResolvedValue({ count: 0 }),
+        findMany: vi.fn().mockResolvedValue([]),
         update: vi
           .fn()
           .mockResolvedValueOnce({ nextMessageSeq: 3, historyCompactionGeneration: 0 })
@@ -5292,6 +5321,7 @@ describe("clearThread", () => {
       externalEffect: { deleteMany: vi.fn(async () => ({ count: 0 })) },
       thread: {
         updateMany: vi.fn().mockResolvedValue({ count: 0 }),
+        findMany: vi.fn().mockResolvedValue([]),
         update: vi
           .fn()
           .mockResolvedValueOnce({ nextMessageSeq: 42, historyCompactionGeneration: 0 })
@@ -5388,6 +5418,7 @@ describe("clearThread", () => {
       $queryRaw: vi.fn(async () => [{ id: "group-1" }]),
       externalEffect: { deleteMany: vi.fn(async () => ({ count: 0 })) },
       thread: {
+        findMany: vi.fn().mockResolvedValue([]),
         update: vi
           .fn()
           .mockResolvedValueOnce({ nextMessageSeq: 3, historyCompactionGeneration: 0 })
@@ -5438,8 +5469,15 @@ describe("clearThread", () => {
     expect(tx.run.findMany).toHaveBeenCalledWith(
       expect.objectContaining({
         where: expect.objectContaining({
-          threadId: "thread-group",
           spaceId: "workspace-1",
+          OR: [
+            { threadId: "thread-group" },
+            // A group clear also ends the background helpers the group started.
+            {
+              trigger: "helper",
+              sourceMessage: { threadId: "thread-group" },
+            },
+          ],
         }),
       }),
     );

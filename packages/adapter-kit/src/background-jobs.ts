@@ -27,6 +27,15 @@ const payloadSchemas = {
     threadId: z.string().min(1),
     userId: z.string().min(1).optional(),
   }),
+  "memory.sync": z.object({ spaceId: z.string().min(1) }),
+  "memory.extract": z
+    .object({
+      threadId: z.string().min(1),
+      botId: z.string().min(1),
+      userId: z.string().min(1),
+    })
+    .strict(),
+  "harness.reflect": z.object({ runId: z.string().min(1) }).strict(),
   "messaging.deliver": z.object({ runId: z.string().min(1).optional() }),
   "messaging.progress": z.object({ runId: z.string().min(1) }),
   "messaging.credential-cleanup": z.object({
@@ -71,6 +80,46 @@ export function runJobKey(runId: string): string {
 
 export function routineJobKey(routineId: string): string {
   return `routine:${routineId}`;
+}
+
+/** One durable outbox drain per space, without putting memory bodies in the queue. */
+export function semanticMemorySyncJob(spaceId: string): BackgroundJob {
+  return {
+    name: "memory.sync",
+    payload: { spaceId },
+    replaceKey: `memory.sync:${spaceId}`,
+    keepExisting: true,
+    maxAttempts: 8,
+  };
+}
+
+/** Debounce one owner's direct conversation without storing transcript text in the queue. */
+export function automaticMemoryJob(
+  threadId: string,
+  botId: string,
+  userId: string,
+  availableAt: Date,
+): BackgroundJob {
+  return {
+    name: "memory.extract",
+    payload: { threadId, botId, userId },
+    availableAt,
+    replaceKey: `memory.extract:${threadId}:${botId}:${userId}`,
+    maxAttempts: 3,
+  };
+}
+
+/**
+ * One reflection over a finished run. It drafts a skill card for the user to review, so a
+ * repeated request for the same run collapses into the queued job instead of a second draft.
+ */
+export function reflectRunJob(runId: string): BackgroundJob {
+  return {
+    name: "harness.reflect",
+    payload: { runId },
+    replaceKey: `harness.reflect:${runId}`,
+    maxAttempts: 2,
+  };
 }
 
 export function computerSleepJobKey(computerId: string): string {

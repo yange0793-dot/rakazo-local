@@ -6,11 +6,11 @@ import type {
 } from "@rakazo/contracts";
 import {
   DEFAULT_MODEL_CONTEXT_WINDOW,
-  DEFAULT_MODEL_MAX_TOKENS,
   modelHeadersInput,
   modelRoutingForm,
   OPENAI_COMPATIBLE_PROVIDER_ID,
   openAiCompatibleProbeSuccessMessage,
+  savedCompatibleEndpointMatches,
 } from "@rakazo/contracts";
 import type { ConnectionFormFields } from "@rakazo/core";
 import {
@@ -62,7 +62,7 @@ export function useModelConnectionForm({
   const [headerRows, setHeaderRows] = useState<ModelHeaderRow[] | null>(null);
   const [reasoning, setReasoning] = useState(false);
   const [thinkingLevel, setThinkingLevel] = useState<ThinkingLevel | null>(null);
-  const [maxTokens, setMaxTokens] = useState(String(DEFAULT_MODEL_MAX_TOKENS));
+  const [maxTokens, setMaxTokens] = useState("");
   const [contextWindow, setContextWindow] = useState(String(DEFAULT_MODEL_CONTEXT_WINDOW));
   const [supportsImages, setSupportsImages] = useState(false);
   const [maxImagesPerPrompt, setMaxImagesPerPrompt] = useState("");
@@ -85,6 +85,17 @@ export function useModelConnectionForm({
   );
   const selected = modelsForProvider.find((entry) => entry.id === modelId) ?? modelsForProvider[0];
   const isOpenAiCompatible = provider === OPENAI_COMPATIBLE_PROVIDER_ID;
+  const savedEndpointMatches = savedCompatibleEndpointMatches(baseUrl, credential?.baseUrl);
+  const reasoningCapabilities =
+    savedEndpointMatches && apiProtocol === (credential?.apiProtocol ?? "chat-completions")
+      ? credential?.reasoningCapabilities
+      : undefined;
+  const compatibleEffortLevels =
+    selected?.id === modelId &&
+    savedEndpointMatches &&
+    apiProtocol === (credential?.apiProtocol ?? "chat-completions")
+      ? (selected.thinkingLevels ?? compatibleThinkingLevels(apiProtocol, reasoningCapabilities))
+      : compatibleThinkingLevels(apiProtocol, reasoningCapabilities);
   // The catalog names the IDs a provider needs besides its key.
   const { needsRouting, needsGateway, routingReady } = modelRoutingForm(selected?.routingFields, {
     accountId,
@@ -131,6 +142,11 @@ export function useModelConnectionForm({
     setHeaderRows(null);
     // A new endpoint starts with no ticks; the saved endpoint gets its saved list back.
     setEnabledModelIds(savedCompatibleModelIds(credential, nextBaseUrl));
+    stageCompatibleModelId(
+      savedCompatibleEndpointMatches(nextBaseUrl, credential?.baseUrl)
+        ? (credential?.modelId ?? "")
+        : "",
+    );
     resetOpenAiCompatibleProbe();
     invalidatePreflight();
     setError(null);
@@ -148,7 +164,15 @@ export function useModelConnectionForm({
     setThinkingLevel(
       clampCatalogThinkingLevel(
         thinkingLevel,
-        reasoning ? compatibleThinkingLevels(nextProtocol) : [],
+        reasoning
+          ? compatibleThinkingLevels(
+              nextProtocol,
+              savedEndpointMatches &&
+                nextProtocol === (credential?.apiProtocol ?? "chat-completions")
+                ? credential?.reasoningCapabilities
+                : undefined,
+            )
+          : [],
       ) as ThinkingLevel | null,
     );
     resetOpenAiCompatibleProbe();
@@ -160,7 +184,11 @@ export function useModelConnectionForm({
     setThinkingLevel(
       clampCatalogThinkingLevel(
         credential?.modelId === nextModelId ? credential.thinkingLevel : null,
-        reasoning ? compatibleThinkingLevels(apiProtocol) : [],
+        reasoning
+          ? ((savedEndpointMatches
+              ? modelsForProvider.find((entry) => entry.id === nextModelId)?.thinkingLevels
+              : undefined) ?? compatibleThinkingLevels(apiProtocol, reasoningCapabilities))
+          : [],
       ) as ThinkingLevel | null,
     );
   }
@@ -254,6 +282,7 @@ export function useModelConnectionForm({
     baseUrl,
     routingReady,
     contextWindow,
+    compatibleEffortLevels,
     enabledModelIds,
     error,
     gatewayId,

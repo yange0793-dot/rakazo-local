@@ -4,10 +4,14 @@ import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import type { ComponentProps, ReactNode } from "react";
 import { act } from "react";
 import { createRoot } from "react-dom/client";
-import { MemoryRouter } from "react-router-dom";
+import { MemoryRouter, Route, Routes } from "react-router-dom";
 import { beforeEach, expect, it, vi } from "vitest";
 
-const api = vi.hoisted(() => ({ listSpace: vi.fn() }));
+const api = vi.hoisted(() => ({
+  listSpace: vi.fn(),
+  listVersions: vi.fn(),
+  getById: vi.fn(),
+}));
 const rpcClient = vi.hoisted(() => ({ artifacts: api, bootstrap: vi.fn() }));
 vi.mock("../lib/rpc", () => ({
   rpc: rpcClient,
@@ -19,7 +23,7 @@ vi.mock("../lib/bootstrap", () => ({
   takeInitialBootstrap: vi.fn().mockResolvedValue({ bots: [] }),
 }));
 vi.mock("../lib/artifact-open", () => ({
-  decodeArtifactBase64: vi.fn(),
+  decodeArtifactBase64: () => new TextEncoder().encode("Preview contents"),
   downloadArtifactBytes: vi.fn(),
 }));
 vi.mock("../lib/relative-time", () => ({ formatRelativeTime: () => "just now" }));
@@ -109,15 +113,17 @@ beforeEach(() => {
   queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
 });
 
-async function renderArtifacts() {
+async function renderArtifacts(path = "/app/artifacts") {
   const container = document.createElement("div");
   document.body.append(container);
   const root = createRoot(container);
   await act(async () =>
     root.render(
       <QueryClientProvider client={queryClient}>
-        <MemoryRouter initialEntries={["/app/artifacts"]}>
-          <ArtifactsPage />
+        <MemoryRouter initialEntries={[path]}>
+          <Routes>
+            <Route path="/app/artifacts/:artifactId?" element={<ArtifactsPage />} />
+          </Routes>
         </MemoryRouter>
       </QueryClientProvider>,
     ),
@@ -145,6 +151,29 @@ it("opens the Artifacts screen and lists what listSpace returns", async () => {
     expect(page.container.textContent).toContain("Q3 Content Calendar");
     expect(page.container.querySelector("a[href='/app']")?.getAttribute("aria-label")).toBe("Back");
     expect(page.container.querySelector("[data-testid='app-rail']")).toBeNull();
+  } finally {
+    await page.cleanup();
+    vi.unstubAllGlobals();
+  }
+});
+
+it("returns from a file preview to the artifact list", async () => {
+  vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
+  const file = artifact("Report", "artifact-1");
+  api.listSpace.mockResolvedValue({ items: [file], nextCursor: null });
+  api.listVersions.mockResolvedValue([file]);
+  api.getById.mockResolvedValue({ ...file, contentBase64: "test" });
+  const page = await renderArtifacts("/app/artifacts/artifact-1");
+  try {
+    await act(async () => {
+      await vi.waitFor(() => expect(page.container.textContent).toContain("Preview contents"));
+    });
+    const back = page.container.querySelector<HTMLAnchorElement>('a[aria-label="Back"]');
+    expect(back?.getAttribute("href")).toBe("/app/artifacts");
+    await act(async () => back?.click());
+    expect(page.container.textContent).not.toContain("Preview contents");
+    expect(page.container.querySelector('a[href="/app/artifacts/artifact-1"]')).not.toBeNull();
+    expect(page.container.querySelector('a[aria-label="Back"]')?.getAttribute("href")).toBe("/app");
   } finally {
     await page.cleanup();
     vi.unstubAllGlobals();

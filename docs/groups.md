@@ -12,8 +12,9 @@ Each bot keeps its own memory, computer and instructions; the group only shares 
 
 ## Who answers
 
-- With no mention, the first bot in the group answers and can bring in the others.
-- **@Name** wakes that bot. Mention several to wake them all.
+- A message's new member turns answer one at a time, in order, and each reads the replies before it. A member already working takes the message as steering.
+- **@Name** wakes that bot. Mention several to wake them in that order.
+- With no mention, every bot is asked in group order; one with nothing to add may pass.
 - **@everyone** wakes every bot in the group.
 
 To rename the group or change who is in it, open **Group settings** from the group's header.

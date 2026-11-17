@@ -15,6 +15,8 @@ import {
   LOGIN_FIELD_LIMIT,
   PAID_REQUEST_METHODS,
   PURCHASE_CARD_FIELDS,
+  SEMANTIC_RECALL_DEFAULT_LIMIT,
+  SEMANTIC_RECALL_MAX_LIMIT,
   SecretAskPurpose,
   SecretHttpRequest,
   ThinkingLevelSchema,
@@ -338,6 +340,14 @@ export const builtinAgentTools: ConnectorTool[] = [
       type: "object",
       properties: {
         url: { type: "string", description: "http(s) URL to open." },
+        pageId: {
+          type: "string",
+          description: "Page id from pages; omit to keep the selected page.",
+        },
+        waitForDownload: {
+          type: "boolean",
+          description: "Wait for a file download expected from this navigation.",
+        },
       },
       required: ["url"],
     },
@@ -350,6 +360,7 @@ export const builtinAgentTools: ConnectorTool[] = [
       type: "object",
       properties: {
         query: { type: "string", maxLength: 200 },
+        pageId: { type: "string", description: "Select and observe a page by its id from pages." },
       },
     },
     readOnly: true,
@@ -360,6 +371,11 @@ export const builtinAgentTools: ConnectorTool[] = [
     inputSchema: {
       type: "object",
       properties: {
+        waitForDownload: {
+          type: "boolean",
+          description:
+            "Wait for a download expected from this action. Trigger one download per call.",
+        },
         actions: {
           type: "array",
           items: {
@@ -607,7 +623,7 @@ export const builtinAgentTools: ConnectorTool[] = [
     name: "message_user",
     // Read lazily: the cap comes from process.env, which may be filled after import.
     get description() {
-      return `Post a short progress update to the user in this chat immediately. Does not end your turn. Use sparingly during long work for high-signal beats (what you are checking, then a result). Do not dump tool logs, thinking, or a play-by-play of every call. HARD LIMIT: cut off silently at ${messageUserMaxLength()} characters, so never put your final answer, a report, or any long-form content here \u2014 it will arrive mangled and the user will never see the rest. Always write your complete final answer in your normal reply, not here.`;
+      return `Post a short progress update to the user in this chat immediately, in the same language as their request. Does not end your turn. Use sparingly during long work for high-signal beats (what you are checking, then a result). Do not dump tool logs, thinking, or a play-by-play of every call. HARD LIMIT: cut off silently at ${messageUserMaxLength()} characters, so never put your final answer, a report, or any long-form content here \u2014 it will arrive mangled and the user will never see the rest. Always write your complete final answer in your normal reply, not here.`;
     },
     get inputSchema() {
       return {
@@ -1185,24 +1201,43 @@ export const builtinAgentTools: ConnectorTool[] = [
   {
     name: "save_memory",
     description:
-      "Store a durable fact in this bot's semantic memory (preferences, decisions, recurring context). Use for anything worth recalling in future conversations.",
+      "Store a durable fact in this bot's semantic memory. source_quote must be an exact quote from the user's message that started this run; it provides attribution, not verification of your assertion. Without it, the fact is run-derived, not user-confirmed. Source ids are assigned by the server. To correct an existing fact, pass replaces_id and expected_revision together from a recall citation; only managed memory providers support correction.",
     inputSchema: {
       type: "object",
       properties: {
-        content: { type: "string" },
+        content: { type: "string", minLength: 1 },
+        source_quote: {
+          type: "string",
+          minLength: 1,
+          description: "Literal quote from this run's originating user message, not a tool result.",
+        },
+        replaces_id: {
+          type: "string",
+          minLength: 1,
+          description: "Existing fact id to correct; requires expected_revision.",
+        },
+        expected_revision: {
+          type: "integer",
+          minimum: 1,
+          description: "Revision from the existing fact's recall citation; requires replaces_id.",
+        },
       },
       required: ["content"],
+      additionalProperties: false,
     },
   },
   {
     name: "recall_memory",
-    description: "Semantically search this bot's durable memory for facts relevant to a query.",
+    description: `Search durable memory for facts relevant to a query. Returns up to ${SEMANTIC_RECALL_DEFAULT_LIMIT} facts by default, or limit up to ${SEMANTIC_RECALL_MAX_LIMIT}, within a text budget; reports omitted facts. Use a larger limit or narrower topic when relevant facts are missing. scope defaults to current; in a direct user chat, isolated searches this bot, shared searches this space's shared facts (some providers also include this bot), and all searches both. Citations identify the searched scope, source namespace when available, and revision. Corrections and forgetting still require the fact's original namespace. A missing result does not prove a fact was never saved; do not rewrite past events from this search alone. Once current facts answer the question, answer without repeating equivalent searches.`,
     inputSchema: {
       type: "object",
       properties: {
         query: { type: "string" },
+        limit: { type: "integer", minimum: 1, maximum: SEMANTIC_RECALL_MAX_LIMIT },
+        scope: { type: "string", enum: ["current", "isolated", "shared", "all"] },
       },
       required: ["query"],
+      additionalProperties: false,
     },
   },
   {
@@ -1553,7 +1588,7 @@ export const builtinAgentTools: ConnectorTool[] = [
   {
     name: "run_subagent",
     description:
-      "A helper, not a bot: no list entry, thread or computer. It ends with this turn unless background is set. Never call this because the user asked to create a bot — that is spawn_bot, and spawn_bot alone.",
+      "A helper, not a bot: no thread, no list entry, and it works on this bot's computer, including the page browser. It reads and writes files and runs commands; a tool that needs the owner's approval shows its card in this chat, and it cannot ask the user, buy anything, type saved logins or cards, or change memory, skills or routines. It always works in the background, and its result comes back to you later as a new message, so end your turn instead of waiting for it. Never call this because the user asked to create a bot — that is spawn_bot, and spawn_bot alone.",
     inputSchema: {
       type: "object",
       properties: {
@@ -1568,13 +1603,14 @@ export const builtinAgentTools: ConnectorTool[] = [
         },
         model_provider: {
           type: "string",
-          description: "Optional connected model provider. Set together with model_id.",
+          description:
+            "Only set to explicitly change the helper's model. Omit both model fields to inherit this run's model and thinking level. Use the exact connected provider ID.",
         },
         model_id: {
           type: "string",
-          description: "Optional connected model ID. Set together with model_provider.",
+          description:
+            "Exact connected model ID, including any slash prefixes. Treat it as opaque; never split it into a provider and model. Omit together with model_provider to use the current model.",
         },
-        background: { type: "boolean" },
       },
       required: ["name", "task"],
     },
@@ -1851,6 +1887,11 @@ export const builtinAgentTools: ConnectorTool[] = [
           type: "string",
           enum: ["request", "result", "question", "status", "fyi"],
           description: "What the recipient should do with this message. Defaults to request.",
+        },
+        reply_to_message_id: {
+          type: "string",
+          description:
+            "Id of a message in the recipient's chat that this one answers, so it arrives as a reply. Omit unless you are answering a specific message.",
         },
       },
       required: ["message"],

@@ -235,7 +235,7 @@ export function ArtifactsPage() {
         <div className="flex min-w-fit flex-1 items-center gap-1">
           <IconTooltip label={t`Back`}>
             <Link
-              to="/app"
+              to={artifactId ? "/app/artifacts" : "/app"}
               aria-label={t`Back`}
               className={buttonVariants({
                 variant: "ghost",
@@ -251,7 +251,9 @@ export function ArtifactsPage() {
           </h1>
         </div>
         {showFilters ? (
-          <div className="app-no-drag flex flex-wrap items-center gap-2">
+          <div
+            className={`app-no-drag flex-wrap items-center gap-2 ${artifactId ? "hidden md:flex" : "flex"}`}
+          >
             <SearchToggle query={searchQuery} onQueryChange={setSearchQuery} />
             {bots.length > 1 ? (
               <BotFilter bots={bots} value={activeBotId} onValueChange={setActiveBotId} />
@@ -675,7 +677,7 @@ function IndexPane({
   empty: ReactNode;
 }) {
   return (
-    <aside className="flex w-[320px] shrink-0 flex-col overflow-y-auto border-e border-border">
+    <aside className="hidden w-[320px] shrink-0 flex-col overflow-y-auto border-e border-border md:flex">
       {items === null ? (
         <div className="grid flex-1 place-items-center p-6 text-center text-body text-muted-foreground/80">
           {loadError ?? <Spinner aria-label={t`Loading…`} />}
@@ -919,7 +921,7 @@ function PreviewPane({
 
   return (
     <div className="flex min-w-0 flex-1 flex-col">
-      <header className="flex items-center gap-3 border-b border-border px-6 py-3">
+      <header className="flex flex-wrap items-center gap-3 border-b border-border px-3 py-3 md:px-6">
         <div className="min-w-0 flex-1">
           <h2 className="truncate text-body-lg font-semibold">
             {state.status === "ready" ? state.artifact.name : null}
@@ -962,7 +964,7 @@ function PreviewPane({
                 size="icon"
                 aria-label={maximized ? t`Show list` : t`Maximize`}
                 onClick={onToggleMaximize}
-                className="text-muted-foreground"
+                className="hidden text-muted-foreground md:inline-flex"
               >
                 {maximized ? (
                   <Minimize2 size={15} strokeWidth={1.9} />
@@ -975,7 +977,7 @@ function PreviewPane({
         ) : null}
       </header>
 
-      <div className="min-h-0 flex-1 p-5">
+      <div className="min-h-0 flex-1 p-3 md:p-5">
         {state.status === "loading" ? (
           <div className="grid h-full place-items-center text-body text-muted-foreground/80">
             <Spinner aria-label={t`Loading…`} />
@@ -1011,7 +1013,7 @@ function ArtifactPreview({ artifact, bytes }: { artifact: Artifact; bytes: Uint8
     case "markdown":
       return (
         <div className="h-full overflow-y-auto bg-background">
-          <article className="mx-auto w-full max-w-[760px] px-8 py-10 text-body-lg leading-7 text-foreground">
+          <article className="mx-auto w-full max-w-[760px] px-4 py-6 text-body-lg leading-7 text-foreground md:px-8 md:py-10">
             <ChatMarkdown>{new TextDecoder("utf-8").decode(bytes)}</ChatMarkdown>
           </article>
         </div>
@@ -1019,7 +1021,7 @@ function ArtifactPreview({ artifact, bytes }: { artifact: Artifact; bytes: Uint8
     case "text":
       return (
         <div className="h-full overflow-auto bg-background">
-          <pre className="px-8 py-10 font-mono text-body-sm leading-6 whitespace-pre-wrap break-words text-foreground">
+          <pre className="px-4 py-6 font-mono text-body-sm leading-6 whitespace-pre-wrap break-words text-foreground md:px-8 md:py-10">
             {new TextDecoder("utf-8").decode(bytes)}
           </pre>
         </div>

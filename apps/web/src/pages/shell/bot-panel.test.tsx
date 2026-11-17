@@ -2,7 +2,7 @@
 
 import { i18n } from "@lingui/core";
 import { ORPCError } from "@orpc/client";
-import type { Bot, BotAvatarSet } from "@rakazo/contracts";
+import type { Bot, BotAvatarSet, Me } from "@rakazo/contracts";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import type { ComponentProps, ReactNode } from "react";
 import { act } from "react";
@@ -23,6 +23,9 @@ vi.mock("../../lib/rpc", () => {
     models: {
       credentials: vi.fn().mockResolvedValue([]),
       list: vi.fn().mockResolvedValue([]),
+      role: vi.fn().mockResolvedValue({ primary: null, backups: [] }),
+      connect: vi.fn().mockResolvedValue({}),
+      setRole: vi.fn().mockResolvedValue({}),
     },
     me: vi.fn().mockResolvedValue(null),
   };
@@ -33,6 +36,9 @@ vi.mock("../../lib/rpc", () => {
     selectedSpaceId: () => null,
   };
 });
+vi.mock("@rakazo/ui-web/hooks/use-avatar-motion-visibility", () => ({
+  useAvatarMotionVisibility: () => ({ ref: undefined, visible: true, reducedMotion: false }),
+}));
 vi.mock("@lingui/react/macro", () => {
   const t = (parts: TemplateStringsArray, ...values: unknown[]) =>
     parts.reduce((text, part, index) => `${text}${index > 0 ? values[index - 1] : ""}${part}`, "");
@@ -137,6 +143,7 @@ vi.mock("../KnowledgeSection", () => ({
 import { InstructionSettings } from "../../components/InstructionSettings";
 import { spaceQueries } from "../../lib/query";
 import { rpc } from "../../lib/rpc";
+import type { BotPanelTab } from "./bot-panel";
 import { BotSettings } from "./bot-panel";
 
 const longInstructions = "I".repeat(4_000);
@@ -184,7 +191,8 @@ let container: HTMLDivElement;
 let root: Root;
 let queryClient: QueryClient;
 const onSave = vi.fn(
-  async (_patch: Parameters<ComponentProps<typeof BotSettings>["onSave"]>[0]) => undefined,
+  async (_patch: Parameters<ComponentProps<typeof BotSettings>["onSave"]>[0]): Promise<void> =>
+    undefined,
 );
 const onExport = vi.fn(async () => undefined);
 
@@ -193,6 +201,7 @@ async function render(
   overrides: Partial<Bot> = {},
   memoryProviderConfigured = false,
   focusModel = 0,
+  tab?: BotPanelTab,
 ) {
   await act(async () => {
     root.render(
@@ -200,6 +209,7 @@ async function render(
         <BotSettings
           onOpenConnections={() => undefined}
           focusModel={focusModel}
+          tab={tab}
           bot={bot(description, overrides)}
           memoryProviderConfigured={memoryProviderConfigured}
           onSave={onSave}
@@ -243,10 +253,20 @@ async function clickSave() {
 
 beforeEach(() => {
   vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
+  i18n.load("en", {});
+  i18n.activate("en");
   onSave.mockReset().mockResolvedValue(undefined);
   onExport.mockReset().mockResolvedValue(undefined);
   vi.mocked(rpc.bots.update).mockReset();
   vi.mocked(rpc.bots.get).mockReset();
+  vi.mocked(rpc.me)
+    .mockReset()
+    .mockResolvedValue(null as unknown as Me);
+  vi.mocked(rpc.models.role).mockReset().mockResolvedValue({ primary: null, backups: [] });
+  vi.mocked(rpc.models.connect).mockClear();
+  vi.mocked(rpc.models.credentials).mockReset().mockResolvedValue([]);
+  vi.mocked(rpc.models.list).mockReset().mockResolvedValue([]);
+  vi.mocked(rpc.models.setRole).mockReset().mockResolvedValue({ primary: null, backups: [] });
   container = document.createElement("div");
   document.body.append(container);
   root = createRoot(container);
@@ -270,7 +290,7 @@ it("shows the profile and the Advanced tab's controls", async () => {
   );
   expect(container.querySelector('input[aria-label="Name"]')).toBeNull();
   expect([...container.querySelectorAll('[role="tab"]')].map((tab) => tab.textContent)).toEqual([
-    "Computer",
+    "Model",
     "Routines",
     "Pages",
     "Advanced",
@@ -287,7 +307,6 @@ it("shows the profile and the Advanced tab's controls", async () => {
       ?.getAttribute("data-testid"),
   ).toBe("bot-settings-tools");
   const labels = {
-    model: "Model",
     computer: "Computer",
     memoryScope: "Memory scope",
     voice: "Voice",
@@ -305,7 +324,6 @@ it("shows the profile and the Advanced tab's controls", async () => {
       .map(([key]) => key),
   );
   expect([...new Set(controls)]).toEqual([
-    "model",
     "computer",
     "memoryScope",
     "voice",
@@ -316,6 +334,87 @@ it("shows the profile and the Advanced tab's controls", async () => {
 });
 
 describe("BotSettings model choices", () => {
+  function connectedModels() {
+    vi.mocked(rpc.models.credentials).mockResolvedValue([
+      {
+        id: "connection",
+        provider: "openai-compatible",
+        label: "Test server",
+        hasKey: false,
+        isDefault: true,
+        modelId: "original",
+        enabledModelIds: ["original", "replacement"],
+        baseUrl: "https://models.example/v1",
+        reasoning: true,
+      },
+    ]);
+    vi.mocked(rpc.models.list).mockResolvedValue(
+      ["original", "replacement"].map((id) => ({
+        provider: "openai-compatible",
+        providerName: "Test server",
+        id,
+        label: id,
+        billing: "",
+        thinkingLevels: ["low", "medium", "high"] as const,
+      })),
+    );
+  }
+
+  async function chooseModel(id: string) {
+    const select = container.querySelector<HTMLSelectElement>('select[id$="-model"]')!;
+    await act(async () => {
+      select.value = `openai-compatible::${id}`;
+      select.dispatchEvent(new Event("change", { bubbles: true }));
+    });
+    return select;
+  }
+
+  it("persists a model choice immediately without saving unrelated profile drafts", async () => {
+    connectedModels();
+    let complete!: () => void;
+    onSave.mockImplementationOnce(() => new Promise<void>((resolve) => (complete = resolve)));
+    await render(
+      "Billing",
+      { modelProvider: "openai-compatible", modelId: "original", thinkingLevel: "high" },
+      false,
+      0,
+      "computer",
+    );
+    await setDescription("Unsubmitted profile draft");
+    const select = await chooseModel("replacement");
+
+    expect(onSave).toHaveBeenCalledExactlyOnceWith({
+      modelProvider: "openai-compatible",
+      modelId: "replacement",
+      thinkingLevel: null,
+    });
+    expect(select.disabled).toBe(true);
+    expect(select.getAttribute("aria-busy")).toBe("true");
+    await act(async () => complete());
+    expect(select.disabled).toBe(false);
+    expect(select.value).toBe("openai-compatible::replacement");
+    expect(descriptionField().value).toBe("Unsubmitted profile draft");
+  });
+
+  it("restores the last accepted model and effort if an immediate model save fails", async () => {
+    connectedModels();
+    await render("Billing", {
+      modelProvider: "openai-compatible",
+      modelId: "original",
+      thinkingLevel: "high",
+    });
+    await chooseModel("replacement");
+    onSave.mockRejectedValueOnce(new Error("Connection lost"));
+    const select = await chooseModel("original");
+
+    expect(select.value).toBe("openai-compatible::replacement");
+    expect(select.disabled).toBe(false);
+    expect(container.querySelector('[role="alert"]')?.textContent).toContain("Connection lost");
+    expect(container.querySelector(".bot-effort-preview")?.getAttribute("data-level")).toBe(
+      "medium",
+    );
+  });
+
   it("offers an email address under the name until the bot has one", async () => {
     vi.mocked(rpc.bots.emailAddress).mockResolvedValueOnce({ domain: "bots.test", address: null });
     await render();
@@ -386,6 +485,80 @@ describe("BotSettings model choices", () => {
 });
 
 describe("BotSettings thinking options", () => {
+  beforeEach(() => {
+    vi.mocked(rpc.models.list).mockResolvedValue([
+      {
+        provider: "fixture",
+        id: "balanced",
+        label: "Balanced",
+        billing: "",
+        thinkingLevels: ["low", "medium", "high", "xhigh", "max"],
+      },
+    ]);
+  });
+
+  it("updates the pointer and face immediately while saving the shared effort", async () => {
+    vi.mocked(rpc.me).mockResolvedValue({
+      userId: "user-1",
+      defaultProvider: "fixture",
+      defaultModel: "balanced",
+    } as Me);
+    const primary = {
+      provider: "fixture",
+      modelId: "balanced",
+      thinkingLevel: "high" as const,
+      credentialId: "fixture-connection",
+    };
+    vi.mocked(rpc.models.role).mockResolvedValue({ primary, backups: [] });
+    let finish!: () => void;
+    vi.mocked(rpc.models.setRole).mockImplementationOnce(
+      () =>
+        new Promise((resolve) => {
+          finish = () => {
+            vi.mocked(rpc.models.role).mockResolvedValue({
+              primary: { ...primary, thinkingLevel: "max" },
+              backups: [],
+            });
+            resolve({ primary: { ...primary, thinkingLevel: "max" }, backups: [] });
+          };
+        }),
+    );
+    await render("Billing", {}, false, 0, "computer");
+    await act(async () =>
+      container.querySelector<HTMLButtonElement>('.effort-stops button[aria-label="Max"]')!.click(),
+    );
+    expect(container.querySelector<HTMLInputElement>('input[type="range"]')!.value).toBe("4");
+    expect(container.querySelector(".bot-effort-preview")?.getAttribute("data-level")).toBe("max");
+    expect(rpc.models.setRole).toHaveBeenCalledExactlyOnceWith({
+      role: "main",
+      scope: "account",
+      expectedUserId: "user-1",
+      primary: { ...primary, thinkingLevel: "max" },
+    });
+    await act(async () => finish());
+    expect(container.querySelector<HTMLInputElement>('input[type="range"]')!.disabled).toBe(false);
+    expect(rpc.models.connect).not.toHaveBeenCalled();
+  });
+
+  it("restores the saved effort and shows an error when persistence fails", async () => {
+    vi.mocked(rpc.me).mockResolvedValue({
+      userId: "user-1",
+      defaultProvider: "fixture",
+      defaultModel: "balanced",
+    } as Me);
+    vi.mocked(rpc.models.role).mockResolvedValue({
+      primary: { provider: "fixture", modelId: "balanced", thinkingLevel: "high" },
+      backups: [],
+    });
+    vi.mocked(rpc.models.setRole).mockRejectedValueOnce(new Error("Could not save effort"));
+    await render("Billing", {}, false, 0, "computer");
+    await act(async () =>
+      container.querySelector<HTMLButtonElement>('.effort-stops button[aria-label="Max"]')!.click(),
+    );
+    expect(container.querySelector<HTMLInputElement>('input[type="range"]')!.value).toBe("2");
+    expect(container.textContent).toContain("Could not save effort");
+  });
+
   it("preserves saved thinking on a profile save when options are hidden", async () => {
     await render("Billing", {
       modelProvider: "openai-compatible",
@@ -396,7 +569,7 @@ describe("BotSettings thinking options", () => {
     expect(onSave.mock.lastCall?.[0]).not.toHaveProperty("thinkingLevel");
   });
 
-  it("shows the connection's thinking levels for a bot on a second enabled model", async () => {
+  it("uses the actual connection's effort levels for a second enabled model", async () => {
     i18n.load("en", {});
     i18n.activate("en");
     vi.mocked(rpc.models.credentials).mockResolvedValueOnce([
@@ -429,11 +602,103 @@ describe("BotSettings thinking options", () => {
         .querySelector<HTMLButtonElement>('[data-testid="bot-settings-advanced"] button')!
         .click(),
     );
-    const [model, thinking] = [...container.querySelectorAll('[id$="-model"], [id$="-thinking"]')];
+    const model = container.querySelector('[id$="-model"]');
     if (!(model instanceof HTMLSelectElement)) throw new Error("Missing model select");
     expect(model.value).toBe("openai-compatible::beta");
-    if (!(thinking instanceof HTMLSelectElement)) throw new Error("Missing thinking select");
-    expect([...thinking.options].map((option) => option.value)).toEqual(["", "low", "high"]);
+    const thinking = container.querySelector<HTMLInputElement>('input[type="range"]')!;
+    expect(thinking.min).toBe("0");
+    expect(thinking.max).toBe("1");
+    expect(
+      [...container.querySelectorAll(".effort-stops button")].map((node) => node.textContent),
+    ).toEqual(["low", "high"]);
+  });
+
+  it("shows the effective effort for an old override and saves only that bot's choice", async () => {
+    vi.mocked(rpc.me).mockResolvedValue({ userId: "user-1" } as Me);
+    vi.mocked(rpc.models.list).mockResolvedValue([
+      {
+        provider: "openai-compatible",
+        id: "limited",
+        label: "Limited",
+        billing: "",
+        thinkingLevels: ["low", "medium", "high"],
+      },
+    ]);
+    vi.mocked(rpc.models.credentials).mockResolvedValue([
+      {
+        id: "fixture-connection",
+        provider: "openai-compatible",
+        label: "Fixture",
+        hasKey: false,
+        isDefault: false,
+        modelId: "limited",
+        thinkingLevels: ["low", "medium", "high", "xhigh", "max"],
+      },
+    ]);
+    await render(
+      "Billing",
+      { modelProvider: "openai-compatible", modelId: "limited", thinkingLevel: "max" },
+      false,
+      0,
+      "computer",
+    );
+    expect(container.textContent).toContain("Saved Max; using High.");
+    expect(container.querySelector(".bot-effort-preview")?.getAttribute("data-level")).toBe("high");
+    expect(container.querySelector('.effort-stops button[aria-label="Max"]')).toBeNull();
+    await act(async () =>
+      container.querySelector<HTMLButtonElement>('.effort-stops button[aria-label="Low"]')!.click(),
+    );
+    expect(onSave).toHaveBeenCalledExactlyOnceWith({
+      modelProvider: "openai-compatible",
+      modelId: "limited",
+      thinkingLevel: "low",
+    });
+    expect(rpc.models.connect).not.toHaveBeenCalled();
+    expect(rpc.models.setRole).not.toHaveBeenCalled();
+    expect(container.querySelector(".bot-effort-preview")?.getAttribute("data-level")).toBe("low");
+    expect(container.textContent).not.toContain("Saved Max");
+  });
+
+  it("keeps an unavailable inherited model visible without offering it as a selectable model", async () => {
+    vi.mocked(rpc.me).mockResolvedValue({
+      userId: "user-1",
+      defaultProvider: "openai-compatible",
+      defaultModel: "provider-a/retired",
+    } as Me);
+    vi.mocked(rpc.models.credentials).mockResolvedValue([
+      {
+        id: "fixture-connection",
+        provider: "openai-compatible",
+        label: "Channel A",
+        hasKey: false,
+        isDefault: true,
+        modelId: "provider-a/retired",
+        enabledModelIds: ["provider-a/current"],
+        catalogSource: {
+          id: "source-fixture",
+          label: "Model gateway",
+          group: "messages",
+          providerId: "provider-a",
+          available: true,
+          unavailableModelIds: ["provider-a/retired"],
+        },
+      },
+    ]);
+    await render("Billing", {}, false, 0, "computer");
+    const select = container.querySelector<HTMLSelectElement>('select[id$="-model"]')!;
+    const retired = select.querySelector<HTMLOptionElement>(
+      'option[value="openai-compatible::provider-a/retired"]',
+    )!;
+    expect(select.value).toBe("openai-compatible::provider-a/retired");
+    expect(select.getAttribute("aria-invalid")).toBe("true");
+    expect(retired.disabled).toBe(true);
+    expect(retired.textContent).toContain("Unavailable");
+    expect(
+      select.querySelector<HTMLOptionElement>(
+        'option[value="openai-compatible::provider-a/current"]',
+      )?.disabled,
+    ).toBe(false);
+    expect(container.querySelector('input[type="range"]')).toBeNull();
   });
 });
 
@@ -683,7 +948,7 @@ it("cancels an inline name edit", async () => {
 });
 
 it("focuses the model control for a model deep link", async () => {
-  await render("", {}, false, 1);
+  await render("", {}, false, 1, "computer");
   expect(document.activeElement?.id.endsWith("-model")).toBe(true);
 });
 
@@ -816,6 +1081,36 @@ describe("BotSettings avatar set persistence", () => {
 });
 
 describe("BotSettings cached data", () => {
+  it("refreshes settings independently of the last chat time and ignores older settings", async () => {
+    const oldRevision = "2026-09-01T00:00:00.000Z";
+    const newRevision = "2026-09-02T00:00:00.000Z";
+    await render("Billing", {
+      name: "Ada",
+      settingsUpdatedAt: oldRevision,
+      thinkingLevel: "high",
+    });
+    await render("Billing", {
+      name: "Grace",
+      settingsUpdatedAt: newRevision,
+      thinkingLevel: "low",
+    });
+    expect(container.querySelector('[aria-label="Edit name"]')?.textContent).toBe("Grace");
+    await render("Billing", {
+      name: "Ada",
+      settingsUpdatedAt: oldRevision,
+      updatedAt: "2026-09-03T00:00:00.000Z",
+      thinkingLevel: "high",
+    });
+    expect(container.querySelector('[aria-label="Edit name"]')?.textContent).toBe("Grace");
+  });
+
+  it("does not claim effort is unsupported while the catalog is loading", async () => {
+    vi.mocked(rpc.models.list).mockReturnValueOnce(new Promise(() => undefined));
+    await render("Billing", {}, false, 0, "computer");
+    expect(container.textContent).not.toContain("Effort unavailable for this model");
+    expect(container.querySelector('[role="status"]')?.textContent).toContain("Loading");
+  });
+
   it("shows cached voices at once and refreshes them in the background", async () => {
     queryClient.setQueryData(spaceQueries(null, null).voice.voices.queryKey({ input: {} }), [
       { id: "cached-voice", label: "Cached voice" },

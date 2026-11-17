@@ -67,7 +67,15 @@ export function assertHostCommandsAllowed(
   env: NodeJS.ProcessEnv = process.env,
   versions: NodeJS.ProcessVersions = process.versions,
 ) {
-  if (versions.electron || env.NODE_ENV === "development" || env.NODE_ENV === "test") return;
+  if (
+    versions.electron ||
+    env.NODE_ENV === "development" ||
+    env.NODE_ENV === "test" ||
+    // This single-user self-hosted build runs its API in production (for auth rate
+    // limiting) while still wanting host-side file tools; the operator opts in here.
+    env.RAKAZO_ALLOW_DESKTOP_SANDBOX === "1"
+  )
+    return;
   throw new Error(
     "SANDBOX_PROVIDER=desktop runs bot commands directly on this host and is limited to local development. Use docker or a remote provider, or local computer access in the desktop app.",
   );

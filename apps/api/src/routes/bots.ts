@@ -445,6 +445,9 @@ export function botsRoutes(ctx: RouterContext) {
           botId: input.botId,
           emitBotUpdated:
             botProfileLabelsChanged(input) ||
+            input.modelProvider !== undefined ||
+            input.modelId !== undefined ||
+            input.thinkingLevel !== undefined ||
             input.expectedSettings !== undefined ||
             input.dailyCheckIns !== undefined ||
             input.replyMode !== undefined,
@@ -544,6 +547,9 @@ export function botsRoutes(ctx: RouterContext) {
             where: {
               botId: bot.id,
               status: { in: [...ACTIVE_RUN_STATUSES] },
+              // A helper holds the computer only while a tool is actually using it (then it has a
+              // live execution lease), so an idle helper must not block switching the computer.
+              trigger: { not: "helper" },
               ...COMPUTER_USING_RUNS,
             },
             select: { id: true },

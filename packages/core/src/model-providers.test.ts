@@ -5,6 +5,7 @@ import {
   chatModelChoices,
   clampCatalogThinkingLevel,
   compatibleModelRows,
+  compatibleThinkingLevels,
   connectedModelChoices,
   connectionMaxTokensField,
   credentialForModel,
@@ -110,6 +111,51 @@ describe("pickCatalogModelId", () => {
 
   it("returns an empty string for an unknown provider", () => {
     expect(pickCatalogModelId(catalog, "nope", "openai/gpt-6-luna")).toBe("");
+  });
+});
+
+describe("compatibleThinkingLevels", () => {
+  it("offers only distinct budget levels for Messages unless adaptive mode is declared", () => {
+    expect(compatibleThinkingLevels("anthropic-messages")).toEqual([
+      "minimal",
+      "low",
+      "medium",
+      "high",
+    ]);
+    expect(compatibleThinkingLevels("anthropic-messages", { mode: "adaptive" })).toEqual([
+      "low",
+      "medium",
+      "high",
+      "xhigh",
+      "max",
+    ]);
+  });
+
+  it.each([undefined, "chat-completions", "responses"] as const)(
+    "offers every effort the %s serializer can encode without asserting endpoint support",
+    (protocol) => {
+      expect(compatibleThinkingLevels(protocol)).toEqual([
+        "minimal",
+        "low",
+        "medium",
+        "high",
+        "xhigh",
+        "max",
+      ]);
+    },
+  );
+
+  it("narrows declared levels to the selected serializer without inventing a mode", () => {
+    const levels = ["off", "low", "high", "max"] as const;
+    expect(compatibleThinkingLevels("anthropic-messages", { levels })).toEqual(["low", "high"]);
+    expect(compatibleThinkingLevels("anthropic-messages", { mode: "adaptive", levels })).toEqual([
+      "low",
+      "high",
+      "max",
+    ]);
+    expect(compatibleThinkingLevels("responses", { levels })).toEqual(["low", "high", "max"]);
+    expect(compatibleThinkingLevels("responses", { levels: [] })).toEqual([]);
+    expect(compatibleThinkingLevels("responses", { levels: ["off"] })).toEqual([]);
   });
 });
 
@@ -265,6 +311,87 @@ describe("connected model choices", () => {
         modelLabel: id,
       })),
     );
+  });
+
+  it("keeps only available managed models and hides only their routing prefix in labels", () => {
+    const choices = connectedModelChoices(
+      [
+        {
+          provider: "openai-compatible",
+          label: "Gateway channel",
+          modelId: "provider-id/retired",
+          enabledModelIds: [
+            "provider-id/retired",
+            "provider-id/vendor/active",
+            "provider-id/plain",
+          ],
+          catalogSource: { available: true, unavailableModelIds: ["provider-id/retired"] },
+        },
+      ],
+      [],
+    );
+    expect(choices).toEqual([
+      {
+        key: "openai-compatible::provider-id/vendor/active",
+        provider: "openai-compatible",
+        modelId: "provider-id/vendor/active",
+        label: "vendor/active (Gateway channel)",
+        providerLabel: "Gateway channel",
+        modelLabel: "vendor/active",
+      },
+      {
+        key: "openai-compatible::provider-id/plain",
+        provider: "openai-compatible",
+        modelId: "provider-id/plain",
+        label: "plain (Gateway channel)",
+        providerLabel: "Gateway channel",
+        modelLabel: "plain",
+      },
+    ]);
+  });
+
+  it.each([
+    { available: false, enabledModelIds: ["provider-id/retired"] },
+    { available: true, enabledModelIds: [] },
+    { available: true, enabledModelIds: ["provider-id/retired"] },
+  ])(
+    "does not restore a retired default from a managed source: %j",
+    ({ available, enabledModelIds }) => {
+      expect(
+        connectedModelChoices(
+          [
+            {
+              provider: "openai-compatible",
+              label: "Gateway channel",
+              modelId: "provider-id/retired",
+              enabledModelIds,
+              catalogSource: { available, unavailableModelIds: ["provider-id/retired"] },
+            },
+          ],
+          [{ provider: "openai-compatible", id: "provider-id/retired", label: "Retired" }],
+        ),
+      ).toEqual([]);
+    },
+  );
+
+  it("preserves unmanaged slash-containing labels and their legacy default fallback", () => {
+    const [choice] = connectedModelChoices(
+      [
+        {
+          provider: "openai-compatible",
+          label: "Manual",
+          modelId: "vendor/custom",
+          enabledModelIds: [],
+        },
+      ],
+      [],
+    );
+    expect(choice).toMatchObject({
+      key: "openai-compatible::vendor/custom",
+      modelId: "vendor/custom",
+      modelLabel: "vendor/custom",
+      label: "vendor/custom (Manual)",
+    });
   });
 
   it("finds a credential by enabled model id or by its default model", () => {
@@ -551,10 +678,9 @@ it("offers managed models without a personal key and hides unconnected providers
 });
 
 describe("connectionMaxTokensField", () => {
-  it("shows the saved limit, or the default an OpenAI-compatible endpoint would send", () => {
-    expect(connectionMaxTokensField("openai-compatible", undefined)).toBe("4096");
-    expect(connectionMaxTokensField("openai-compatible", 8_000)).toBe("8000");
-    expect(connectionMaxTokensField("anthropic", undefined)).toBe("");
-    expect(connectionMaxTokensField("anthropic", 2_000)).toBe("2000");
+  it("shows the saved limit, and stays blank while no cap is set", () => {
+    expect(connectionMaxTokensField(undefined)).toBe("");
+    expect(connectionMaxTokensField(8_000)).toBe("8000");
+    expect(connectionMaxTokensField(2_000)).toBe("2000");
   });
 });

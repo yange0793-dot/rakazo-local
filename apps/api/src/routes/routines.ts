@@ -179,12 +179,7 @@ export function routinesRoutes(ctx: RouterContext) {
             message: "A one-time schedule can't be combined with other schedules.",
           });
         }
-        if (active && isOneShotRoutineCrons(crons)) {
-          if (!isOneShotRoutineCrons(existing.crons)) {
-            throw new ORPCError("BAD_REQUEST", {
-              message: "One-shot schedules must be created from chat.",
-            });
-          }
+        if (active && isOneShotRoutineCrons(crons) && isOneShotRoutineCrons(existing.crons)) {
           if (!existing.nextRunAt && existing.lastRunAt) {
             throw new ORPCError("BAD_REQUEST", {
               message: "This one-shot already ran.",
@@ -203,7 +198,11 @@ export function routinesRoutes(ctx: RouterContext) {
             ? nextRoutineDate(crons, timezone)
             : null;
         let armedOneShotAt: Date | null = null;
-        if (active && isOneShotRoutineCrons(crons) && !existing.nextRunAt && !existing.lastRunAt) {
+        if (
+          active &&
+          isOneShotRoutineCrons(crons) &&
+          (!isOneShotRoutineCrons(existing.crons) || (!existing.nextRunAt && !existing.lastRunAt))
+        ) {
           if (!input.runAt) {
             throw new ORPCError("BAD_REQUEST", {
               message: "Add a run time for this one-shot.",

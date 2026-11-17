@@ -1,5 +1,6 @@
 // @vitest-environment jsdom
 
+import type { ModelCatalogSourceStatus, ModelCredential } from "@rakazo/contracts";
 import { MAX_MODEL_CONTEXT_WINDOW, MAX_MODEL_MAX_TOKENS } from "@rakazo/contracts";
 import { notifyManager } from "@tanstack/react-query";
 import type { ReactNode } from "react";
@@ -38,6 +39,7 @@ const { push, back, params, rpcCalls, saved } = vi.hoisted(() => ({
     apiProtocol: undefined as string | undefined,
     reasoning: false,
     thinkingLevel: undefined as string | undefined,
+    reasoningCapabilities: undefined as ModelCredential["reasoningCapabilities"],
     bots: [] as {
       id: string;
       name: string;
@@ -48,6 +50,10 @@ const { push, back, params, rpcCalls, saved } = vi.hoisted(() => ({
     // A failed save either keeps the bot's own model or finds it already cleared elsewhere.
     failBotUpdates: {} as Record<string, "kept" | "changed elsewhere">,
     needsModel: false,
+    sources: [] as ModelCatalogSourceStatus[],
+    catalogSource: undefined as ModelCredential["catalogSource"],
+    failSync: false,
+    focused: true,
   },
 }));
 
@@ -70,6 +76,11 @@ vi.mock("./api", () => ({
     rpcCalls.push([procedure, input, options]);
     if (saved.held) await saved.held;
     if (saved.failMe && procedure === "me") throw new Error("offline");
+    if (procedure === "models/syncSources") {
+      if (saved.failSync) throw new Error("source offline");
+      return saved.sources;
+    }
+    if (procedure === "models/sources") return saved.sources;
     if (procedure === "me")
       return {
         userId: "user-fixture",
@@ -125,9 +136,11 @@ vi.mock("./api", () => ({
           hasKey: saved.hasKey,
           headerNames: ["x-session"],
           label: saved.label,
+          catalogSource: saved.catalogSource,
           ...(saved.apiProtocol ? { apiProtocol: saved.apiProtocol } : {}),
           ...(saved.reasoning ? { reasoning: true } : {}),
           ...(saved.thinkingLevel ? { thinkingLevel: saved.thinkingLevel } : {}),
+          reasoningCapabilities: saved.reasoningCapabilities,
         },
       ];
     return [];
@@ -137,7 +150,8 @@ vi.mock("expo-router", () => ({
   useRouter: () => ({ push, back }),
   useNavigation: () => ({ setOptions: vi.fn() }),
   useLocalSearchParams: () => params,
-  useFocusEffect: (effect: () => (() => void) | undefined) => useEffect(effect, [effect]),
+  useFocusEffect: (effect: () => (() => void) | undefined) =>
+    useEffect(() => (saved.focused ? effect() : undefined), [effect, saved.focused]),
 }));
 vi.mock("@expo/ui/community/menu", () => ({
   MenuView: ({
@@ -245,6 +259,7 @@ vi.mock("react-native", () => {
       onChangeText,
       secureTextEntry,
       maxLength,
+      editable,
     }: {
       accessibilityLabel?: string;
       placeholder?: string;
@@ -252,12 +267,14 @@ vi.mock("react-native", () => {
       onChangeText: (value: string) => void;
       secureTextEntry?: boolean;
       maxLength?: number;
+      editable?: boolean;
     }) =>
       createElement("input", {
         "aria-label": accessibilityLabel,
         placeholder,
         value,
         maxLength,
+        readOnly: editable === false,
         type: secureTextEntry ? "password" : "text",
         onInput: (event: { currentTarget: HTMLInputElement }) =>
           onChangeText(event.currentTarget.value),
@@ -291,6 +308,11 @@ beforeEach(async () => {
   rpcCalls.length = 0;
   delete params.spaceId;
   back.mockClear();
+  saved.focused = true;
+  saved.sources = [];
+  saved.catalogSource = undefined;
+  saved.reasoningCapabilities = undefined;
+  saved.failSync = false;
   container = document.createElement("div");
   document.body.appendChild(container);
   root = createRoot(container);
@@ -671,6 +693,29 @@ it("clamps a staged effort when the protocol switch drops the level", async () =
   }
 });
 
+it("keeps declared adaptive efforts available when editing a connection", async () => {
+  saved.apiProtocol = "anthropic-messages";
+  saved.reasoning = true;
+  saved.thinkingLevel = "max";
+  saved.reasoningCapabilities = { mode: "adaptive", levels: ["low", "high", "max"] };
+  try {
+    await remountWithAdvanced(() => renderConnection());
+    expect(currentEffort()).toBe("Max");
+    expect(protocolChoice("Medium")).toBeUndefined();
+    expect(protocolChoice("Extra high")).toBeUndefined();
+    await saveConnection();
+    expect(rpcCalls.find(([procedure]) => procedure === "models/connect")?.[1]).toMatchObject({
+      apiProtocol: "anthropic-messages",
+      thinkingLevel: "max",
+    });
+  } finally {
+    saved.apiProtocol = undefined;
+    saved.reasoning = false;
+    saved.thinkingLevel = undefined;
+    saved.reasoningCapabilities = undefined;
+  }
+});
+
 it("offers no protocol choice on a catalog provider's connection", async () => {
   await remount(() => renderConnection({ provider: "anthropic", credentialId: null }));
   expect(PROTOCOL_LABELS.some((label) => container.textContent?.includes(label))).toBe(false);
@@ -736,9 +781,10 @@ it("paints a revisit from cache without a spinner and refreshes behind it", asyn
     });
     expect(container.textContent).not.toContain("Loading");
     expect(container.textContent).not.toContain("Renamed fixture");
-    expect(rpcCalls.map(([procedure]) => procedure)).toContain("models/credentials");
+    expect(rpcCalls.map(([procedure]) => procedure)).toContain("models/syncSources");
 
     await act(async () => release());
+    expect(rpcCalls.map(([procedure]) => procedure)).toContain("models/credentials");
     expect(container.textContent).toContain("Renamed fixture");
   } finally {
     saved.held = null;
@@ -788,4 +834,106 @@ it("searches discovered models without losing the selected default", async () =>
   expect(container.textContent).toContain("found-0");
   expect(field("found-0")?.checked).toBe(true);
   expect(field("found-1")?.checked).toBe(true);
+});
+
+it("syncs model sources on open and refreshes a channel with its native action", async () => {
+  saved.sources = [
+    {
+      id: "source-fixture",
+      label: "Model gateway",
+      group: "messages",
+      apiProtocol: "anthropic-messages",
+      lastSyncedAt: "2026-11-16T10:00:00.000Z",
+      lastAttemptAt: "2026-11-16T10:00:00.000Z",
+      error: null,
+      connectionCount: 1,
+      unavailableCount: 0,
+    },
+  ];
+  saved.catalogSource = {
+    id: "source-fixture",
+    label: "Model gateway",
+    group: "messages",
+    providerId: "provider-fixture",
+    available: true,
+    unavailableModelIds: [],
+  };
+  await remount(async () => {
+    await act(async () => root.render(createElement(Models)));
+  });
+  expect(
+    rpcCalls.some(
+      ([procedure, input]) => procedure === "models/syncSources" && JSON.stringify(input) === "{}",
+    ),
+  ).toBe(true);
+  expect(container.textContent).toContain("Model gateway");
+  expect(container.textContent).not.toContain("Unavailable");
+  expect(container.textContent).not.toContain("openai-compatible (Fixture)");
+  const before = rpcCalls.filter(([procedure]) => procedure === "models/credentials").length;
+  saved.catalogSource.available = false;
+  saved.sources[0]!.error = "Source temporarily unavailable";
+  await act(async () =>
+    container
+      .querySelector<HTMLButtonElement>('button[aria-label="Refresh Model gateway"]')!
+      .click(),
+  );
+  expect(rpcCalls).toContainEqual([
+    "models/syncSources",
+    { sourceId: "source-fixture" },
+    undefined,
+  ]);
+  expect(
+    rpcCalls.filter(([procedure]) => procedure === "models/credentials").length,
+  ).toBeGreaterThan(before);
+  expect(container.textContent).toContain("Unavailable");
+  expect(container.textContent).toContain("Source temporarily unavailable");
+});
+
+it("keeps the models screen usable after a source RPC failure and retries", async () => {
+  saved.failSync = true;
+  await remount(async () => {
+    await act(async () => root.render(createElement(Models)));
+  });
+  expect(container.textContent).toContain("Fixture");
+  expect(container.textContent).toContain("Could not sync model sources");
+  saved.failSync = false;
+  await act(async () =>
+    container.querySelector<HTMLButtonElement>('button[aria-label="Retry sync"]')!.click(),
+  );
+  expect(container.textContent).not.toContain("Could not sync model sources");
+});
+
+it("preserves the connection draft when returning to a refreshed screen", async () => {
+  await change("Maximum output tokens", "8192");
+  await change("OpenAI-compatible server URL", "https://edited.example.test/v1");
+  saved.focused = false;
+  await act(async () => root.render(createElement(ModelConnection)));
+  saved.baseUrl = "https://updated.example.test/v1";
+  try {
+    saved.focused = true;
+    await act(async () => root.render(createElement(ModelConnection)));
+    expect(field("Maximum output tokens")?.value).toBe("8192");
+    expect(field("OpenAI-compatible server URL")?.value).toBe("https://edited.example.test/v1");
+    expect(rpcCalls.some(([procedure]) => procedure === "models/connect")).toBe(false);
+  } finally {
+    saved.baseUrl = savedEndpoint;
+  }
+});
+
+it("keeps managed endpoint fields fixed and capability limits editable", async () => {
+  saved.catalogSource = {
+    id: "source-fixture",
+    label: "Model gateway",
+    group: "messages",
+    providerId: "provider-fixture",
+    available: true,
+    unavailableModelIds: [],
+  };
+  await remountWithAdvanced(() => renderConnection());
+  expect(field("OpenAI-compatible server URL")?.readOnly).toBe(true);
+  expect(container.textContent).not.toContain("Find models");
+  expect(container.textContent).not.toContain("Setup help");
+  expect(field("Maximum output tokens")?.readOnly).toBe(false);
+  await change("Maximum output tokens", "8192");
+  expect(field("Maximum output tokens")?.value).toBe("8192");
 });

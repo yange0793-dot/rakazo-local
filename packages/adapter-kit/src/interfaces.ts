@@ -1,4 +1,10 @@
-import type { ComputerSize } from "@rakazo/contracts";
+import type {
+  ComputerSize,
+  SemanticFact,
+  SemanticFactCorrectRequest,
+  SemanticFactListRequest,
+  SemanticFactPage,
+} from "@rakazo/contracts";
 import type {
   AdapterContext,
   AdapterDescriptor,
@@ -18,9 +24,12 @@ import type {
   BillingCreditPurchase,
   BillingPrice,
   BillingSubscriptionSnapshot,
+  BrowserActionDescription,
   BrowserActRequest,
   BrowserActResult,
   BrowserCapabilities,
+  BrowserControlRequest,
+  BrowserControlResult,
   BrowserNavigateRequest,
   BrowserNavigateResult,
   BrowserPurchaseCheckRequest,
@@ -346,6 +355,17 @@ export interface SemanticMemoryProvider {
     request: SemanticMemoryPurgeHistoryRequest,
     context: AdapterContext,
   ): Promise<SemanticMemoryResponse>;
+  /** Drain this space's durable index outbox; absent on externally owned providers. */
+  syncIndex?(context: AdapterContext): Promise<SemanticMemoryResponse>;
+  /** Host-managed facts; external providers need not expose a management surface. */
+  listFacts?(
+    request: SemanticFactListRequest,
+    context: AdapterContext,
+  ): Promise<SemanticMemoryResponse<SemanticFactPage>>;
+  correctFact?(
+    request: SemanticFactCorrectRequest,
+    context: AdapterContext,
+  ): Promise<SemanticMemoryResponse<SemanticFact>>;
   /** Optional durable forget. Providers without a forget verb omit this. */
   forget?(
     request: SemanticMemoryForgetRequest,
@@ -659,6 +679,22 @@ export interface BrowserProvider {
     request: BrowserActRequest,
     context: AdapterContext,
   ): Promise<BrowserActResult>;
+  /** Reads the last observation for an approval card; never starts a browser or performs an action. */
+  describeAction?(
+    computer: ComputerRef,
+    request: BrowserActRequest,
+    context: AdapterContext,
+  ): BrowserActionDescription | undefined;
+  /** Minimal provider state for existing durable tool records. Contains no entered values. */
+  checkpoint?(computer: ComputerRef, context: AdapterContext): unknown;
+  /** Restore only a server-held tool record, never a model- or page-supplied value. No page actions. */
+  restore?(computer: ComputerRef, state: unknown, context: AdapterContext): void;
+  /** Explicit user handoff/return, separate from navigation and actions. */
+  control?(
+    computer: ComputerRef,
+    request: BrowserControlRequest,
+    context: AdapterContext,
+  ): Promise<BrowserControlResult>;
   /**
    * Whether these clicks, or a click or key on the screen, would complete a purchase, without acting.
    * A browser that cannot tell, such as an older computer image, answers none.

@@ -29,6 +29,8 @@ function previousWorkerValues(source: NodeJS.ProcessEnv) {
     ...phoneCallSettings(source),
     maxUploadSizeBytes: uploadSizeFromEnv(source),
     inboundEmailDomain: source.INBOUND_EMAIL_DOMAIN?.trim().toLowerCase() || undefined,
+    memoryExtractorPython: source.RAKAZO_MEMORY_EXTRACTOR_PYTHON?.trim() || undefined,
+    memoryExtractorScript: source.RAKAZO_MEMORY_EXTRACTOR_SCRIPT?.trim() || undefined,
   };
 }
 
@@ -56,6 +58,8 @@ describe("runRuntimeEnvFromProcess", () => {
       PHONE_CALL_RING_SECONDS: "30",
       MAX_UPLOAD_SIZE_MB: "20",
       INBOUND_EMAIL_DOMAIN: " Bots.Example.Test ",
+      RAKAZO_MEMORY_EXTRACTOR_PYTHON: " /usr/bin/python3 ",
+      RAKAZO_MEMORY_EXTRACTOR_SCRIPT: " /opt/rakazo/extract.py ",
     },
     { NODE_ENV: "test", INBOUND_EMAIL_DOMAIN: "  ", PIPEDREAM_ENVIRONMENT: "staging" },
   ])("reads the values the worker read before (%#)", (source) => {

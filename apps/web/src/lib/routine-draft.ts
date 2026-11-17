@@ -5,20 +5,14 @@ import type { RoutineDraft } from "@rakazo/core";
 import { draftFromRoutine, emptyRoutineDraft, isOneShotRoutineCrons } from "@rakazo/core";
 import { modelOptionKey } from "./model-catalog";
 
-function toDatetimeLocalValue(date: Date): string {
-  const pad = (n: number) => String(n).padStart(2, "0");
-  return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}T${pad(date.getHours())}:${pad(date.getMinutes())}`;
-}
-
-function defaultArmRunAtLocal(): string {
-  return toDatetimeLocalValue(new Date(Date.now() + 60 * 60 * 1000));
-}
-
 export function routineNeedsOneShotArm(
-  routine: Pick<Routine, "nextRunAt" | "lastRunAt">,
+  routine: Pick<Routine, "crons" | "nextRunAt" | "lastRunAt">,
   crons: string[],
 ) {
-  return isOneShotRoutineCrons(crons) && !routine.nextRunAt && !routine.lastRunAt;
+  return (
+    isOneShotRoutineCrons(crons) &&
+    (!isOneShotRoutineCrons(routine.crons) || (!routine.nextRunAt && !routine.lastRunAt))
+  );
 }
 
 export type RoutineDraftState = RoutineDraft & {
@@ -139,7 +133,7 @@ export function draftStateFromRoutine(routine: Routine): RoutineDraftState {
     webhookEnabled: routine.webhookEnabled,
     githubEnabled: routine.githubEnabled,
     messageProvider: routine.messageProvider,
-    runAtLocal: routineNeedsOneShotArm(routine, routine.crons) ? defaultArmRunAtLocal() : "",
+    runAtLocal: "",
     modelKey:
       routine.modelProvider && routine.modelId
         ? modelOptionKey(routine.modelProvider, routine.modelId)

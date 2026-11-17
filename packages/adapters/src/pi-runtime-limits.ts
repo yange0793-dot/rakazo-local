@@ -131,12 +131,8 @@ export function billedPromptTokens(usage: {
   };
 }
 
-/**
- * A reasoning model spends this same budget on its thinking, so the modest default
- * can be consumed before the reply starts. Wide enough for thinking plus an answer,
- * still far below a model card's 128k ceiling.
- */
-export const REASONING_MODEL_MAX_TOKENS = 32_768;
+/** Reasoning models share the same uncapped default: thinking and the reply draw on one budget. */
+export const REASONING_MODEL_MAX_TOKENS = DEFAULT_MODEL_MAX_TOKENS;
 
 /** Leave at least three quarters of the window for input; token limits are positive integers. */
 export function effectiveOutputReserve(contextWindow: number, maxTokens: number): number {
@@ -157,12 +153,10 @@ export function operatorMaxTokens(
 }
 
 /**
- * Completions default to a modest output cap so OpenRouter-style providers do not
- * hold credit for a model card's 128k ceiling. A configured maxTokens overrides this
- * default, still bounded to a quarter of the context window when it is supplied.
- * Reasoning models get the wider default because their thinking is billed against
- * the same ceiling: at 4k a hard question can leave no room for the reply at all.
- * An operator-set limit (operatorMaxTokens) replaces both defaults.
+ * Completions add no output cap of their own: a model runs up to its own ceiling unless a
+ * connection (or the operator) sets a limit, and the context window still reserves room for
+ * input by trimming output to a quarter of it. Reasoning models share thinking and reply
+ * budget, so they get the same uncapped default.
  */
 export function resolveCompletionMaxTokens(
   modelMaxTokens?: number,

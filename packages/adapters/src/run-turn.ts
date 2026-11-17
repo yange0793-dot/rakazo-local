@@ -1,5 +1,6 @@
 import type { AgentRuntimeEvent } from "@rakazo/adapter-kit";
 import {
+  automaticMemoryJob,
   DEFAULT_CONTEXT_STRATEGY,
   historyCompactJob,
   ModelAccountError,
@@ -24,7 +25,7 @@ import {
   userRunError,
   withoutLastToolStepNotes,
 } from "@rakazo/core";
-import { RunHistoryWriteError, recordUsage } from "@rakazo/db";
+import { MemoryArchiveStore, RunHistoryWriteError, recordUsage } from "@rakazo/db";
 import { getLogger } from "@rakazo/logging";
 import { sanitizedError } from "@rakazo/logging/monitoring";
 import { MAX_APPROVAL_DETAIL_LENGTH, truncate } from "./approval-ask.js";
@@ -609,6 +610,11 @@ async function onToolCalled(ctx: RunContext, event: RuntimeEvent<"tool">): Promi
       },
       ctx.secrets,
     );
+    // The executor throws a ComputerBusyToolError when another run holds the bot's computer.
+    // The real Pi runtime hands a thrown tool error back to the model as a failed tool result,
+    // so the scripted path records the same failed step and keeps the turn alive instead of
+    // failing the run. Match by name to avoid importing executor.ts, which would create a cycle.
+    if ((error as Error)?.name === "ComputerBusyToolError") return false;
     throw error;
   }
 }
@@ -761,6 +767,21 @@ async function groupSilenceStillAllowed(ctx: RunContext) {
     select: { id: true },
   });
   return !earlier;
+}
+
+/**
+ * A group member nobody named may decline to answer. Saying so turns silence into an
+ * outcome the others can read, instead of leaving the sender unsure whether it is working.
+ */
+async function noteGroupPass(ctx: RunContext) {
+  const { deps, run, bot, thread } = ctx;
+  await publishMessage(
+    deps,
+    { id: run.id, spaceId: run.spaceId, threadId: thread.id, botId: bot.id, trigger: run.trigger },
+    "system",
+    [{ kind: "meta", text: `${displayName(bot.name, "Bot")} passed.` }],
+    false,
+  ).catch((error) => getLogger().error("group pass note", error));
 }
 
 /** The turn ended: apply a scripted runtime's files and memory, then finalize the reply. */
@@ -931,6 +952,7 @@ export async function completeRun(ctx: RunContext) {
     markUnread: !groupSilentEnd && marksUnread,
   });
   if (!completed) return;
+  if (groupSilentEnd) await noteGroupPass(ctx);
   ctx.stopHeartbeatAfterCompletion();
   if (run.trigger === "routine" && run.routineId) {
     await clearRoutineBackoff(deps, { routineId: run.routineId, userId: run.userId });
@@ -972,6 +994,17 @@ export async function completeRun(ctx: RunContext) {
       threadId: thread.id,
       runId: run.id,
     });
+  }
+  if (deps.automaticMemory?.enabled && (run.trigger === "user" || run.trigger === "follow_up")) {
+    try {
+      const availableAt = new Date((deps.now?.() ?? new Date()).getTime() + 60_000);
+      if (await new MemoryArchiveStore(deps.prisma).markPending(run.id, context, availableAt)) {
+        await deps.jobs.enqueue(automaticMemoryJob(thread.id, bot.id, run.userId, availableAt));
+      }
+    } catch (error) {
+      // The reply is already saved. A scheduled cursor survives an enqueue failure for recovery.
+      getLogger().error("automatic memory scheduling failed", error);
+    }
   }
   // Last, and never fatal: the run is already finalized, so a failure here must not reach
   // the failure path, where a second finalizeRun would match no rows and silently

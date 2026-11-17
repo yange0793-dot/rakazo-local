@@ -357,20 +357,56 @@ export function Table({
   emphasis,
   sortable = false,
 }: {
-  columns?: ReactNode[];
-  rows?: TableCell[][];
+  columns?: (ReactNode | { key?: string; label: ReactNode; align?: Align | "left" | "right" })[];
+  rows?: (
+    | (TableCell | { value: ReactNode; tone?: Tone })[]
+    | Record<string, TableCell | { value: ReactNode; tone?: Tone }>
+  )[];
   align?: Align[];
   emphasis?: number;
   sortable?: boolean;
 }) {
   const words = useWords();
-  const heads = Array.isArray(columns) ? columns : [];
-  const body = (Array.isArray(rows) ? rows : []).filter((row): row is TableCell[] =>
-    Array.isArray(row),
+  // Generated tables also use column descriptors and value/tone cells. Normalize at
+  // this boundary so rendering, numeric alignment, filtering and sorting see one shape.
+  const headings = (Array.isArray(columns) ? columns : []).map((column) =>
+    column && typeof column === "object" && !isValidElement(column) && "label" in column
+      ? column
+      : { label: column },
   );
+  const heads = headings.map((column) => column.label);
+  const body: TableCell[][] = (Array.isArray(rows) ? rows : [])
+    .flatMap((row) =>
+      Array.isArray(row)
+        ? [row]
+        : row &&
+            typeof row === "object" &&
+            headings.length > 0 &&
+            headings.every((column) => typeof column.key === "string")
+          ? [headings.map((column) => row[column.key!])]
+          : [],
+    )
+    .map((row) =>
+      row.map((cell) =>
+        cell && typeof cell === "object" && !isValidElement(cell) && "value" in cell
+          ? { text: cell.value, tone: cell.tone }
+          : cell,
+      ),
+    );
   const [sort, setSort] = useState<{ column: number; descending: boolean } | null>(null);
   const [query, setQuery] = useState("");
   const [limit, setLimit] = useState(PAGE_ROWS);
+  const [printing, setPrinting] = useState(false);
+  useEffect(() => {
+    const before = () => setPrinting(true);
+    const after = () => setPrinting(false);
+    window.addEventListener("beforeprint", before);
+    window.addEventListener("afterprint", after);
+    return () => {
+      window.removeEventListener("beforeprint", before);
+      window.removeEventListener("afterprint", after);
+    };
+  }, []);
   const scroll = useScrollEdges();
   if (heads.length === 0 && body.length === 0) return null;
   const width = Math.max(heads.length, ...body.map((row) => row.length));
@@ -378,7 +414,8 @@ export function Table({
   // Unless told otherwise, the first column is the row's label and reads from the start, as do
   // status and other rich cells; figures and short values beside them line up at the end.
   const aligns = indexes.map((index) => {
-    const chosen = align?.[index];
+    const requested = align?.[index] ?? headings[index]?.align;
+    const chosen = requested === "right" ? "end" : requested === "left" ? "start" : requested;
     if (chosen && ALIGNS.has(chosen)) return chosen === "start" ? undefined : chosen;
     if (body.length === 0) return undefined;
     const cells = body.map((row) => row[index]);
@@ -421,7 +458,7 @@ export function Table({
     });
   }
   const total = shown.length;
-  const visible = shown.slice(0, limit);
+  const visible = printing ? shown : shown.slice(0, limit);
   const cellClass = (index: number) =>
     cx(aligns[index] && `rk-align-${aligns[index]}`, emphasis === index && "rk-emphasis") ||
     undefined;

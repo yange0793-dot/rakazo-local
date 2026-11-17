@@ -37,12 +37,16 @@ addEventListener("message", (event) => {
       parent.postMessage({ type: data.type, text: data.text.slice(0, 300), gesture: fresh }, "*");
     } else if (data && data.type === "rakazo-page:copy" && typeof data.id === "string" && typeof data.text === "string") {
       parent.postMessage({ type: data.type, id: data.id, text: data.text, gesture: fresh }, "*");
-    } else if (data && data.type === "rakazo-page:height" && Number.isFinite(data.height)) {
+    } else if (data && (data.type === "rakazo-page:height" || data.type === "rakazo-page:print-ready") && Number.isFinite(data.height)) {
       parent.postMessage({ type: data.type, height: data.height }, "*");
     }
     return;
   }
   if (event.source !== parent || parent === window) return;
+  if (event.data && (event.data.type === "rakazo-page:prepare-print" || event.data.type === "rakazo-page:restore-print")) {
+    preview.contentWindow.postMessage({ type: event.data.type }, "*");
+    return;
+  }
   // The app's answer to a copy: only whether it worked comes back down, never clipboard contents.
   if (event.data && event.data.type === "rakazo-page:copied") {
     preview.contentWindow.postMessage({ type: event.data.type, id: String(event.data.id), ok: event.data.ok === true }, "*");

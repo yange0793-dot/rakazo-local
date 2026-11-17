@@ -353,7 +353,11 @@ export async function requeueComputerRun(
   heldForTakeover = false,
   untilReleased = false,
 ): Promise<void> {
-  const retryAt = new Date(Date.now() + computerRetryDelay(fence));
+  const now = new Date();
+  // A run waiting for the release is due now; a busy computer gets the usual bounded retry.
+  // Always writing an explicit due date (instead of leaving `wakeAt` unchanged) keeps the
+  // legacy retry trigger off this requeue, so the release wake sees the run as due.
+  const retryAt = untilReleased ? now : new Date(now.getTime() + computerRetryDelay(fence));
   const released = await writeComputerRunRequeue(
     deps,
     runId,
@@ -362,7 +366,7 @@ export async function requeueComputerRun(
     resumeCheckpoint,
     heldForTakeover,
     null,
-    untilReleased ? null : retryAt,
+    retryAt,
   );
   if (!released || untilReleased) return;
   await deps.jobs.enqueue({

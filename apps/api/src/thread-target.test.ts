@@ -1606,18 +1606,36 @@ function botRunFindFirst(
   );
 }
 
-function groupRunFindMany(input: { active?: unknown[]; terminals?: unknown[] }) {
+function groupRunFindMany(input: {
+  active?: unknown[];
+  terminals?: unknown[];
+  helpers?: unknown[];
+}) {
   return vi.fn().mockImplementation(
     async (args: {
       where?: {
         status?: { in?: string[] };
-        trigger?: { not?: string };
-        OR?: Array<{ trigger?: { not?: string }; status?: { in?: string[] } }>;
+        trigger?: TriggerFilter | string;
+        OR?: Array<{ trigger?: TriggerFilter; status?: { in?: string[] } }>;
+        sourceMessage?: { threadId?: string };
       };
     }) => {
+      // A helper's waiting runs work on the helper's own thread, so they are queried separately
+      // by the card that links them back to this chat.
+      if (args.where?.trigger === "helper") {
+        return (input.helpers ?? []).filter(
+          (row) =>
+            (row as { sourceMessage?: { threadId?: string } }).sourceMessage?.threadId ===
+            args.where?.sourceMessage?.threadId,
+        );
+      }
       const rows = isTerminalRunQuery(args.where) ? (input.terminals ?? []) : (input.active ?? []);
+      const trigger = typeof args.where?.trigger === "string" ? undefined : args.where?.trigger;
       return rows.filter((row) =>
-        matchesPeerActiveFilter(row as { trigger?: string; status?: string }, args.where),
+        matchesPeerActiveFilter(row as { trigger?: string; status?: string }, {
+          trigger,
+          OR: args.where?.OR,
+        }),
       );
     },
   );
@@ -3129,7 +3147,11 @@ describe("sendThreadMessage", () => {
           update: vi.fn(),
           updateMany: vi.fn(),
           create: vi.fn(
-            async ({ data }: { data: { botId: string; groupReplyOptional?: boolean } }) => ({
+            async ({
+              data,
+            }: {
+              data: { botId: string; groupReplyOptional?: boolean; groupTurn?: number };
+            }) => ({
               id: `run-${++nextRun}`,
               taskId: `task-${nextRun}`,
               botId: data.botId,
@@ -3190,6 +3212,7 @@ describe("sendThreadMessage", () => {
       const { created } = await sendToGroup("what is the plan?");
       expect(created.map((run) => run.botId)).toEqual(["bot-a", "bot-b"]);
       expect(created.map((run) => run.groupReplyOptional)).toEqual([true, true]);
+      expect(created.map((run) => run.groupTurn)).toEqual([0, 1]);
     });
 
     it("that names one member wakes only that member, who must reply", async () => {
@@ -3199,6 +3222,7 @@ describe("sendThreadMessage", () => {
       ]) {
         expect(sent.created.map((run) => run.botId)).toEqual(["bot-b"]);
         expect(sent.created.map((run) => run.groupReplyOptional)).toEqual([false]);
+        expect(sent.created.map((run) => run.groupTurn)).toEqual([0]);
       }
     });
 
@@ -3206,12 +3230,14 @@ describe("sendThreadMessage", () => {
       const { created } = await sendToGroup("@everyone what is the plan?");
       expect(created.map((run) => run.botId)).toEqual(["bot-a", "bot-b"]);
       expect(created.map((run) => run.groupReplyOptional)).toEqual([false, false]);
+      expect(created.map((run) => run.groupTurn)).toEqual([0, 1]);
     });
 
     it("that only names someone outside the group still reaches every member", async () => {
       const { created } = await sendToGroup("@Zed what is the plan?");
       expect(created.map((run) => run.botId)).toEqual(["bot-a", "bot-b"]);
       expect(created.map((run) => run.groupReplyOptional)).toEqual([true, true]);
+      expect(created.map((run) => run.groupTurn)).toEqual([0, 1]);
     });
 
     it("that replies to a member's message goes to that member, who must answer", async () => {
@@ -3221,6 +3247,7 @@ describe("sendThreadMessage", () => {
       });
       expect(created.map((run) => run.botId)).toEqual(["bot-b"]);
       expect(created.map((run) => run.groupReplyOptional)).toEqual([false]);
+      expect(created.map((run) => run.groupTurn)).toEqual([0]);
     });
 
     it("that replies to a member's message but names another goes to the named one", async () => {
@@ -3229,6 +3256,7 @@ describe("sendThreadMessage", () => {
         botId: "bot-b",
       });
       expect(created.map((run) => run.botId)).toEqual(["bot-a"]);
+      expect(created.map((run) => run.groupTurn)).toEqual([0]);
     });
 
     it("that replies to a person's message, or to a bot outside the group, reaches everyone", async () => {
@@ -3273,6 +3301,8 @@ describe("sendThreadMessage", () => {
       });
       const unnamed = await sendToGroup("and the budget?", undefined, [working]);
       expect(unnamed.tx.run.update).not.toHaveBeenCalled();
+      // The busy member keeps turn 0, so the member created behind it speaks second.
+      expect(unnamed.created.map((run) => [run.botId, run.groupTurn])).toEqual([["bot-b", 1]]);
     });
   });
 
@@ -5280,6 +5310,149 @@ describe("helper snapshot settlement", () => {
       });
     },
   );
+});
+
+describe("helper approval snapshot", () => {
+  function runRow(id: string, status: string, extra: Record<string, unknown> = {}) {
+    return {
+      id,
+      botId: "bot-1",
+      threadId: "thread-1",
+      taskId: `task-${id}`,
+      status,
+      trigger: "user",
+      modelProvider: null,
+      modelId: null,
+      error: null,
+      startedAt: null,
+      completedAt: null,
+      createdAt: new Date("2026-01-01T00:00:00Z"),
+      ...extra,
+    };
+  }
+
+  function waitingHelper(sourceThreadId = "thread-1") {
+    return runRow("helper-1", "waiting_input", {
+      trigger: "helper",
+      threadId: "helper-thread-1",
+      sourceMessageId: "card-1",
+      sourceMessage: { threadId: sourceThreadId },
+    });
+  }
+
+  function helperPrisma(input: {
+    active?: unknown[];
+    first?: Parameters<typeof botRunFindFirst>[0];
+    helpers?: unknown[];
+  }) {
+    const findManyRuns = groupRunFindMany({ active: input.active, helpers: input.helpers });
+    const tx = {
+      user: { findMany: vi.fn().mockResolvedValue([]) },
+      spaceMember: { count: vi.fn().mockResolvedValue(1) },
+      $executeRaw: vi.fn(async () => 0),
+      $queryRaw: vi.fn().mockResolvedValue([]),
+      message: { findMany: vi.fn().mockResolvedValue([]) },
+      event: {
+        findFirst: vi.fn().mockResolvedValue(null),
+        findMany: vi.fn().mockResolvedValue([]),
+      },
+      run: { findFirst: botRunFindFirst(input.first ?? []), findMany: findManyRuns },
+    };
+    return {
+      findManyRuns,
+      prisma: {
+        spaceMember: { count: vi.fn().mockResolvedValue(1) },
+        $transaction: vi.fn(async (work: (client: typeof tx) => unknown) => work(tx)),
+      } as unknown as PrismaClient,
+    };
+  }
+
+  it("answers a source-linked waiting helper without promoting it to the main run", async () => {
+    const parent = runRow("parent", "running");
+    const { prisma, findManyRuns } = helperPrisma({
+      active: [parent],
+      first: [parent],
+      helpers: [waitingHelper()],
+    });
+
+    const snapshot = await threadSnapshot({ prisma }, {
+      kind: "bot",
+      botId: "bot-1",
+      threadId: "thread-1",
+      bot: { computer: null },
+    } as ThreadTarget);
+
+    expect(snapshot.run).toMatchObject({ id: "parent", status: "running" });
+    expect(snapshot.activeRuns).toEqual([
+      expect.objectContaining({ id: "parent" }),
+      // The chat answers the card, so the entry names this thread, not the helper's own.
+      expect.objectContaining({
+        id: "helper-1",
+        status: "waiting_input",
+        trigger: "helper",
+        threadId: "thread-1",
+      }),
+    ]);
+    expect(findManyRuns).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: {
+          trigger: "helper",
+          status: "waiting_input",
+          sourceMessage: { threadId: "thread-1" },
+        },
+      }),
+    );
+  });
+
+  it("leaves an idle chat idle while its helper waits for approval", async () => {
+    const { prisma } = helperPrisma({ active: [], first: [], helpers: [waitingHelper()] });
+
+    const snapshot = await threadSnapshot({ prisma }, {
+      kind: "bot",
+      botId: "bot-1",
+      threadId: "thread-1",
+      bot: { computer: null },
+    } as ThreadTarget);
+
+    expect(snapshot.run).toBeNull();
+    expect(snapshot.activeRuns?.map((run) => run.id)).toEqual(["helper-1"]);
+  });
+
+  it("leaves another chat's waiting helper out of this chat", async () => {
+    const { prisma } = helperPrisma({
+      active: [],
+      first: [],
+      helpers: [waitingHelper("other-thread")],
+    });
+
+    const snapshot = await threadSnapshot({ prisma }, {
+      kind: "bot",
+      botId: "bot-1",
+      threadId: "thread-1",
+      bot: { computer: null },
+    } as ThreadTarget);
+
+    expect(snapshot.activeRuns).toEqual([]);
+  });
+
+  it("adds a group's waiting helper beside its member run and keeps the members", async () => {
+    const member = runRow("member", "running");
+    const target = {
+      kind: "group",
+      groupId: "group-1",
+      groupName: "Group",
+      threadId: "thread-1",
+      members: [{ botId: "bot-1", name: "Chief" }],
+      memberBotIds: ["bot-1"],
+    } as unknown as ThreadTarget;
+    const { prisma } = helperPrisma({ active: [member], helpers: [waitingHelper()] });
+
+    const snapshot = await threadSnapshot({ prisma }, target);
+
+    expect(snapshot.run).toMatchObject({ id: "member", status: "running" });
+    expect(snapshot.activeRuns?.map((run) => run.id)).toEqual(["member", "helper-1"]);
+    expect(snapshot.members).toEqual([{ botId: "bot-1", name: "Chief" }]);
+  });
 });
 
 describe("sendTargetBotIds", () => {

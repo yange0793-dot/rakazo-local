@@ -11,8 +11,7 @@ import { SandboxedHtmlViewer } from "../SandboxedHtmlViewer";
  * open a link, offer a reply), and only right after the person used that frame: the viewer
  * shell vouches for a click or key inside it, the frame still has focus, and that click or key
  * has not been used for another action yet. Previews draw only.
- * An interactive frame prints whole: on paper it keeps the width the page was drawn at, so the
- * page's last reported height still fits it, and the browser scales it to the paper.
+ * An interactive frame prints at the paper's width and uses the page's reported content height.
  */
 export function PageFrame({
   document,
@@ -45,7 +44,6 @@ export function PageFrame({
         const height = pageFrameHeight(message.height);
         if (interactive && box.current) {
           setDrawnAt({
-            "--page-width": `${box.current.offsetWidth}px`,
             "--page-height": `${height}px`,
           } as CSSProperties);
         }
@@ -70,8 +68,9 @@ export function PageFrame({
     <>
       <div
         ref={box}
+        data-page-frame={interactive || undefined}
         style={drawnAt}
-        className={`h-full ${interactive ? "print:mx-auto print:h-(--page-height) print:w-(--page-width)" : ""}`}
+        className={`h-full ${interactive ? "print:mx-auto print:h-(--page-height) print:w-full" : ""}`}
       >
         <SandboxedHtmlViewer
           html={document}

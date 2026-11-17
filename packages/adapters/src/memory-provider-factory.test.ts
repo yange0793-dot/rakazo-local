@@ -1,9 +1,22 @@
 import { lookup } from "node:dns/promises";
+import type { SemanticMemoryProvider } from "@rakazo/adapter-kit";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { assertLocalServiceBaseUrl } from "./local-service-endpoint.js";
-import { createMemoryProvider, SpaceMemoryProviderResolver } from "./memory-provider-factory.js";
+import type { MemoryProviderDependencies } from "./memory-provider-factory.js";
+import {
+  createMemoryProvider,
+  memoryProviderEndpointAuthorized,
+  memoryProviderRequiresPrivateEndpoint,
+  prepareMemoryProviderConnection,
+  SpaceMemoryProviderResolver,
+} from "./memory-provider-factory.js";
+import { dispatcherFetch } from "./undici-fetch.js";
 
 vi.mock("node:dns/promises", () => ({ lookup: vi.fn() }));
+vi.mock("./undici-fetch.js", () => ({
+  dispatcherFetch: vi.fn(),
+  fetchPairedWithDispatcher: (transport: typeof fetch) => transport,
+}));
 
 function resolverFor(
   plaintext: string,
@@ -12,6 +25,7 @@ function resolverFor(
     mode?: "cloud" | "local";
     allowPrivateEndpoint?: boolean;
     baseUrl?: string;
+    dependencies?: MemoryProviderDependencies;
   } = {},
 ) {
   vi.stubEnv("MCP_ALLOW_PRIVATE_ENDPOINT", options.allowPrivateEndpoint ? "true" : "false");
@@ -31,7 +45,11 @@ function resolverFor(
   };
   const secrets = { load: vi.fn(() => plaintext) };
   return {
-    resolver: new SpaceMemoryProviderResolver(prisma as never, secrets as never),
+    resolver: new SpaceMemoryProviderResolver(
+      prisma as never,
+      secrets as never,
+      options.dependencies,
+    ),
     secrets,
     prisma,
   };
@@ -44,6 +62,120 @@ afterEach(() => {
 });
 
 describe("SpaceMemoryProviderResolver", () => {
+  it("keeps local classification private while authorizing only its explicit memory endpoint", () => {
+    const settings = { baseUrl: "http://127.0.0.1:17676" };
+    expect(memoryProviderRequiresPrivateEndpoint("local", settings)).toBe(true);
+    expect(
+      memoryProviderEndpointAuthorized("local", settings, {
+        allowPrivateEndpoint: true,
+        localAllowedUrls: "",
+      }),
+    ).toBe(false);
+    expect(
+      memoryProviderEndpointAuthorized("local", settings, {
+        allowPrivateEndpoint: false,
+        localAllowedUrls: settings.baseUrl,
+      }),
+    ).toBe(true);
+    expect(
+      memoryProviderEndpointAuthorized(
+        "honcho",
+        { mode: "local", baseUrl: settings.baseUrl },
+        { allowPrivateEndpoint: false, localAllowedUrls: settings.baseUrl },
+      ),
+    ).toBe(false);
+  });
+
+  it("does not decrypt credentials or probe unauthorized local endpoints", async () => {
+    vi.stubEnv("RAKAZO_LOCAL_MEMORY_ALLOWED_URLS", "http://127.0.0.1:17676");
+    const transport = vi.fn();
+    vi.stubGlobal("fetch", transport);
+    const { resolver, secrets } = resolverFor(
+      JSON.stringify({ token: "synthetic-local-token-00000000000001" }),
+      {
+        provider: "local",
+        baseUrl: "http://127.0.0.1:17677",
+        allowPrivateEndpoint: true,
+      },
+    );
+    await expect(resolver.resolve("workspace-1")).resolves.toBeNull();
+    expect(secrets.load).not.toHaveBeenCalled();
+    expect(transport).not.toHaveBeenCalled();
+  });
+
+  it("creates the managed local provider through optional DI without probing during resolution", async () => {
+    const baseUrl = "http://127.0.0.1:17676";
+    vi.stubEnv("RAKAZO_LOCAL_MEMORY_ALLOWED_URLS", baseUrl);
+    const transport = vi.fn();
+    vi.stubGlobal("fetch", transport);
+    const managed = { describe: () => ({ id: "local" }) } as SemanticMemoryProvider;
+    const createManagedMemoryProvider = vi.fn(() => managed);
+    const { resolver, secrets } = resolverFor(
+      JSON.stringify({ token: "synthetic-local-token-00000000000001" }),
+      {
+        provider: "local",
+        baseUrl,
+        allowPrivateEndpoint: false,
+        dependencies: { createManagedMemoryProvider },
+      },
+    );
+    const configured = await resolver.resolve("workspace-1");
+    expect(configured?.provider).toBe(managed);
+    expect(createManagedMemoryProvider).toHaveBeenCalledWith(
+      expect.objectContaining({
+        search: expect.any(Function),
+        upsert: expect.any(Function),
+        remove: expect.any(Function),
+        health: expect.any(Function),
+      }),
+    );
+    expect(secrets.load).toHaveBeenCalledOnce();
+    expect(transport).not.toHaveBeenCalled();
+  });
+
+  it("fails visibly when local authority wiring is missing", () => {
+    expect(() =>
+      createMemoryProvider(
+        "local",
+        { baseUrl: "http://127.0.0.1:17676" },
+        { token: "synthetic-local-token-00000000000001" },
+      ),
+    ).toThrow(/transactional fact store/);
+  });
+
+  it("authorizes local preparation before credentials and the health probe", async () => {
+    const baseUrl = "http://127.0.0.1:17676";
+    const token = "synthetic-local-token-00000000000001";
+    const transport = vi
+      .mocked(dispatcherFetch)
+      .mockImplementation(async () => Response.json({ ok: true }));
+    await expect(
+      prepareMemoryProviderConnection({
+        provider: "local",
+        settings: { baseUrl },
+        credentials: { token },
+        allowPrivateEndpoint: true,
+        localAllowedUrls: "",
+      }),
+    ).rejects.toThrow(/allowlist/);
+    expect(transport).not.toHaveBeenCalled();
+    await expect(
+      prepareMemoryProviderConnection({
+        provider: "local",
+        settings: { baseUrl },
+        credentials: { token },
+        allowPrivateEndpoint: false,
+        localAllowedUrls: baseUrl,
+      }),
+    ).resolves.toEqual({
+      provider: "local",
+      settings: { baseUrl },
+      credentials: { token },
+    });
+    expect(transport).toHaveBeenCalledOnce();
+    expect(transport.mock.calls[0]?.[0]).toBe(`${baseUrl}/health`);
+  });
+
   it.each(["honcho", "supermemory"])(
     "disables %s without loading credentials when local DNS revalidation fails",
     async (provider) => {

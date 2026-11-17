@@ -1,10 +1,10 @@
 import { Trans, useLingui } from "@lingui/react/macro";
 import type { Routine } from "@rakazo/contracts";
-import { cronFromPreset } from "@rakazo/core";
+import { cronFromPreset, isOneShotRoutineCrons } from "@rakazo/core";
 import { Button, Input, Switch, Textarea } from "@rakazo/ui-web";
 import { useQuery } from "@tanstack/react-query";
 import { ChevronLeft, X } from "lucide-react";
-import { useId } from "react";
+import { useEffect, useId } from "react";
 import { useIdentityConfirmation } from "../components/ConfirmIdentityDialog";
 import { useSpaceQueries } from "../lib/query";
 import type { RoutineDraftState } from "../lib/routine-draft";
@@ -40,6 +40,7 @@ export function RoutineEditor({
   onEnsureWebhook,
   onRevealWebhook,
   onHideWebhook,
+  onScheduleUpdate,
 }: {
   bot: { id: string; name: string };
   draft: RoutineDraftState;
@@ -60,8 +61,9 @@ export function RoutineEditor({
   onEnsureWebhook: () => Promise<void>;
   onRevealWebhook: () => Promise<void>;
   onHideWebhook: () => void;
+  onScheduleUpdate: (routine: Routine) => void;
 }) {
-  const { t } = useLingui();
+  const { t, i18n } = useLingui();
   const fieldId = useId();
   const { withIdentityConfirmation, identityDialog } = useIdentityConfirmation();
   // Closing the confirmation is a choice, and other failures show as the editor's error.
@@ -69,10 +71,18 @@ export function RoutineEditor({
   const queries = useSpaceQueries();
   const scheduleStatus = useQuery({
     ...queries.routines.list.queryOptions({ input: { botId: editing?.botId ?? "" } }),
-    enabled: editing !== null && draft.active,
+    enabled: editing !== null,
     refetchInterval: 15_000,
     select: (routines) => routines.find((routine) => routine.id === editing?.id) ?? null,
   });
+  useEffect(() => {
+    if (scheduleStatus.data && !saving) onScheduleUpdate(scheduleStatus.data);
+  }, [scheduleStatus.data, saving, onScheduleUpdate]);
+  const currentSchedule = scheduleStatus.data ?? editing;
+  const oneShotFinished =
+    isOneShotRoutineCrons(draft.schedules.map(cronFromPreset)) &&
+    isOneShotRoutineCrons(currentSchedule?.crons ?? []) &&
+    Boolean(currentSchedule?.lastRunAt && !currentSchedule.nextRunAt);
   // Null when this server receives no email or the bot is another member's, which hides the trigger.
   const email = useQuery(queries.bots.emailAddress.queryOptions({ input: { botId: bot.id } })).data;
   const scheduleDelayed =
@@ -89,7 +99,9 @@ export function RoutineEditor({
     Boolean(draft.watch);
   const canTest = Boolean(editing) && !saving && !running;
   const needsOneShotArm =
-    editing != null && routineNeedsOneShotArm(editing, draft.schedules.map(cronFromPreset));
+    editing == null
+      ? isOneShotRoutineCrons(draft.schedules.map(cronFromPreset))
+      : routineNeedsOneShotArm(editing, draft.schedules.map(cronFromPreset));
 
   return (
     <div>
@@ -125,6 +137,7 @@ export function RoutineEditor({
           <Switch
             id={`${fieldId}-active`}
             checked={draft.active}
+            disabled={oneShotFinished}
             onCheckedChange={(active) => onChange({ ...draft, active })}
           />
           <Trans>Active</Trans>
@@ -264,6 +277,15 @@ export function RoutineEditor({
                 className="mt-2"
               />
             </label>
+          ) : currentSchedule?.nextRunAt ? (
+            <p className="text-body-sm">
+              <Trans>Next run</Trans>{" "}
+              <time dateTime={currentSchedule.nextRunAt}>
+                {new Date(currentSchedule.nextRunAt).toLocaleString(i18n.locale, {
+                  timeZone: timezone,
+                })}
+              </time>
+            </p>
           ) : null}
         </div>
 
@@ -289,7 +311,9 @@ export function RoutineEditor({
         </p>
       ) : null}
 
-      {editing ? <RoutineRunHistory key={editing.id} routineId={editing.id} /> : null}
+      {editing ? (
+        <RoutineRunHistory key={editing.id} routineId={editing.id} onOpenChat={onClose} />
+      ) : null}
       {identityDialog}
     </div>
   );

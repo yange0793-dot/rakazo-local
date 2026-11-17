@@ -97,6 +97,7 @@ function fixture({
   disabledBuiltinTools = [],
   parallelCalls = false,
   sourceRole,
+  helperSource,
   existingSharedMemory,
   advanceRevisionAfterRead = false,
   fleetManagement = false,
@@ -108,10 +109,13 @@ function fixture({
   botUserId = "user-1",
   batch,
   browser,
+  graphical = Boolean(browser),
   spendingLimit = null,
 }: {
   /** A page browser on a graphical computer, so browser_act and computer_act are offered. */
   browser?: BrowserProvider;
+  /** The fake computer's graphical capability; a page browser implies one unless set. */
+  graphical?: boolean;
   /** The user's spending limit for payments. */
   spendingLimit?: SpendingLimit | null;
 
@@ -130,6 +134,8 @@ function fixture({
   fleetBots?: { id: string; name: string; thread?: { id: string } }[];
   parallelCalls?: boolean;
   sourceRole?: string;
+  /** The chat card a background helper's run came from, with the helper's name on it. */
+  helperSource?: { threadId: string; name: string };
   builtin?: boolean;
   disabledBuiltinTools?: string[];
   existingSharedMemory?: string;
@@ -202,7 +208,7 @@ function fixture({
     userId: "user-1",
     status: "queued",
     trigger,
-    sourceMessageId: sourceRole ? "source-1" : null,
+    sourceMessageId: sourceRole || helperSource ? "source-1" : null,
     leaseFence: 0,
   };
   const createdAt = new Map<string, Date>();
@@ -211,14 +217,24 @@ function fixture({
       async ({
         where,
       }: {
-        where: { kind: string; status: { in: string[] }; createdAt?: { gte: Date } };
-      }) =>
-        effects.find(
-          (effect) =>
-            effect.kind === where.kind &&
-            where.status.in.includes(effect.status) &&
-            !(where.createdAt && createdAt.get(effect.id)! < where.createdAt.gte),
-        ) ?? null,
+        where: {
+          kind: string | { in: string[] };
+          status: string | { in: string[] };
+          createdAt?: { gte: Date };
+        };
+      }) => {
+        const candidates = typeof where.kind === "string" ? effects : [...effects].reverse();
+        const matches = (value: string, filter: string | { in: string[] }) =>
+          typeof filter === "string" ? value === filter : filter.in.includes(value);
+        return (
+          candidates.find(
+            (effect) =>
+              matches(effect.kind, where.kind) &&
+              matches(effect.status, where.status) &&
+              !(where.createdAt && createdAt.get(effect.id)! < where.createdAt.gte),
+          ) ?? null
+        );
+      },
     ),
     findMany: vi.fn(
       async ({
@@ -358,7 +374,14 @@ function fixture({
         disabledBuiltinTools,
         fleetManagement,
         computerId: "computer-1",
-        computer: { id: "computer-1", scope: "dedicated" },
+        computer: {
+          id: "computer-1",
+          scope: "dedicated",
+          // Named for the browser action description; no `kind`, so the fake computer keeps
+          // the graphical capability this fixture's page tests were written against.
+          homeKey: "home-1",
+          providerRef: "provider-1",
+        },
       })),
       update: vi.fn(async ({ data }: { data: Record<string, unknown> }) => ({
         id: run.botId,
@@ -399,8 +422,24 @@ function fixture({
       findFirst: vi.fn(
         async (_query?: { where?: { OR?: unknown } }): Promise<{ id: string } | null> => null,
       ),
-      findUnique: vi.fn(async () =>
-        sourceRole ? { role: sourceRole, blocks: [{ kind: "text", text: prompt }] } : null,
+      findUnique: vi.fn(async (query?: { where?: { id?: string } }) =>
+        helperSource && query?.where?.id === "source-1"
+          ? {
+              id: "source-1",
+              threadId: helperSource.threadId,
+              blocks: [
+                {
+                  kind: "subagent",
+                  agentId: "helper-1",
+                  name: helperSource.name,
+                  task: "Do the task",
+                  status: "running",
+                },
+              ],
+            }
+          : sourceRole
+            ? { role: sourceRole, blocks: [{ kind: "text", text: prompt }] }
+            : null,
       ),
       findMany: vi.fn(async () => []),
       create: vi.fn(async ({ data }: { data: Record<string, unknown> }) => ({
@@ -494,7 +533,7 @@ function fixture({
       action(prisma),
     ),
   });
-  const pauseRunForInput = vi.fn(async () => {
+  const pauseRunForInput = vi.fn(async (_input?: unknown) => {
     run.status = "waiting_input";
     return { continuationRunId: null as string | null };
   });
@@ -592,7 +631,7 @@ function fixture({
       },
       execute,
     },
-    sandbox: { describe: () => ({ capabilities: { graphical: Boolean(browser) } }) },
+    sandbox: { describe: () => ({ capabilities: { graphical } }) },
     browser,
     memory: {
       read: async (request: { scope: string; path?: string }) => {
@@ -3844,7 +3883,20 @@ describe("user computer screen control", () => {
   });
 });
 
-describe("background helpers only read", () => {
+describe("background helpers and approval", () => {
+  const helperSource = { threadId: "chat-1", name: "scout" };
+
+  const pausedInput = (f: ReturnType<typeof fixture>) =>
+    (
+      f.pauseRunForInput.mock.calls as unknown as [
+        { cardThreadId?: string; blocks: Array<Record<string, unknown>> },
+      ][]
+    )[0]?.[0];
+
+  beforeEach(() => {
+    reviewMock.mockReset();
+  });
+
   it.each([
     ["remember", { content: "Must not be saved" }],
     ["update_bot", { instructions: "Never ask" }],
@@ -3867,52 +3919,235 @@ describe("background helpers only read", () => {
     expect(JSON.stringify(f.results[0])).toContain("not available to a background helper");
   });
 
-  it("runs a declared read in Never ask", async () => {
-    const f = fixture({ trigger: "helper", skipApprovals: true });
-    await f.run();
-    expect(f.execute).toHaveBeenCalledOnce();
-  });
-
-  it("refuses a declared write whatever the mode or rules", async () => {
-    for (const options of [
-      { skipApprovals: true },
-      { rules: [{ effect: "always_allow", matchKind: "tool", matchValue: "demo_get_item" }] },
-    ] as Parameters<typeof fixture>[0][]) {
-      const f = fixture({ trigger: "helper", readOnly: false, ...options });
+  it("runs a declared read without asking", async () => {
+    for (const options of [{}, { skipApprovals: true }] as Parameters<typeof fixture>[0][]) {
+      const f = fixture({ trigger: "helper", helperSource, ...options });
       await f.run();
-      expect(f.execute).not.toHaveBeenCalled();
+      expect(f.execute).toHaveBeenCalledOnce();
       expect(f.pauseRunForInput).not.toHaveBeenCalled();
-      expect(JSON.stringify(f.results[0])).toContain("a background helper may only read");
     }
   });
 
-  it("runs a batch of declared reads, but not one naming no action or an undeclared one", async () => {
+  it("asks in the chat that started the helper before a connector write", async () => {
+    const f = fixture({ trigger: "helper", readOnly: false, helperSource });
+    await f.run();
+    expect(f.execute).not.toHaveBeenCalled();
+    expect(f.effects[0]?.status).toBe("intended");
+    const input = pausedInput(f);
+    expect(input?.cardThreadId).toBe("chat-1");
+    expect(input?.blocks[0]).toMatchObject({
+      kind: "ask",
+      actions: [
+        { id: "allow", label: "Allow once" },
+        { id: "always", label: "Always allow this tool" },
+        { id: "deny", label: "Deny" },
+      ],
+    });
+  });
+
+  it("refuses a write with no originating chat instead of pausing a hidden thread", async () => {
+    const f = fixture({ trigger: "helper", readOnly: false });
+    await f.run();
+    expect(f.execute).not.toHaveBeenCalled();
+    expect(f.pauseRunForInput).not.toHaveBeenCalled();
+    expect(f.effects[0]?.status).toBe("denied");
+    expect(JSON.stringify(f.results[0])).toContain("no chat to ask in");
+  });
+
+  it("does not let Auto Review authorize a helper's write from its own brief", async () => {
+    reviewMock.mockResolvedValue({ decision: "pass", reason: "Fits", model: "mock" });
+    const f = fixture({ trigger: "helper", readOnly: false, autoReview: true, helperSource });
+    await f.run();
+    expect(f.execute).not.toHaveBeenCalled();
+    expect(reviewMock).not.toHaveBeenCalled();
+    expect(f.pauseRunForInput).toHaveBeenCalledOnce();
+    expect(pausedInput(f)?.cardThreadId).toBe("chat-1");
+  });
+
+  it("runs a helper's write on the owner's explicit allow rule", async () => {
+    const f = fixture({
+      trigger: "helper",
+      readOnly: false,
+      autoReview: true,
+      helperSource,
+      rules: [{ effect: "always_allow", matchKind: "tool", matchValue: "demo_get_item" }],
+    });
+    await f.run();
+    expect(f.execute).toHaveBeenCalledOnce();
+    expect(reviewMock).not.toHaveBeenCalled();
+    expect(f.pauseRunForInput).not.toHaveBeenCalled();
+  });
+
+  it("runs a helper's write in Never ask, as the owner's own turn would", async () => {
+    const f = fixture({
+      trigger: "helper",
+      readOnly: false,
+      skipApprovals: true,
+      helperSource,
+    });
+    await f.run();
+    expect(f.execute).toHaveBeenCalledOnce();
+    expect(f.pauseRunForInput).not.toHaveBeenCalled();
+  });
+
+  it("keeps an explicit deny ahead of any card", async () => {
+    const f = fixture({
+      trigger: "helper",
+      readOnly: false,
+      helperSource,
+      rules: [{ effect: "deny", matchKind: "tool", matchValue: "demo_get_item" }],
+    });
+    await f.run();
+    expect(f.execute).not.toHaveBeenCalled();
+    expect(f.pauseRunForInput).not.toHaveBeenCalled();
+    expect(JSON.stringify(f.results[0])).toContain("blocked in this space");
+  });
+
+  it("runs declared reads and asks about unnamed or undeclared batch entries", async () => {
     const batchOf = (...slugs: Array<string | undefined>) => ({
       id: "batch",
       tools: slugs.map((slug) => (slug ? { tool_slug: slug, arguments: {} } : { arguments: {} })),
     });
-    const helperBatch = () =>
+    const helperBatch = (options: Parameters<typeof fixture>[0] = {}) =>
       fixture({
         name: "COMPOSIO_MULTI_EXECUTE_TOOL",
         readOnly: true,
         secondResource: true,
         batch: { items: "tools", action: "tool_slug", arguments: "arguments" },
         trigger: "helper",
-        skipApprovals: true,
+        helperSource,
+        ...options,
       });
     const named = helperBatch();
     named.setCalls([{ args: batchOf("demo_get_other"), executionId: "call-1" }]);
     await named.run();
     expect(named.execute).toHaveBeenCalledOnce();
+    expect(named.pauseRunForInput).not.toHaveBeenCalled();
     const unnamed = helperBatch();
     unnamed.setCalls([{ args: batchOf("demo_get_other", undefined), executionId: "call-1" }]);
     await unnamed.run();
     expect(unnamed.execute).not.toHaveBeenCalled();
+    expect(unnamed.pauseRunForInput).toHaveBeenCalledOnce();
     // An action no tool declares read-only is not a read either.
     const undeclared = helperBatch();
     undeclared.setCalls([{ args: batchOf("gmail_archive_thread"), executionId: "call-1" }]);
     await undeclared.run();
     expect(undeclared.execute).not.toHaveBeenCalled();
+    expect(undeclared.pauseRunForInput).toHaveBeenCalledOnce();
+    // Never ask is the owner's policy for their own turns too, so it runs them here as well.
+    const never = helperBatch({ skipApprovals: true });
+    never.setCalls([{ args: batchOf("demo_get_other", undefined), executionId: "call-1" }]);
+    await never.run();
+    expect(never.execute).toHaveBeenCalledOnce();
+  });
+
+  /** A page browser whose actions enter the normal approval policy. */
+  function helperBrowser(
+    purchase: { steps: number[]; site: string; label: string; amount: string } | null = null,
+  ) {
+    const acts: unknown[][] = [];
+    class HelperBrowser {
+      readonly observation = {
+        url: "https://shop.example.test/checkout",
+        steps: [{ kind: "click" as const, role: "button", name: "Buy now" }],
+      };
+
+      describe() {
+        return {
+          id: "stub",
+          contractVersion: "1",
+          adapterVersion: "0",
+          capabilities: {
+            page: true,
+            refs: true,
+            keyless: true,
+            requiresActionApproval: true,
+          },
+        };
+      }
+
+      navigate = vi.fn();
+      snapshot = vi.fn();
+      act = vi.fn(async (_computer: unknown, request: { actions: unknown[] }) => {
+        acts.push(request.actions);
+        return {
+          ok: true,
+          completed: request.actions.length,
+          url: "https://shop.example.test/",
+          title: "Shop",
+        };
+      });
+      purchaseCheck = vi.fn(async () => ({ purchase }));
+
+      describeAction() {
+        return this.observation;
+      }
+    }
+    const provider = new HelperBrowser();
+    const describeAction = vi.spyOn(provider, "describeAction");
+    return { provider: provider as unknown as BrowserProvider, acts, describeAction };
+  }
+
+  it("asks once before a helper's page action and shows the page it would act on", async () => {
+    const page = helperBrowser();
+    const f = fixture({ builtin: true, browser: page.provider, trigger: "helper", helperSource });
+    f.setCalls([
+      {
+        name: "browser_act",
+        args: { actions: [{ kind: "click", ref: "e2" }] },
+        executionId: "call-1",
+      },
+    ]);
+    await f.run();
+    expect(page.acts).toEqual([]);
+    expect(page.describeAction).toHaveBeenCalledOnce();
+    expect(page.describeAction.mock.contexts[0]).toBe(page.provider);
+    const input = pausedInput(f);
+    expect(input?.cardThreadId).toBe("chat-1");
+    expect(input?.blocks[0]).toMatchObject({
+      kind: "ask",
+      text: "Review before browser_act → shop.example.test",
+      detail: 'url: https://shop.example.test/checkout\nclick button "Buy now"',
+      actions: [
+        { id: "allow", label: "Allow once" },
+        { id: "always", label: "Always allow this tool" },
+        { id: "deny", label: "Deny" },
+      ],
+    });
+  });
+
+  it("never lets a helper buy anything or type saved logins, cards or codes", async () => {
+    for (const actions of [
+      [{ kind: "fill_secret", ref: "e1", secret: "login", field: "password" }],
+      [{ kind: "fill_code", ref: "e2", text: "123456" }],
+      [{ kind: "fill_pay_token" }],
+    ]) {
+      const page = helperBrowser();
+      const f = fixture({ builtin: true, browser: page.provider, trigger: "helper", helperSource });
+      f.setCalls([{ name: "browser_act", args: { actions }, executionId: "call-1" }]);
+      await f.run();
+      expect(page.acts).toEqual([]);
+      expect(f.pauseRunForInput).not.toHaveBeenCalled();
+      expect(JSON.stringify(f.results[0])).toContain(
+        "cannot buy anything or type saved logins, cards or codes",
+      );
+    }
+    const purchase = { steps: [0], site: "shop.example.test", label: "Pay $113", amount: "$113" };
+    const page = helperBrowser(purchase);
+    const f = fixture({ builtin: true, browser: page.provider, trigger: "helper", helperSource });
+    f.setCalls([
+      {
+        name: "browser_act",
+        args: { actions: [{ kind: "click", ref: "e2" }] },
+        executionId: "call-1",
+      },
+    ]);
+    await f.run();
+    expect(page.acts).toEqual([]);
+    expect(f.pauseRunForInput).not.toHaveBeenCalled();
+    expect(JSON.stringify(f.results[0])).toContain(
+      "cannot buy anything or type saved logins, cards or codes",
+    );
   });
 });
 
@@ -4335,4 +4570,269 @@ it("does not blame the webhook on cards every run shows", async () => {
   await connection.run();
   expect(connection.pauseRunForInput).toHaveBeenCalledOnce();
   expect(askDetail(connection)).toBe("Telegram: fake");
+});
+
+describe("a native page browser without a desktop", () => {
+  beforeEach(() => reviewMock.mockReset());
+  const click = [{ kind: "click", ref: "e2" }];
+  const fill = [{ kind: "fill", ref: "e1", text: "Ada" }];
+  const actionsFor = { click, fill } as const;
+
+  /** A page driver with no purchase check, as a native browser has none. */
+  function pageBrowser(capabilities: Record<string, unknown> = {}) {
+    const acts: unknown[][] = [];
+    const provider = {
+      describe: () => ({
+        id: "native-page",
+        contractVersion: "1",
+        adapterVersion: "0",
+        capabilities: { page: true, refs: true, keyless: true, ...capabilities },
+      }),
+      act: vi.fn(async (_computer: unknown, request: { actions: unknown[] }) => {
+        acts.push(request.actions);
+        return {
+          ok: true,
+          completed: request.actions.length,
+          url: "https://example.test/",
+          title: "Example",
+        };
+      }),
+    } as unknown as BrowserProvider;
+    return { provider, acts };
+  }
+  const nativeBrowser = () =>
+    pageBrowser({ requiresGraphicalComputer: false, requiresActionApproval: true });
+  const actCall = (actions: unknown[], executionId = "call-1") => ({
+    name: "browser_act",
+    args: { actions },
+    executionId,
+  });
+
+  it("offers the page tools on the native browser, and only there", async () => {
+    const native = fixture({ builtin: true, browser: nativeBrowser().provider, graphical: false });
+    native.setCalls([]);
+    await native.run();
+    expect(native.offeredTools()).toEqual(
+      expect.arrayContaining(["browser_navigate", "browser_snapshot", "browser_act"]),
+    );
+    expect(native.offeredTools()).not.toContain("computer_act");
+    expect(native.offeredTools()).not.toContain("computer_observe");
+
+    // Without the capability, a page on a non-graphical computer has no page tools.
+    const legacy = fixture({ builtin: true, browser: pageBrowser().provider, graphical: false });
+    legacy.setCalls([]);
+    await legacy.run();
+    expect(legacy.offeredTools()).not.toContain("browser_act");
+
+    // A graphical computer keeps the page tools it had.
+    const desktop = fixture({ builtin: true, browser: pageBrowser().provider });
+    desktop.setCalls([]);
+    await desktop.run();
+    expect(desktop.offeredTools()).toContain("browser_act");
+  });
+
+  it.each(["click", "fill"] as const)(
+    "lets Never ask, Auto Review and an allow rule authorize an ordinary %s",
+    async (kind) => {
+      const actions = actionsFor[kind];
+      for (const options of [
+        { skipApprovals: true },
+        { autoReview: true },
+        {
+          rules: [{ effect: "always_allow", matchKind: "tool", matchValue: "browser_act" }],
+          confirmationsOverride: true,
+        },
+      ] as const) {
+        const page = nativeBrowser();
+        const f = fixture({
+          builtin: true,
+          browser: page.provider,
+          graphical: false,
+          ...options,
+        } as never);
+        reviewMock.mockResolvedValue({ decision: "pass", model: "mock" });
+        f.setCalls([actCall([...actions])]);
+        await f.run();
+        expect(page.acts).toEqual([actions]);
+        expect(f.pauseRunForInput).not.toHaveBeenCalled();
+        if ("autoReview" in options) expect(reviewMock).toHaveBeenCalledOnce();
+        else expect(reviewMock).not.toHaveBeenCalled();
+        reviewMock.mockReset();
+      }
+    },
+  );
+
+  it("asks in Ask mode and falls back to asking when Auto Review cannot pass it", async () => {
+    for (const options of [
+      { savedPreference: false },
+      { autoReview: true, approvalRole: { primary: null, backups: [] } },
+      { autoReview: true },
+    ]) {
+      reviewMock.mockResolvedValue({ decision: "ask", reason: "Needs the owner", model: "mock" });
+      const page = nativeBrowser();
+      const f = fixture({ builtin: true, browser: page.provider, graphical: false, ...options });
+      f.setCalls([actCall(fill)]);
+      await f.run();
+      expect(page.acts).toEqual([]);
+      expect(isApprovalPausedResult(f.results[0])).toBe(true);
+      const [{ blocks }] = f.pauseRunForInput.mock.calls[0] as unknown as [
+        { blocks: Array<Record<string, unknown>> },
+      ];
+      expect(blocks[0]).toMatchObject({
+        kind: "ask",
+        actions: [
+          { id: "allow", label: "Allow once" },
+          { id: "always", label: "Always allow this tool" },
+          { id: "deny", label: "Deny" },
+        ],
+      });
+      reviewMock.mockReset();
+    }
+  });
+
+  it("runs the approved action once, and only once", async () => {
+    const page = nativeBrowser();
+    const f = fixture({ builtin: true, browser: page.provider, graphical: false });
+    f.setCalls([actCall(fill)]);
+    await f.run();
+    expect(isApprovalPausedResult(f.results[0])).toBe(true);
+    expect(page.acts).toEqual([]);
+    expect(f.effects[0]).toMatchObject({
+      kind: "browser_act",
+      request: expect.objectContaining({ actions: fill }),
+    });
+
+    f.effects[0]!.status = "approved";
+    f.setCalls([actCall(fill, "call-2")]);
+    await f.run();
+    expect(page.acts).toEqual([fill]);
+    expect(f.pauseRunForInput).toHaveBeenCalledOnce();
+
+    // The same call again returns the recorded result instead of pressing the page again.
+    f.setCalls([actCall(fill, "call-3")]);
+    await f.run();
+    expect(page.acts).toEqual([fill]);
+  });
+
+  it("restores browser state from the scoped durable observation before an approved replay", async () => {
+    const page = nativeBrowser();
+    let state: unknown = null;
+    page.provider.snapshot = vi.fn(async () => {
+      state = { page: "session:page-2", binding: "snapshot-1" };
+      return {
+        url: "https://example.test/",
+        title: "Example",
+        tree: "button Go [e2]",
+        elements: [],
+      };
+    });
+    page.provider.checkpoint = () => state;
+    const restore = vi.fn((_computer: unknown, saved: unknown) => {
+      state = saved;
+    });
+    page.provider.restore = restore;
+    const f = fixture({ builtin: true, browser: page.provider, graphical: false });
+    f.setCalls([{ name: "browser_snapshot", args: {}, executionId: "observe-1" }]);
+    await f.run();
+    expect(f.effects[0]).toMatchObject({
+      kind: "browser_snapshot",
+      status: "completed",
+      result: {
+        browserState: {
+          computerId: "computer-1",
+          provider: { page: "session:page-2", binding: "snapshot-1" },
+        },
+      },
+    });
+    expect(JSON.stringify(f.results)).not.toContain("browserState");
+    state = null;
+    f.setCalls([actCall(fill)]);
+    await f.run();
+    expect(state).toEqual({ page: "session:page-2", binding: "snapshot-1" });
+    expect(page.acts).toEqual([]);
+    f.effects[1]!.status = "approved";
+    state = null;
+    f.setCalls([actCall(fill, "call-2")]);
+    await f.run();
+    expect(page.acts).toEqual([fill]);
+    expect(state).toEqual({ page: "session:page-2", binding: "snapshot-1" });
+    expect(f.prisma.externalEffect.findFirst).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: {
+          spaceId: "space-1",
+          run: { botId: "bot-1", userId: "user-1" },
+          kind: { in: ["browser_navigate", "browser_snapshot", "browser_act"] },
+          status: "completed",
+          result: { path: ["browserState", "computerId"], equals: "computer-1" },
+        },
+      }),
+    );
+    f.setCalls([actCall(fill, "call-3")]);
+    await f.run();
+    expect(page.acts).toEqual([fill]);
+    expect(JSON.stringify(f.results)).not.toContain("browserState");
+  });
+
+  it("does not run an action after Deny, and takes no reworded one instead", async () => {
+    const page = nativeBrowser();
+    const f = fixture({ builtin: true, browser: page.provider, graphical: false });
+    f.setCalls([actCall(click)]);
+    await f.run();
+    expect(isApprovalPausedResult(f.results[0])).toBe(true);
+    f.effects[0]!.status = "denied";
+    f.setCalls([actCall([{ kind: "click", ref: "e9" }], "call-2")]);
+    await f.run();
+    expect(f.results.at(-1)).toEqual({ error: DENIED_ACTION_ERROR });
+    expect(page.acts).toEqual([]);
+    expect(f.pauseRunForInput).toHaveBeenCalledOnce();
+  });
+
+  it("keeps a real deny a deny, with no card", async () => {
+    const page = nativeBrowser();
+    const f = fixture({
+      builtin: true,
+      browser: page.provider,
+      graphical: false,
+      rules: [{ effect: "deny", matchKind: "tool", matchValue: "browser_act" }],
+      confirmationsOverride: true,
+    } as never);
+    f.setCalls([actCall(click)]);
+    await f.run();
+    expect(f.pauseRunForInput).not.toHaveBeenCalled();
+    expect(page.acts).toEqual([]);
+    expect(f.results[0]).toMatchObject({ error: expect.stringContaining("blocked") });
+    expect(reviewMock).not.toHaveBeenCalled();
+  });
+
+  it("keeps another provider's approval path as it was", async () => {
+    const asked = pageBrowser();
+    const f = fixture({
+      builtin: true,
+      browser: asked.provider,
+      rules: [{ effect: "require_approval", matchKind: "tool", matchValue: "browser_act" }],
+      confirmationsOverride: true,
+    } as never);
+    f.setCalls([actCall(fill)]);
+    await f.run();
+    expect(asked.acts).toEqual([]);
+    expect(f.pauseRunForInput).toHaveBeenCalledOnce();
+    const [{ blocks }] = f.pauseRunForInput.mock.calls[0] as unknown as [
+      { blocks: Array<Record<string, unknown>> },
+    ];
+    // A provider that does not require action approval still offers Always allow.
+    expect(blocks[0]).toMatchObject({
+      actions: [
+        { id: "allow", label: "Allow once" },
+        { id: "always", label: "Always allow this tool" },
+        { id: "deny", label: "Deny" },
+      ],
+    });
+
+    const silentPage = pageBrowser();
+    const silent = fixture({ builtin: true, browser: silentPage.provider, skipApprovals: true });
+    silent.setCalls([actCall(fill)]);
+    await silent.run();
+    expect(silent.pauseRunForInput).not.toHaveBeenCalled();
+    expect(silentPage.acts).toHaveLength(1);
+  });
 });

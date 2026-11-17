@@ -62,7 +62,26 @@ export function watchSystemAppearance(
     return () => undefined;
   }
   const media = window.matchMedia("(prefers-color-scheme: light)");
-  const handler = () => onChange(media.matches ? "light" : "dark");
+  const print = window.matchMedia("print");
+  let printing = false;
+  const handler = () => {
+    // Printing temporarily reports a light scheme. Reloading themed page frames then
+    // captures their loading state instead of the document already on screen.
+    if (!printing && !print.matches) onChange(media.matches ? "light" : "dark");
+  };
+  const beforePrint = () => {
+    printing = true;
+  };
+  const afterPrint = () => {
+    printing = false;
+    handler();
+  };
   media.addEventListener("change", handler);
-  return () => media.removeEventListener("change", handler);
+  window.addEventListener("beforeprint", beforePrint);
+  window.addEventListener("afterprint", afterPrint);
+  return () => {
+    media.removeEventListener("change", handler);
+    window.removeEventListener("beforeprint", beforePrint);
+    window.removeEventListener("afterprint", afterPrint);
+  };
 }

@@ -1,4 +1,5 @@
 import type { ModelCredential } from "@rakazo/contracts";
+import { ModelConnectInputSchema } from "@rakazo/contracts";
 import { describe, expect, it } from "vitest";
 import type { ConnectionFormDraft } from "./model-connection-form.js";
 import {
@@ -113,7 +114,7 @@ describe("connectionFormFields", () => {
       apiProtocol: "chat-completions",
       reasoning: false,
       thinkingLevel: null,
-      maxTokens: "4096",
+      maxTokens: "",
       contextWindow: "262144",
       supportsImages: false,
       maxImagesPerPrompt: "",
@@ -199,6 +200,40 @@ describe("connectionFormFields", () => {
     });
   });
 
+  it("keeps an explicit adaptive declaration when opening and saving its connection", () => {
+    const saved = credential({
+      provider: COMPATIBLE,
+      baseUrl: "http://localhost:8000/v1",
+      apiProtocol: "anthropic-messages",
+      modelId: "fixture",
+      reasoning: true,
+      thinkingLevel: "max",
+      reasoningCapabilities: { mode: "adaptive", levels: ["off", "high", "max"] },
+    });
+    const fields = connectionFormFields({
+      catalog,
+      provider: COMPATIBLE,
+      modelId: "fixture",
+      credential: saved,
+    });
+    expect(fields.thinkingLevel).toBe("max");
+    const form = { ...draft(), ...fields, modelId: "fixture" };
+    const request = modelConnectRequest({
+      form,
+      selected: { provider: COMPATIBLE, id: "custom" },
+      credential: saved,
+      credentialId: saved.id,
+    });
+    expect(request.status === "ready" && request.input.thinkingLevel).toBe("max");
+    const changedEndpoint = modelConnectRequest({
+      form: { ...form, baseUrl: "http://localhost:8001/v1" },
+      selected: { provider: COMPATIBLE, id: "custom" },
+      credential: saved,
+      credentialId: saved.id,
+    });
+    expect(changedEndpoint.status === "ready" && changedEndpoint.input.thinkingLevel).toBe("high");
+  });
+
   it("clamps a catalog connection's effort to its model and leaves the endpoint empty", () => {
     const fields = connectionFormFields({
       catalog,
@@ -274,6 +309,58 @@ describe("modelConnectRequest", () => {
       }),
     ).toEqual({ status: "invalid", field: "contextWindow" });
   });
+
+  it.each(["", "  "])(
+    "saves a compatible connection with an empty output limit (%j)",
+    (maxTokens) => {
+      const request = modelConnectRequest({
+        form: draft({ baseUrl: "http://localhost:8000/v1", modelId: "fixture", maxTokens }),
+        selected: { provider: COMPATIBLE, id: "custom" },
+        credentialId: null,
+      });
+      expect(request.status).toBe("ready");
+      if (request.status !== "ready") throw new Error("Expected a ready connection");
+      expect(request.input.maxTokens).toBeNull();
+      expect(ModelConnectInputSchema.safeParse(request.input).success).toBe(true);
+    },
+  );
+
+  it("explicitly clears a saved compatible output limit instead of preserving it by omission", () => {
+    const saved = credential({
+      provider: COMPATIBLE,
+      baseUrl: "http://localhost:8000/v1",
+      modelId: "fixture",
+      maxTokens: 8192,
+    });
+    const fields = connectionFormFields({
+      catalog,
+      provider: COMPATIBLE,
+      modelId: "fixture",
+      credential: saved,
+    });
+    expect(fields.maxTokens).toBe("8192");
+    const request = modelConnectRequest({
+      form: { ...draft(), ...fields, modelId: "fixture", maxTokens: "" },
+      selected: { provider: COMPATIBLE, id: "custom" },
+      credential: saved,
+      credentialId: saved.id,
+    });
+    expect(request.status === "ready" && request.input.maxTokens).toBeNull();
+    expect(saved.maxTokens).toBe(8192);
+  });
+
+  it.each(["0", "-1", "1.5", "bad"])(
+    "still rejects a nonblank invalid compatible limit: %s",
+    (maxTokens) => {
+      expect(
+        modelConnectRequest({
+          form: draft({ baseUrl: "http://localhost:8000/v1", modelId: "fixture", maxTokens }),
+          selected: { provider: COMPATIBLE, id: "custom" },
+          credentialId: null,
+        }),
+      ).toEqual({ status: "invalid", field: "maxTokens" });
+    },
+  );
 
   it("connects a catalog key with the clamped effort and the makeDefault target", () => {
     expect(

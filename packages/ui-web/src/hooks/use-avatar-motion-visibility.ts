@@ -44,8 +44,8 @@ function watch(element: Element, notify: Watcher["notify"]) {
 }
 
 /** One observer and one visibility listener serve every moving avatar on the page. */
-export function useAvatarMotionVisibility(enabled: boolean) {
-  const ref = useRef<SVGSVGElement>(null);
+export function useAvatarMotionVisibility<T extends Element = SVGSVGElement>(enabled: boolean) {
+  const ref = useRef<T>(null);
   const [state, setState] = useState({ visible: true, reduced: false });
   useEffect(() => {
     if (enabled && ref.current)

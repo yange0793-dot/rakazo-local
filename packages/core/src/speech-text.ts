@@ -243,6 +243,7 @@ export function speechFromBlocks(blocks: MessageBlock[]): string {
       if (block.kind === "computer") return block.text;
       if (block.kind === "subagent") {
         if (block.status === "running") return `${block.name} is working on ${block.task}`;
+        if (block.status === "waiting") return `${block.name} is waiting for approval`;
         if (block.status === "failed") return `${block.name} failed`;
         return block.result || `${block.name} finished`;
       }

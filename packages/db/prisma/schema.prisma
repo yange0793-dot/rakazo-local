@@ -64,6 +64,7 @@ model User {
   accessGrants                AccessGrant[]
   invitations                 Invitation[]
   modelCredentials            UserModelCredential[]
+  modelCatalogSources         ModelCatalogSource[]
   voiceCredentials            UserVoiceCredential[]
   paymentWallet               PaymentWallet?
   spendingLimit               SpendingLimit?
@@ -649,6 +650,7 @@ model Space {
   connections                 Connection[]
   capabilities                CapabilityInstall[]
   memoryDocuments             MemoryDocument[]
+  semanticFacts               SemanticFact[]
   agentHomes                  AgentHome[]
   browserProfiles             BrowserProfile[]
   artifacts                   Artifact[]
@@ -850,6 +852,9 @@ model UserModelCredential {
   label       String
   secretId    String
   supportsImages Boolean              @default(false)
+  catalogSourceId String?
+  catalogProviderId String?
+  catalogSource ModelCatalogSource? @relation(fields: [catalogSourceId, userId], references: [id, userId], onDelete: Cascade)
   createdAt   DateTime               @default(now())
   updatedAt   DateTime               @updatedAt
   preferences SpaceModelPreference[]
@@ -858,8 +863,28 @@ model UserModelCredential {
   userRoleChoices UserModelRoleChoice[]
 
   @@unique([id, userId])
+  @@unique([catalogSourceId, catalogProviderId])
   @@index([userId, provider, updatedAt])
   @@map("user_model_credentials")
+}
+
+model ModelCatalogSource {
+  id             String @id @default(cuid())
+  userId         String
+  user           User @relation(fields: [userId], references: [id], onDelete: Cascade)
+  sourceKey      String
+  label          String
+  group          String
+  apiProtocol    String
+  fingerprint    String?
+  lastSyncedAt   DateTime?
+  lastAttemptAt  DateTime?
+  error          String?
+  credentials    UserModelCredential[]
+
+  @@unique([id, userId])
+  @@unique([userId, sourceKey])
+  @@map("model_catalog_sources")
 }
 
 /// A problem or suggestion a user asked their bot to send to the people who run this server.
@@ -1123,6 +1148,7 @@ model Thread {
   tasks                       Task[]
   runs                        Run[]
   routines                    Routine[]
+  archiveProgress             MemoryArchiveProgress?
 
   @@index([spaceId])
   @@index([spaceId, userId])
@@ -1242,6 +1268,9 @@ model Run {
   modelPinned          Boolean           @default(false)
   // A group message that named nobody reached this member; it may end without a reply.
   groupReplyOptional   Boolean           @default(false)
+  // Its place among the members a group send wakes: members speak in order, so each reads
+  // the replies before it. Null outside a group send, or before this column existed.
+  groupTurn            Int?
   error                String?
   leaseOwner           String?
   leaseFence           Int               @default(0)
@@ -1752,6 +1781,126 @@ model MemoryRevision {
 
   @@unique([documentId, revision])
   @@map("memory_revisions")
+}
+
+/// Authority for the optional managed semantic index. Content and provenance are encrypted.
+model SemanticFact {
+  id               String                 @id @default(cuid())
+  spaceId          String
+  space            Space                  @relation(fields: [spaceId], references: [id], onDelete: Cascade)
+  userId           String
+  /// Origin bot, not a cascading relation: shared facts survive that bot's removal.
+  botId            String
+  namespace        String
+  scope            String
+  kind             String
+  content          String                 @db.Text
+  provenance       String                 @db.Text
+  revision         Int                    @default(1)
+  status           String                 @default("active")
+  sourceThreadId   String?
+  sourceGeneration Int?
+  validFrom        DateTime?
+  validTo          DateTime?
+  createdAt        DateTime               @default(now())
+  updatedAt        DateTime               @updatedAt
+  revisions        SemanticFactRevision[]
+  sources          SemanticFactSource[]
+
+  @@unique([id, spaceId])
+  @@index([namespace, status, id])
+  @@index([spaceId, botId, kind, sourceThreadId, sourceGeneration], map: "semantic_facts_history_source_idx")
+  @@map("semantic_facts")
+}
+
+model SemanticFactRevision {
+  id         String       @id @default(cuid())
+  spaceId    String
+  factId     String
+  fact       SemanticFact @relation(fields: [factId, spaceId], references: [id, spaceId], onDelete: Cascade)
+  revision   Int
+  content    String       @db.Text
+  provenance String       @db.Text
+  status     String
+  validFrom  DateTime?
+  validTo    DateTime?
+  createdAt  DateTime     @default(now())
+
+  @@unique([factId, revision])
+  @@map("semantic_fact_revisions")
+}
+
+/// Keyed exact-source/content identities remain bound after corrections and forgetting.
+model SemanticFactSource {
+  id        String       @id @default(cuid())
+  spaceId   String
+  namespace String
+  sourceKey String
+  factId    String
+  fact      SemanticFact @relation(fields: [factId, spaceId], references: [id, spaceId], onDelete: Cascade)
+  createdAt DateTime     @default(now())
+
+  @@unique([namespace, sourceKey])
+  @@index([factId])
+  @@map("semantic_fact_sources")
+}
+
+/// Content-free retirement fences survive parent deletion and reject late history writes.
+model SemanticMemoryRetirement {
+  id         String   @id
+  spaceId    String
+  userId     String
+  namespace  String
+  kind       String
+  botId      String?
+  threadId   String?
+  generation Int?
+  createdAt  DateTime @default(now())
+
+  @@index([namespace, kind])
+  @@map("semantic_memory_retirements")
+}
+
+/// Revision pointers only; no duplicated plaintext and no cascading lifecycle foreign keys.
+model SemanticMemoryIndexOutbox {
+  id        String   @id
+  spaceId   String
+  userId    String
+  namespace String
+  indexId   String
+  factId    String
+  revision  Int
+  action    String
+  createdAt DateTime @default(now())
+
+  @@index([spaceId, createdAt, id])
+  @@index([createdAt, id])
+  @@map("semantic_memory_index_outbox")
+}
+
+/// Content-free automatic-archive cursor for one direct personal chat. It carries no message
+/// text: only the source-generation fence and the sequence range this feature scheduled.
+model MemoryArchiveProgress {
+  threadId         String   @id
+  thread           Thread   @relation(fields: [threadId], references: [id], onDelete: Cascade)
+  spaceId          String
+  botId            String
+  userId           String
+  scope            String
+  generation       Int
+  /// Last message this feature scheduled; may trail nextMessageSeq - 1 while work is due.
+  throughSeq       Int
+  /// Last message a committed batch covered; the next batch starts after it.
+  processedUpToSeq Int
+  /// True while scheduled source messages remain unprocessed, even before availableAt.
+  pending          Boolean  @default(true)
+  /// Debounce time from the last schedule; the reconciler reuses it, it gates no read.
+  availableAt      DateTime
+  createdAt        DateTime @default(now())
+  updatedAt        DateTime @updatedAt
+
+  @@index([pending, availableAt, threadId])
+  @@map("memory_archive_progress")
 }
 
 model AgentHome {

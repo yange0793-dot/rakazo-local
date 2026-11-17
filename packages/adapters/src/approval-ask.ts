@@ -1,4 +1,4 @@
-import type { ToolBatch } from "@rakazo/adapter-kit";
+import type { BrowserActionDescription, ToolBatch } from "@rakazo/adapter-kit";
 import type { AskReceipt, MessageBlock } from "@rakazo/contracts";
 import { BOT_INSTRUCTIONS_MAX_LENGTH } from "@rakazo/contracts";
 import {
@@ -61,6 +61,8 @@ export function buildApprovalAskBlock(
     batch?: ToolBatch;
     /** The approval asks every time, so the card never offers Always allow. */
     onceOnly?: boolean;
+    /** The page the action would act on, read from the browser's last observation. */
+    browserAction?: BrowserActionDescription;
   },
 ): MessageBlock {
   const onceOnly = toolRequiresExplicitApproval(toolName) || Boolean(options?.onceOnly);
@@ -182,14 +184,14 @@ export function buildApprovalAskBlock(
     };
   }
   const fetchSite = webFetchSite(toolName, args);
-  const summary = describeApprovalAction(toolName, args, options?.batch);
-  const detail = formatApprovalDetail(
-    toolName,
-    args,
-    options?.reviewReason,
-    options?.batch,
-    secrets,
-  );
+  // A page action shows the page and elements it would touch, not the raw call.
+  const browserAction = toolName === "browser_act" ? options?.browserAction : undefined;
+  const summary = browserAction
+    ? describeBrowserTarget(browserAction.url)
+    : describeApprovalAction(toolName, args, options?.batch);
+  const detail = browserAction
+    ? browserActionDetail(browserAction)
+    : formatApprovalDetail(toolName, args, options?.reviewReason, options?.batch, secrets);
   const safeDetail = detail ? redactSecrets(detail, secrets) : undefined;
   return {
     kind: "ask",
@@ -230,6 +232,18 @@ function webFetchSite(toolName: string, args: Record<string, unknown>): string |
   return SITE_SENDING_TOOLS.has(toolName) && typeof args.url === "string"
     ? urlSite(args.url)
     : undefined;
+}
+
+function describeBrowserTarget(url: string): string {
+  return `browser_act → ${URL.parse(url)?.hostname || url}`;
+}
+
+/** The page and elements an approved action would touch, without typed values or file paths. */
+function browserActionDetail(action: BrowserActionDescription): string {
+  return [
+    `url: ${action.url}`,
+    ...action.steps.map((step) => `${step.kind} ${step.role} ${JSON.stringify(step.name)}`),
+  ].join("\n");
 }
 
 function describeApprovalAction(

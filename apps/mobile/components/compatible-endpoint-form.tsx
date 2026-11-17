@@ -1,7 +1,7 @@
 import { useLingui } from "@lingui/react/macro";
 import type { ModelApiProtocol, ModelHeaderRow, ThinkingLevel } from "@rakazo/contracts";
 import { MAX_MODEL_CONTEXT_WINDOW, MAX_MODEL_MAX_TOKENS } from "@rakazo/contracts";
-import { compatibleThinkingLevels, toggleEnabledModelId } from "@rakazo/core";
+import { toggleEnabledModelId } from "@rakazo/core";
 import type { Dispatch, ReactNode, SetStateAction } from "react";
 import { Pressable, Text, TextInput, View } from "react-native";
 import { native, useThemedStyles } from "../lib/native";
@@ -25,6 +25,8 @@ type CompatibleEndpointFormProps = {
   onFindModels: () => void;
   /** A known endpoint needs no setup help. */
   hasPreset: boolean;
+  managed?: boolean;
+  unavailableModelIds?: readonly string[];
   showEndpointHelp: boolean;
   onToggleEndpointHelp: () => void;
   apiProtocol: ModelApiProtocol;
@@ -43,6 +45,7 @@ type CompatibleEndpointFormProps = {
   reasoning: boolean;
   setReasoning: (next: boolean) => void;
   thinkingLevel: ThinkingLevel | null;
+  thinkingLevels: readonly ThinkingLevel[];
   setThinkingLevel: (next: ThinkingLevel | null) => void;
   supportsImages: boolean;
   setSupportsImages: (next: boolean) => void;
@@ -65,6 +68,8 @@ export function CompatibleEndpointForm({
   onChangeBaseUrl,
   onFindModels,
   hasPreset,
+  managed = false,
+  unavailableModelIds = [],
   showEndpointHelp,
   onToggleEndpointHelp,
   apiProtocol,
@@ -82,6 +87,7 @@ export function CompatibleEndpointForm({
   reasoning,
   setReasoning,
   thinkingLevel,
+  thinkingLevels,
   setThinkingLevel,
   supportsImages,
   setSupportsImages,
@@ -113,22 +119,24 @@ export function CompatibleEndpointForm({
         accessibilityLabel={t`OpenAI-compatible server URL`}
         autoCapitalize="none"
         autoCorrect={false}
-        editable={!busy}
+        editable={!busy && !managed}
         onChangeText={onChangeBaseUrl}
         placeholder={t`http://127.0.0.1:8000/v1`}
         placeholderTextColor={native.tertiaryLabel}
         style={styles.keyInput}
         value={baseUrl}
       />
-      <NativeActionButton
-        disabled={busy || probing || !effectiveBaseUrl}
-        fill
-        label={probing ? t`Finding…` : t`Find models`}
-        onPress={onFindModels}
-        prominence="secondary"
-        style={{ marginTop: 12 }}
-      />
-      {!hasPreset ? (
+      {!managed ? (
+        <NativeActionButton
+          disabled={busy || probing || !effectiveBaseUrl}
+          fill
+          label={probing ? t`Finding…` : t`Find models`}
+          onPress={onFindModels}
+          prominence="secondary"
+          style={{ marginTop: 12 }}
+        />
+      ) : null}
+      {!hasPreset && !managed ? (
         <>
           <DisclosureRow
             label={t`Setup help`}
@@ -146,7 +154,7 @@ export function CompatibleEndpointForm({
         label={t`Protocol`}
         choices={protocolChoices}
         value={apiProtocol}
-        disabled={busy}
+        disabled={busy || managed}
         onChange={(value) => {
           onChangeProtocol(value as ModelApiProtocol);
         }}
@@ -159,13 +167,16 @@ export function CompatibleEndpointForm({
             accessibilityRole="button"
             accessible
             accessibilityLabel={t`Protocol`}
-            accessibilityState={{ disabled: busy }}
+            accessibilityState={{ disabled: busy || managed }}
             accessibilityValue={{ text: apiProtocolLabel }}
           />
         </View>
       </MenuPickerMenu>
       {probeFeedback}
       <Text style={[styles.sectionTitle, { marginTop: 12 }]}>{t`Model`}</Text>
+      {managed && modelId && !compatibleRows.includes(modelId) ? (
+        <SettingsRow title={modelId} detail={t`Unavailable`} />
+      ) : null}
       {/* The switches stay visible while the default is "Other model…" or a typed id. */}
       {search.showSearch ? (
         <ListSearchInput query={search.query} setQuery={search.setQuery} />
@@ -179,7 +190,7 @@ export function CompatibleEndpointForm({
               <Pressable
                 accessibilityRole="radio"
                 accessibilityState={{ selected: entry === modelId }}
-                disabled={probing}
+                disabled={probing || unavailableModelIds.includes(entry)}
                 onPress={() => onSelectModel(entry)}
                 style={({ pressed }) => [
                   styles.modelRowChoice,
@@ -196,11 +207,11 @@ export function CompatibleEndpointForm({
                 onValueChange={(value) =>
                   setEnabledModelIds((current) => toggleEnabledModelId(current, entry, value))
                 }
-                disabled={busy || entry === modelId}
+                disabled={busy || entry === modelId || unavailableModelIds.includes(entry)}
               />
             </View>
           ))}
-          {compatibleRows.includes(modelId) ? (
+          {!managed && compatibleRows.includes(modelId) ? (
             <Pressable
               accessibilityRole="radio"
               accessibilityState={{ selected: false }}
@@ -217,7 +228,7 @@ export function CompatibleEndpointForm({
           ) : null}
         </View>
       ) : null}
-      {compatibleRows.includes(modelId) ? null : (
+      {managed || compatibleRows.includes(modelId) ? null : (
         <>
           <TextInput
             accessibilityLabel={t`Model id`}
@@ -262,10 +273,12 @@ export function CompatibleEndpointForm({
                 label={t`Reasoning effort`}
                 choices={[
                   { key: "", label: t`Default` },
-                  ...compatibleThinkingLevels(apiProtocol).map((level) => ({
-                    key: level,
-                    label: thinkingLevelLabel(level),
-                  })),
+                  ...thinkingLevels
+                    .filter((level) => level !== "off")
+                    .map((level) => ({
+                      key: level,
+                      label: thinkingLevelLabel(level),
+                    })),
                 ]}
                 value={thinkingLevel ?? ""}
                 disabled={busy}

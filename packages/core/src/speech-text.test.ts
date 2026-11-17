@@ -85,6 +85,20 @@ describe("speakable", () => {
       ]),
     ).toContain("Ship it?");
   });
+
+  it("does not announce a waiting helper as finished", () => {
+    expect(
+      speechFromBlocks([
+        {
+          kind: "subagent",
+          agentId: "helper-1",
+          name: "Researcher",
+          task: "Read the page",
+          status: "waiting",
+        },
+      ]),
+    ).toBe("Researcher is waiting for approval");
+  });
 });
 
 describe("toUtterances", () => {

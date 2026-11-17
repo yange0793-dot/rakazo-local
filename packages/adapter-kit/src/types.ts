@@ -4,6 +4,7 @@ import type {
   CacheCapabilities as ConnectionCacheCapabilities,
   ConnectionCatalogItem,
   ModelApiProtocol,
+  ModelReasoningCapabilities,
   PurchaseCardField,
   SandboxKind,
   VoiceAccountErrorCode,
@@ -414,12 +415,18 @@ export interface SemanticMemoryCapabilities {
   save: true;
   purgeHistory: true;
   sharedScope: true;
+  /** Recall durable facts before a trusted user turn, even before history compaction. */
+  preTurnRecall?: true;
+  /** The host owns revisioned facts and supports atomic corrections and management. */
+  managedFacts?: true;
 }
 
 export interface SemanticMemoryResult {
   memory: string;
   score: number;
   updatedAt?: string;
+  /** Host revision of the cited fact, used for conditional correction. */
+  revision?: number;
   /** Stable provider id when the backend supports citation / forget. */
   id?: string;
   /** Attribution string preserved from the memory backend. */
@@ -434,32 +441,51 @@ export interface SemanticMemoryForgetRequest {
   scope: DurableMemoryScope;
   botId: string;
   reason?: string;
+  /** Reject a management action based on a fact that changed meanwhile. */
+  expectedRevision?: number;
   /** Entity/namespace from a prior recall citation, when the backend scopes deletes. */
   entity?: string;
 }
 
+export type SemanticMemoryErrorCode = "CONFLICT" | "NOT_FOUND" | "FORBIDDEN" | "BAD_REQUEST";
+
 export type SemanticMemoryResponse<T = void> =
   | { ok: true; value: T }
-  | { ok: false; error: string };
+  | { ok: false; error: string; code?: SemanticMemoryErrorCode };
 
 export interface SemanticMemoryRecallRequest {
   query: string;
   scope: DurableMemoryScope;
   botId: string;
+  /** Host-managed history belongs to this exact thread, not every chat of the bot. */
+  threadId?: string;
   /** Omit until a thread has compacted history; the provider can then skip that namespace. */
   historyGeneration?: number;
   limit: number;
+}
+
+/** Supplied by the host from persisted source records, never arbitrary tool metadata. */
+export interface SemanticMemorySource {
+  runId?: string;
+  threadId?: string;
+  messageId?: string;
+  /** A literal source quotation checked against the real user message by the host. */
+  quote?: string;
 }
 
 export interface SemanticMemorySaveRequest {
   content: string;
   scope: DurableMemoryScope;
   botId: string;
-  source: { kind: "durable" } | { kind: "history"; generation: number };
+  source: ({ kind: "durable" } | { kind: "history"; generation: number }) & SemanticMemorySource;
+  /** Together these request one atomic revision, not a delete followed by a save. */
+  replacesId?: string;
+  expectedRevision?: number;
 }
 
 export interface SemanticMemoryPurgeHistoryRequest {
   botId: string;
+  threadId?: string;
   generations: number[];
 }
 
@@ -514,6 +540,7 @@ export interface AgentRunModel {
   allowPrivateEndpoint?: boolean;
   /** Whether this custom connection accepts standard reasoning_effort. */
   reasoning?: boolean;
+  reasoningCapabilities?: ModelReasoningCapabilities;
   /** Whether this custom connection accepts image input. */
   acceptsImages?: boolean;
   /** Maximum number of image inputs the model connection accepts in one request. */
@@ -684,7 +711,13 @@ export interface AgentUsage {
   } | null;
 }
 
-export type UsageOperationKind = "answer" | "setup" | "retrieval" | "subagent" | "compaction";
+export type UsageOperationKind =
+  | "answer"
+  | "setup"
+  | "retrieval"
+  | "subagent"
+  | "compaction"
+  | "learning";
 
 export interface ModelCallObserver {
   beforeCall(call: {
@@ -832,6 +865,12 @@ export interface BackgroundJobPayloads {
   /** The bot's call rang out: mark it missed if nobody answered. */
   "call.expire": { threadId: string; callId: string };
   "history.compact": { threadId: string; userId?: string };
+  /** Synchronize the host-owned semantic fact outbox; never contains memory text. */
+  "memory.sync": { spaceId: string };
+  /** Background extraction uses only source pointers; the host opens scoped messages. */
+  "memory.extract": { threadId: string; botId: string; userId: string };
+  /** Review one finished run and draft a skill card; never changes behavior by itself. */
+  "harness.reflect": { runId: string };
   "messaging.deliver": { runId?: string };
   /** A running chat-app run's interim messages; the run is not marked mirrored. */
   "messaging.progress": { runId: string };
@@ -1125,14 +1164,24 @@ export interface WebFetchResult {
 /** Page-level browser on the bot computer (DOM refs), not a hosted browser vendor. */
 export interface BrowserCapabilities {
   page: boolean;
+  /** False when page tools use a native browser without a graphical sandbox. Defaults to true. */
+  requiresGraphicalComputer?: boolean;
+  /** Page actions enter the normal Ask/Auto/Never policy, unless an explicit rule allows them. */
+  requiresActionApproval?: boolean;
   /** True when element refs from snapshot can be clicked or filled. */
   refs: boolean;
+  /** Supports stable page ids in navigation and snapshot requests. */
+  pageSelection?: boolean;
   /** True when the adapter runs without a hosted browser vendor or API key. */
   keyless?: boolean;
 }
 
 export interface BrowserNavigateRequest {
   url: string;
+  /** Stable page id returned by this browser, scoped to its session. */
+  pageId?: string;
+  /** Wait for a download to start only when this navigation is meant to download a file. */
+  waitForDownload?: boolean;
   /** Folder in the computer's home that a file download is saved to; without it, none is saved. */
   downloads?: string;
   signal?: AbortSignal;
@@ -1153,6 +1202,8 @@ export interface BrowserDownload {
 export interface BrowserNavigateResult {
   url: string;
   title: string;
+  pageId?: string;
+  pages?: BrowserPage[];
   /** The page it reached, as a snapshot shows it, when that could be read in time. */
   tree?: string;
   elements?: BrowserSnapshotNode[];
@@ -1169,6 +1220,8 @@ export interface BrowserNavigateResult {
 }
 
 export interface BrowserSnapshotRequest {
+  /** Select a managed page by the stable id returned in pages. Omit to keep the selected page. */
+  pageId?: string;
   /** Words to find controls by anywhere on the page, such as "newsletter signup". */
   query?: string;
   /** Folder in the computer's home that a PDF the tab shows is saved to; without it, none is saved. */
@@ -1192,6 +1245,8 @@ export interface BrowserSnapshotNode {
 export interface BrowserSnapshotResult {
   url: string;
   title: string;
+  pageId?: string;
+  pages?: BrowserPage[];
   /** Compact accessibility-style tree for the model. */
   tree: string;
   elements: BrowserSnapshotNode[];
@@ -1207,6 +1262,12 @@ export interface BrowserSnapshotResult {
 }
 
 export type BrowserActKind = "click" | "fill" | "type" | "upload";
+
+/** Approval context from the provider's last observation, without input values or file paths. */
+export interface BrowserActionDescription {
+  url: string;
+  steps: Array<{ kind: BrowserActKind; role: string; name: string }>;
+}
 
 export const MAX_BROWSER_UPLOAD_FILES = 10;
 
@@ -1258,6 +1319,8 @@ export type BrowserActStep =
 
 export interface BrowserActRequest {
   actions: BrowserActStep[];
+  /** Wait for a download to start only when this call is meant to download a file. */
+  waitForDownload?: boolean;
   /** Folder in the computer's home that a file download is saved to; without it, none is saved. */
   downloads?: string;
   signal?: AbortSignal;
@@ -1270,6 +1333,8 @@ export interface BrowserActResult {
   uncertain?: boolean;
   url: string;
   title: string;
+  pageId?: string;
+  pages?: BrowserPage[];
   /** Snapshot after the actions when available. */
   tree?: string;
   elements?: BrowserSnapshotNode[];
@@ -1282,6 +1347,30 @@ export interface BrowserActResult {
   note?: string;
   /** A JavaScript dialog the page has open on the screen, which page tools cannot answer. */
   dialog?: string;
+}
+
+/** A managed page belonging to this bot's browser session; ids must survive tab reordering. */
+export interface BrowserPage {
+  id: string;
+  url: string;
+  title: string;
+  selected?: boolean;
+  blocked?: boolean;
+}
+
+export interface BrowserControlRequest {
+  action: "hand_off" | "resume";
+  /** Set by the executor after the user returns control, never from page content. */
+  userConfirmed?: boolean;
+  signal?: AbortSignal;
+}
+
+export interface BrowserControlResult {
+  ok: boolean;
+  control?: "agent" | "user";
+  pageId?: string;
+  pages?: BrowserPage[];
+  error?: string;
 }
 
 /** A purchase step as the page shows it: the label and amount are page text. */

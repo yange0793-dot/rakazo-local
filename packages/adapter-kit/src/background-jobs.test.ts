@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import {
+  automaticMemoryJob,
   dispatchBackgroundJob,
   HISTORY_COMPACT_MAX_ATTEMPTS,
   historyCompactJob,
@@ -7,6 +8,7 @@ import {
   messagingDeliverJob,
   parseBackgroundJob,
   routineRetryJob,
+  semanticMemorySyncJob,
 } from "./background-jobs.js";
 import type { BackgroundJobHandlers } from "./types.js";
 
@@ -21,6 +23,8 @@ function handlers(): BackgroundJobHandlers {
     "skill.teaching-expire": vi.fn(async () => undefined),
     "call.expire": vi.fn(async () => undefined),
     "history.compact": vi.fn(async () => undefined),
+    "memory.sync": vi.fn(async () => undefined),
+    "memory.extract": vi.fn(async () => undefined),
     "messaging.deliver": vi.fn(async () => undefined),
     "messaging.progress": vi.fn(async () => undefined),
     "messaging.credential-cleanup": vi.fn(async () => undefined),
@@ -32,6 +36,41 @@ function handlers(): BackgroundJobHandlers {
 }
 
 describe("background job contracts", () => {
+  it("validates a space-keyed memory sync without putting fact text in its payload", async () => {
+    const target = handlers();
+    const job = semanticMemorySyncJob("space-a");
+    expect(job).toEqual({
+      name: "memory.sync",
+      payload: { spaceId: "space-a" },
+      replaceKey: "memory.sync:space-a",
+      keepExisting: true,
+      maxAttempts: 8,
+    });
+    expect(semanticMemorySyncJob("space-b").replaceKey).not.toBe(job.replaceKey);
+    await dispatchBackgroundJob(target, job.name, job.payload);
+    expect(target["memory.sync"]).toHaveBeenCalledWith({ spaceId: "space-a" });
+    expect(() => parseBackgroundJob("memory.sync", { spaceId: "" })).toThrow();
+  });
+
+  it("debounces owner-scoped extraction with a pointer-only payload", async () => {
+    const target = handlers();
+    const availableAt = new Date("2026-08-15T12:01:00.000Z");
+    const job = automaticMemoryJob("thread-a", "bot-a", "user-a", availableAt);
+    expect(job).toEqual({
+      name: "memory.extract",
+      payload: { threadId: "thread-a", botId: "bot-a", userId: "user-a" },
+      availableAt,
+      replaceKey: "memory.extract:thread-a:bot-a:user-a",
+      maxAttempts: 3,
+    });
+    await dispatchBackgroundJob(target, job.name, job.payload);
+    expect(target["memory.extract"]).toHaveBeenCalledWith(job.payload);
+    expect(() => parseBackgroundJob("memory.extract", { threadId: "thread-a" })).toThrow();
+    expect(() =>
+      parseBackgroundJob("memory.extract", { ...job.payload, content: "a conversation" }),
+    ).toThrow();
+  });
+
   it("validates and dispatches messaging.deliver", async () => {
     const target = handlers();
     await dispatchBackgroundJob(target, "messaging.deliver", { runId: "run-1" });

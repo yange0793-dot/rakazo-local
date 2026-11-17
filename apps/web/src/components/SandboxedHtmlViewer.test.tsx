@@ -206,6 +206,37 @@ it("lets the shell load the nested srcdoc preview and rejects http(s) navigation
   expect(frameSourceAllows(sources, "http://example.invalid/nav")).toBe(false);
 });
 
+it("forwards print preparation only from its host and readiness only from its preview", () => {
+  const script = shell.match(/<script>([\s\S]*?)<\/script>/)?.[1];
+  if (!script) throw new Error("shell script missing");
+  const preview = { srcdoc: "", contentWindow: { postMessage: vi.fn() } };
+  const parent = { postMessage: vi.fn() };
+  let listener: ((event: { source: unknown; data: unknown }) => void) | undefined;
+  new Function("addEventListener", "parent", "window", "document", script)(
+    (_type: string, handler: typeof listener) => {
+      listener = handler;
+    },
+    parent,
+    {},
+    { getElementById: () => preview },
+  );
+  const prepare = { type: "rakazo-page:prepare-print" };
+  listener?.({ source: {}, data: prepare });
+  expect(preview.contentWindow.postMessage).not.toHaveBeenCalled();
+  listener?.({ source: parent, data: prepare });
+  expect(preview.contentWindow.postMessage).toHaveBeenCalledWith(prepare, "*");
+  const ready = { type: "rakazo-page:print-ready", height: 2400 };
+  listener?.({ source: {}, data: ready });
+  expect(parent.postMessage).not.toHaveBeenCalled();
+  listener?.({ source: preview.contentWindow, data: ready });
+  expect(parent.postMessage).toHaveBeenCalledWith(ready, "*");
+  listener?.({ source: parent, data: { type: "rakazo-page:restore-print" } });
+  expect(preview.contentWindow.postMessage).toHaveBeenLastCalledWith(
+    { type: "rakazo-page:restore-print" },
+    "*",
+  );
+});
+
 function shellContentSecurityPolicy(html: string): string {
   const match = html.match(/http-equiv="Content-Security-Policy" content="([^"]*)"/);
   if (!match?.[1]) throw new Error("shell CSP missing");

@@ -17,7 +17,13 @@ import { Link } from "react-router-dom";
 import { useSpaceQueries } from "../lib/query";
 import { statusLabel, statusTone } from "./ActivityList";
 
-export function RoutineRunHistory({ routineId }: { routineId: string }) {
+export function RoutineRunHistory({
+  routineId,
+  onOpenChat,
+}: {
+  routineId: string;
+  onOpenChat?: () => void;
+}) {
   const { t } = useLingui();
   const queries = useSpaceQueries();
   const history = useInfiniteQuery(
@@ -53,7 +59,7 @@ export function RoutineRunHistory({ routineId }: { routineId: string }) {
       ) : (
         <ul className="mt-2 divide-y divide-border">
           {runs.map((run) => (
-            <RunRow key={run.id} run={run} />
+            <RunRow key={run.id} run={run} onOpenChat={onOpenChat} />
           ))}
         </ul>
       )}
@@ -71,7 +77,7 @@ export function RoutineRunHistory({ routineId }: { routineId: string }) {
   );
 }
 
-function RunRow({ run }: { run: RoutineRun }) {
+function RunRow({ run, onOpenChat }: { run: RoutineRun; onOpenChat?: () => void }) {
   const { i18n, t } = useLingui();
   const locale = i18n.locale || "en";
   const at = routineRunAt(run);
@@ -112,7 +118,7 @@ function RunRow({ run }: { run: RoutineRun }) {
   return (
     <li data-testid="routine-run-row" className="text-body-sm">
       {chatTo ? (
-        <Link to={chatTo} className={`${lineClass} hover:bg-accent`}>
+        <Link to={chatTo} onClick={onOpenChat} className={`${lineClass} hover:bg-accent`}>
           {line}
         </Link>
       ) : (

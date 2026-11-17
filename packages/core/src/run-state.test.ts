@@ -145,17 +145,37 @@ describe("helperCardState", () => {
     expect(helperCardState({ status: "failed", result: STOPPED_HELPER_RESULT })).toEqual({
       stopped: true,
       failed: false,
+      waiting: false,
       body: "",
     });
     expect(helperCardState({ status: "failed", result: "no access" })).toEqual({
       stopped: false,
       failed: true,
+      waiting: false,
       body: "no access",
     });
     expect(helperCardState({ status: "running", progress: "reading" })).toEqual({
       stopped: false,
       failed: false,
+      waiting: false,
       body: "reading",
+    });
+  });
+
+  it("distinguishes a waiting approval from active work and terminal results", () => {
+    expect(helperCardState({ status: "waiting", progress: "Review the requested action" })).toEqual(
+      {
+        stopped: false,
+        failed: false,
+        waiting: true,
+        body: "Review the requested action",
+      },
+    );
+    expect(helperCardState({ status: "completed", result: "Saved" })).toEqual({
+      stopped: false,
+      failed: false,
+      waiting: false,
+      body: "Saved",
     });
   });
 });

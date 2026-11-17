@@ -2,9 +2,13 @@ import type {
   AdapterContext,
   AgentToolExecutionObserver,
   AutoReviewRequest,
+  BrowserActionDescription,
+  BrowserActRequest,
+  BrowserActStep,
   ConnectorCall,
   ToolBatch,
 } from "@rakazo/adapter-kit";
+import type { MessageBlock } from "@rakazo/contracts";
 import {
   applyJudgeDecision,
   approvalModeFromPreference,
@@ -48,6 +52,8 @@ import {
 } from "./auto-review.js";
 import { reviewWithBackups } from "./auto-review-backups.js";
 import { RAKAZO_DOCS_URLS } from "./builtin-skills.js";
+import { toComputerRef } from "./computer-support.js";
+import { redactConnectorPayload } from "./connector-safety.js";
 import type { ExecutorDeps } from "./executor-deps.js";
 import { CATALOG_LOAD, CATALOG_SEARCH } from "./lazy-tool-catalog.js";
 import { findConnectedModelCredential } from "./model-selection.js";
@@ -85,11 +91,24 @@ import { refusal } from "./tool-refusal.js";
 
 export type AppliedEffect = Awaited<ReturnType<typeof recordEffect>>;
 
+/** browser_act kinds that use saved logins, cards or codes: a background helper never runs them. */
+const HELPER_UNSUPPORTED_BROWSER_KINDS: ReadonlySet<string> = new Set([
+  "fill_secret",
+  "fill_card",
+  "fill_pay_token",
+  "fill_code",
+]);
+const PAGE_TOOLS = ["browser_navigate", "browser_snapshot", "browser_act"];
+
 type ApprovalCard = {
   reviewReason: string | undefined;
   summary: FleetCardSummary | undefined;
   batch: ToolBatch | undefined;
   onceOnly: boolean;
+  /** The chat that started this helper: its approval card is shown there. */
+  cardThreadId?: string;
+  /** The page a browser action would act on, read from the browser's last observation. */
+  browserAction?: BrowserActionDescription;
 };
 
 /** A tool call that passed its approval gate, as tool handlers receive it. */
@@ -155,6 +174,27 @@ export async function gateToolCall(
     request;
   const { replayEffectToolName } = request;
   let { args, effectRequest } = request;
+  const durableBrowser =
+    PAGE_TOOLS.includes(name) &&
+    Boolean(ctx.providers.browser.checkpoint && ctx.providers.browser.restore);
+  if (durableBrowser && ctx.computer.stored.providerRef) {
+    const last = await deps.prisma.externalEffect.findFirst({
+      where: {
+        spaceId: run.spaceId,
+        run: { botId: run.botId, userId: run.userId },
+        kind: { in: PAGE_TOOLS },
+        status: "completed",
+        result: { path: ["browserState", "computerId"], equals: ctx.computer.stored.id },
+      },
+      orderBy: [{ updatedAt: "desc" }, { id: "desc" }],
+      select: { result: true },
+    });
+    const result = last?.result as Record<string, unknown> | null | undefined;
+    const saved = result?.browserState as { computerId?: unknown; provider?: unknown } | undefined;
+    if (saved?.computerId === ctx.computer.stored.id) {
+      ctx.providers.browser.restore?.(toComputerRef(ctx.computer.stored), saved.provider, context);
+    }
+  }
   const viaConnector = !BUILTIN_AGENT_TOOL_NAMES.has(name);
   // Declared effect of the operation this call dispatches (installed API method and
   // flag). Install config is immutable per route resource, so it cannot drift before
@@ -178,22 +218,6 @@ export async function gateToolCall(
     toolName === approvalName || toolName === name || declaredReadOnly === false
       ? declaredReadOnly
       : ctx.tools.connector.get(toolName)?.readOnly;
-  // A background helper only reads, whatever the approval mode or rules: a connector call
-  // runs only when every action it names is declared read-only.
-  if (
-    run.trigger === BACKGROUND_HELPER_TRIGGER &&
-    viaConnector &&
-    !catalogControlRead &&
-    (unidentifiedAction ||
-      approvalToolNames.some((toolName) => declaredReadOnlyFor(toolName) !== true))
-  ) {
-    return {
-      result: refusal(
-        "helper_read_only",
-        `${name} can change something, and a background helper may only read. Don't retry; say in your result what the bot should do.`,
-      ),
-    };
-  }
   const connectorProviders = ctx.tools.connectedPlugins.map((plugin) => plugin.provider);
   const connectorKind = connectorKindFromToolName(approvalName, connectorProviders);
   const watch = name === "schedule_create" ? watchFromTool(args.watch) : undefined;
@@ -275,10 +299,38 @@ export async function gateToolCall(
     (await isRunTainted(ctx)) &&
     (await ctx.trust.routineNamesNewSite(String(args.prompt ?? "")));
   const { purchase, cardUse } = request;
+  // A helper may browse pages, but buying and typing saved logins or cards stay with the bot's
+  // own visible turn: its result can ask the bot to do those.
+  if (
+    run.trigger === BACKGROUND_HELPER_TRIGGER &&
+    name === "browser_act" &&
+    (purchase ||
+      cardUse ||
+      (Array.isArray(args.actions) &&
+        args.actions.some(
+          (action) =>
+            Boolean(action) &&
+            typeof action === "object" &&
+            HELPER_UNSUPPORTED_BROWSER_KINDS.has(String((action as { kind?: unknown }).kind ?? "")),
+        )))
+  ) {
+    return {
+      result: refusal(
+        "helper_browser_unavailable",
+        "A background helper cannot buy anything or type saved logins, cards or codes. Don't retry; say in your result what the bot should do.",
+      ),
+    };
+  }
+  // A provider can make ordinary page actions consequential, but cannot override the owner's
+  // Ask/Auto/Never policy. Purchases and saved cards retain their separate mandatory checks.
+  const browserApprovalRequired =
+    name === "browser_act" &&
+    ctx.providers.browser.describe().capabilities.requiresActionApproval === true;
   // Typing a saved card is approved like a purchase: every time, by a person.
   const paying = Boolean(purchase) || Boolean(cardUse);
   const requiresApprovalByDefault =
     request.heldForApproval ||
+    browserApprovalRequired ||
     paying ||
     unattendedWatch ||
     siteGate === "new" ||
@@ -319,7 +371,18 @@ export async function gateToolCall(
       ? { ...resolvedRules, decision: "ask" as const }
       : resolvedRules;
   const mode = approvalModeFromPreference(await ctx.trust.loadAutoReviewPreference());
-  const reviewable = mode === "auto" && !mandatoryInAnyRun;
+  // A helper's brief is the bot's own words, never the owner's, so Auto Review could only
+  // authorize a write from text the model wrote itself. A helper's write still runs on the
+  // owner's explicit allow or Never ask, exactly as it would in the owner's own turn.
+  const helperWriteNeedsPerson =
+    run.trigger === BACKGROUND_HELPER_TRIGGER &&
+    viaConnector &&
+    !catalogControlRead &&
+    (unidentifiedAction ||
+      approvalToolNames.some((toolName) =>
+        connectorToolRequiresApproval(toolName, declaredReadOnlyFor(toolName)),
+      ));
+  const reviewable = mode === "auto" && !mandatoryInAnyRun && !helperWriteNeedsPerson;
   const injectedReview = reviewable ? deps.autoReview : undefined;
   const reviewSettings = !reviewable || injectedReview ? null : await ctx.trust.loadApprovalModel();
   const memberChecker = reviewSettings?.primarySource === "member";
@@ -439,6 +502,7 @@ export async function gateToolCall(
   // A fetch to a new site is gated like any action, so it needs an effect to approve.
   const applied =
     READ_ONLY_AGENT_TOOLS.has(name) &&
+    !durableBrowser &&
     siteGate !== "new" &&
     nextApprovedTool !== name &&
     !approvedEffectKey
@@ -555,8 +619,25 @@ export async function gateToolCall(
   }
 
   const needsApproval = gateDecision === "ask";
-  // Nobody sees a background helper's thread, so a card there would wait forever.
-  if (needsApproval && run.trigger === BACKGROUND_HELPER_TRIGGER) {
+  // An approved replay settles below and must not ask a second time.
+  const duplicateGate = applied?.duplicate
+    ? resolveDuplicateEffectGate(applied.effect, name)
+    : undefined;
+  const asksPersonNow = !duplicateGate || duplicateGate.action === "paused";
+  // A background helper's own thread is hidden, so its approval is asked in the chat that
+  // started it (Run.sourceMessageId is that chat's subagent card).
+  const helperApproval =
+    needsApproval && run.trigger === BACKGROUND_HELPER_TRIGGER && asksPersonNow
+      ? await helperApprovalTarget(ctx)
+      : undefined;
+  // Without its originating chat there is nobody to show the card to: refuse rather than pause
+  // a run whose thread no person can see.
+  if (
+    needsApproval &&
+    run.trigger === BACKGROUND_HELPER_TRIGGER &&
+    asksPersonNow &&
+    !helperApproval
+  ) {
     if (applied) {
       await deps.prisma.externalEffect.updateMany({
         where: { id: applied.effect.id, status: "intended" },
@@ -566,10 +647,14 @@ export async function gateToolCall(
     return {
       result: refusal(
         "helper_cannot_ask_approval",
-        `${name} needs the owner's approval, and a background helper cannot ask. Don't retry; say in your result what the bot should ask for.`,
+        `${name} needs the owner's approval, and this background helper has no chat to ask in. Don't retry; say in your result what the bot should ask for.`,
       ),
     };
   }
+  const browserAction =
+    needsApproval && asksPersonNow && name === "browser_act"
+      ? describeBrowserAction(ctx, args)
+      : undefined;
   const call = createToolCall(ctx, {
     name,
     args,
@@ -582,11 +667,13 @@ export async function gateToolCall(
     bypassApproval: gateDecision === "allow" && gated,
     spend: spends,
   });
-  const card = {
+  const card: ApprovalCard = {
     reviewReason,
     summary: request.fleetSummary,
     batch: connectorTool?.batch,
     onceOnly: asksEveryTime,
+    ...(helperApproval ?? {}),
+    ...(browserAction ? { browserAction } : {}),
   };
 
   if (applied?.duplicate) {
@@ -618,7 +705,7 @@ export async function gateToolCall(
           return { result: gate.result };
         }
       } else {
-        return { result: gate.result };
+        return { result: browserResultWithoutState(name, gate.result) };
       }
     }
     if (gate.action === "paused") {
@@ -707,15 +794,40 @@ function createToolCall(
   const call: ToolCall = {
     ...fields,
     claimedEffect: false,
-    persistEffectResult: (result) =>
-      applied
-        ? completeEffect(
-            deps,
-            applied.effect.id,
-            call.claimedEffect ? "executing" : "intended",
-            result,
-          )
-        : Promise.resolve(true),
+    persistEffectResult: (result) => {
+      if (!applied) return Promise.resolve(true);
+      let stored = result;
+      if (
+        PAGE_TOOLS.includes(name) &&
+        ctx.providers.browser.checkpoint &&
+        ctx.computer.stored.providerRef
+      ) {
+        const details =
+          result &&
+          typeof result === "object" &&
+          "kind" in result &&
+          result.kind === "agent_tool_result" &&
+          "details" in result
+            ? result.details
+            : result;
+        stored = {
+          ...(details && typeof details === "object" ? details : {}),
+          browserState: {
+            computerId: ctx.computer.stored.id,
+            provider: redactConnectorPayload(
+              ctx.providers.browser.checkpoint(toComputerRef(ctx.computer.stored), ctx.context),
+              ctx.secrets,
+            ),
+          },
+        };
+      }
+      return completeEffect(
+        deps,
+        applied.effect.id,
+        call.claimedEffect ? "executing" : "intended",
+        stored,
+      );
+    },
     finish: async (result) =>
       (await call.persistEffectResult(result)) ? result : uncertainEffectResult(name, args),
     claimOrReturn: async (from) => {
@@ -728,7 +840,7 @@ function createToolCall(
       });
       if (current) {
         const retryGate = resolveDuplicateEffectGate(current, name);
-        if (retryGate.action === "return") return retryGate.result;
+        if (retryGate.action === "return") return browserResultWithoutState(name, retryGate.result);
         if (retryGate.action === "uncertain") {
           return settleToolUncertainty(ctx, call, applied!.effect.id, name);
         }
@@ -737,6 +849,13 @@ function createToolCall(
     },
   };
   return call;
+}
+
+/** Browser recovery metadata is server state, not part of the model's tool response. */
+function browserResultWithoutState(name: string, result: unknown): unknown {
+  if (!PAGE_TOOLS.includes(name) || !result || typeof result !== "object") return result;
+  const { browserState: _state, ...visible } = result as Record<string, unknown>;
+  return visible;
 }
 
 async function settleToolUncertainty(
@@ -804,6 +923,9 @@ async function showApprovalCard(ctx: RunContext, call: ToolCall, card: ApprovalC
         card,
       ),
     ],
+    // A helper's card belongs to the chat that started it; the run and its checkpoint stay
+    // on its hidden thread.
+    ...(card.cardThreadId ? { cardThreadId: card.cardThreadId } : {}),
   });
   // pauseRunForInput returning false after a successful renew means the run row no
   // longer matches this worker. Exiting via pauseForApproval() would leave the run
@@ -817,9 +939,72 @@ async function showApprovalCard(ctx: RunContext, call: ToolCall, card: ApprovalC
     title: `${displayName(bot.name, "Bot")} needs approval`,
     body: `Review before ${name}`,
     botId: bot.id,
-    threadId: thread.id,
+    // The chat the database confirmed the card is in, so the push opens where a person can
+    // answer it; a run that paused in its own thread keeps that thread.
+    threadId: paused.cardThreadId ?? thread.id,
   });
   return pauseForApproval(ctx);
+}
+
+/**
+ * The chat that started a background helper, from the subagent card its run names. The
+ * database validates the same source again before it writes the card there.
+ */
+async function helperApprovalTarget(
+  ctx: RunContext,
+): Promise<{ cardThreadId: string } | undefined> {
+  const messageId = ctx.run.sourceMessageId;
+  if (!messageId) return undefined;
+  const source = await ctx.deps.prisma.message.findUnique({
+    where: { id: messageId },
+    select: { threadId: true, blocks: true },
+  });
+  const blocks = Array.isArray(source?.blocks) ? (source.blocks as MessageBlock[]) : [];
+  const card = blocks.find(
+    (block): block is Extract<MessageBlock, { kind: "subagent" }> => block.kind === "subagent",
+  );
+  if (!source || !card) return undefined;
+  return { cardThreadId: source.threadId };
+}
+
+/** The page and elements a browser action would touch, from the browser's last observation. */
+function describeBrowserAction(
+  ctx: RunContext,
+  args: Record<string, unknown>,
+): BrowserActionDescription | undefined {
+  const browser = ctx.providers.browser;
+  const request = browserActRequest(args);
+  const stored = ctx.computer.stored;
+  if (!browser.describeAction || !request || !stored.providerRef) return undefined;
+  try {
+    return browser.describeAction(toComputerRef(stored), request, ctx.context);
+  } catch {
+    // The description is card context only; the raw-argument card still asks the same person.
+    return undefined;
+  }
+}
+
+/**
+ * The action as the browser interface takes it, when every step is a plain ref action.
+ * Saved logins, cards and codes never reach a helper, and any other shape keeps the
+ * existing raw-argument approval card.
+ */
+function browserActRequest(args: Record<string, unknown>): BrowserActRequest | undefined {
+  const raw = Array.isArray(args.actions) ? args.actions : undefined;
+  if (!raw?.length) return undefined;
+  const actions: BrowserActStep[] = [];
+  for (const entry of raw) {
+    const step = entry && typeof entry === "object" ? (entry as Record<string, unknown>) : {};
+    const ref = typeof step.ref === "string" ? step.ref : undefined;
+    if (!ref) return undefined;
+    const kind = step.kind;
+    if (kind === "click") actions.push({ kind: "click", ref });
+    // Typed text and file paths are left out: the page description names elements only.
+    else if (kind === "fill" || kind === "type") actions.push({ kind, ref, text: "" });
+    else if (kind === "upload") actions.push({ kind: "upload", ref, paths: [] });
+    else return undefined;
+  }
+  return { actions };
 }
 
 /**

@@ -1,10 +1,18 @@
 import type { OAuthCredential } from "@earendil-works/pi-ai";
-import type { ModelApiProtocol, ModelContextLimits, ThinkingLevel } from "@rakazo/contracts";
+import type {
+  ManagedModelCatalog,
+  ModelApiProtocol,
+  ModelContextLimits,
+  ModelReasoningCapabilities,
+  ThinkingLevel,
+} from "@rakazo/contracts";
 import {
   MAX_MODEL_CONTEXT_WINDOW,
   MAX_MODEL_MAX_TOKENS,
+  ManagedModelCatalogSchema,
   ModelApiProtocolSchema,
   ModelContextLimitsSchema,
+  ModelReasoningCapabilitiesSchema,
   parseModelHeaders,
   ThinkingLevelSchema,
 } from "@rakazo/contracts";
@@ -40,12 +48,14 @@ export type StoredModelSecret =
       headers?: Record<string, string>;
       apiKey?: string;
       reasoning?: boolean;
+      reasoningCapabilities?: ModelReasoningCapabilities;
       thinkingLevel?: ThinkingLevel | null;
       maxTokens?: number;
       contextWindow?: number;
       visionModelIds?: string[];
       enabledModelIds?: string[];
       maxImagesPerPrompt?: number;
+      managedCatalog?: ManagedModelCatalog;
     } & StoredModelLimits);
 
 function readOAuthCredential(value: unknown): OAuthCredential | undefined {
@@ -131,12 +141,22 @@ export function parseModelSecret(plaintext: string): StoredModelSecret {
       ...(headers !== undefined ? { headers } : {}),
       ...(apiKey ? { apiKey } : {}),
       ...(typeof parsed.reasoning === "boolean" ? { reasoning: parsed.reasoning } : {}),
+      ...(parsed.reasoningCapabilities !== undefined
+        ? {
+            reasoningCapabilities: ModelReasoningCapabilitiesSchema.parse(
+              parsed.reasoningCapabilities,
+            ),
+          }
+        : {}),
       ...(thinkingLevel !== undefined ? { thinkingLevel } : {}),
       ...(maxTokens !== undefined ? { maxTokens } : {}),
       ...(contextWindow !== undefined ? { contextWindow } : {}),
       ...(visionModelIds ? { visionModelIds } : {}),
       ...(enabledModelIds ? { enabledModelIds } : {}),
       ...(maxImagesPerPrompt !== undefined ? { maxImagesPerPrompt } : {}),
+      ...(parsed.managedCatalog !== undefined
+        ? { managedCatalog: ManagedModelCatalogSchema.parse(parsed.managedCatalog) }
+        : {}),
       ...modelLimits(parsed),
     };
   }
@@ -203,11 +223,15 @@ export function serializeModelSecret(secret: StoredModelSecret): string {
       ...(secret.headers !== undefined ? { headers: parseModelHeaders(secret.headers) } : {}),
       ...(secret.apiKey ? { apiKey: secret.apiKey } : {}),
       ...(secret.reasoning !== undefined ? { reasoning: secret.reasoning } : {}),
+      ...(secret.reasoningCapabilities !== undefined
+        ? { reasoningCapabilities: secret.reasoningCapabilities }
+        : {}),
       ...(secret.thinkingLevel !== undefined ? { thinkingLevel: secret.thinkingLevel } : {}),
       ...(secret.maxTokens !== undefined ? { maxTokens: secret.maxTokens } : {}),
       ...(secret.contextWindow !== undefined ? { contextWindow: secret.contextWindow } : {}),
       ...(secret.visionModelIds !== undefined ? { visionModelIds: secret.visionModelIds } : {}),
       ...(secret.enabledModelIds !== undefined ? { enabledModelIds: secret.enabledModelIds } : {}),
+      ...(secret.managedCatalog !== undefined ? { managedCatalog: secret.managedCatalog } : {}),
       ...(secret.maxImagesPerPrompt !== undefined
         ? { maxImagesPerPrompt: secret.maxImagesPerPrompt }
         : {}),

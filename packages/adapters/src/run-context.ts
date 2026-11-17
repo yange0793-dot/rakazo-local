@@ -277,6 +277,8 @@ export interface RunContext {
   deps: ExecutorDeps;
   providers: RunProviders;
   run: Run;
+  /** The active attempt's configured model identity, before transport alias translation. */
+  model: { provider: string; id: string; thinkingLevel: Run["thinkingLevel"] };
   runId: string;
   workerId: string;
   fence: number;

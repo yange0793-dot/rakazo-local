@@ -45,6 +45,10 @@ export function createPool(connectionString: string, options: DbClientOptions = 
     idleTimeoutMillis: 0,
     application_name: options.applicationName,
     keepAlive: true,
+    // Prisma DateTime columns store UTC without a timezone, including SQL defaults.
+    onConnect: async (client) => {
+      await client.query("SET TIME ZONE 'UTC'");
+    },
   });
   // graphile-worker (and Node itself) require an 'error' listener on a shared
   // pool: an idle-client disconnect is otherwise an unhandled error that kills
@@ -84,6 +88,9 @@ export function createDb(
     idleTimeoutMillis: 30_000,
     application_name: options.applicationName && `${options.applicationName}-keys`,
     keepAlive: true,
+    onConnect: async (client) => {
+      await client.query("SET TIME ZONE 'UTC'");
+    },
   });
   keyPool.on("error", () => undefined);
   installDbContext(keyPool);

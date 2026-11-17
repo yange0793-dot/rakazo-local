@@ -6,14 +6,16 @@ import type {
   SandboxProvider,
   SecretStore,
 } from "@rakazo/adapter-kit";
+import type { MemoryProviderResolver } from "@rakazo/adapters";
 import {
   destroyBot,
   forgetPageShareSecrets,
   removeAgentHome,
+  syncSemanticMemorySpace,
   toComputerRef,
 } from "@rakazo/adapters";
 import type { Actor } from "@rakazo/contracts";
-import type { PrismaClient } from "@rakazo/db";
+import type { PrismaClient, SemanticFactStore } from "@rakazo/db";
 import {
   claimSpaceDeletionForMember,
   deleteClaimedSpaceForMember,
@@ -48,6 +50,8 @@ export type SpaceDeletionDeps = {
   messagingInstallations?: Parameters<typeof destroyBot>[0]["messagingInstallations"];
   /** Removes deleted page links' tokens from a remote secret store. */
   secrets?: Pick<SecretStore, "delete">;
+  semanticFacts?: Pick<SemanticFactStore, "retireScope" | "purgeHistory">;
+  memoryProviders?: MemoryProviderResolver;
 };
 
 /** The owner-only rules live in the db layer. A worker that dies mid-way leaves the Space
@@ -128,6 +132,11 @@ export async function deleteSpaceWithContent(
       await assertClaim();
     };
 
+    if (deps.semanticFacts) {
+      await assertClaim();
+      claimReleasable = false;
+      await deps.semanticFacts.retireScope({ spaceId }, context());
+    }
     for (const bot of await listClaimedSpaceBots(deps.prisma, claimedInput)) {
       try {
         await teardown(
@@ -165,6 +174,19 @@ export async function deleteSpaceWithContent(
       });
       await recordComputerRunEnd(deps.prisma, computer, "deleted");
     }
+    // Keep the claim and credentials until every retired index revision is removed.
+    // A missing resolver is safe only when the outbox has no pending work.
+    await teardown(
+      () =>
+        syncSemanticMemorySpace(
+          {
+            prisma: deps.prisma,
+            memoryProviders: deps.memoryProviders ?? { resolve: async () => null },
+          },
+          spaceId,
+        ),
+      "Space semantic memory cleanup timed out",
+    );
     await assertClaim();
     claimActive = false;
     if (claimRenewal) {

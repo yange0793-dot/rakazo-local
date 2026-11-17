@@ -20,7 +20,6 @@ import {
 } from "@rakazo/core";
 import type { RefObject } from "react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { requestBrowserNotificationPermission } from "../../lib/browser-notifications";
 import { setComposerUnsavedWork } from "../../lib/composer-draft";
 import { scheduleFocusPrompt } from "../../lib/focus-prompt";
 import type { PageSession } from "../../lib/pages";
@@ -362,8 +361,7 @@ export function useComposerActions({
         plan.shouldSend &&
         (groupTarget || botsRef.current.find((bot) => bot.id === botTarget)?.notifyOnFinish)
       ) {
-        const permissionRequest = requestBrowserNotificationPermission();
-        if (permissionRequest) void permissionRequest.then(flushPendingBrowserNotifications);
+        flushPendingBrowserNotifications();
       }
       // The open page rides only on text this chat sends, never on a group or routine-only send.
       const fromPage =

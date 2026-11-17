@@ -87,8 +87,23 @@ export function AddTriggerMenu({
             <Trans>On a schedule</Trans>
           </DropdownMenuSubTrigger>
           <DropdownMenuSubContent className="min-w-[170px]">
+            <DropdownMenuItem
+              disabled={draft.schedules.length > 0}
+              onClick={() =>
+                onChange({
+                  ...draft,
+                  schedules: [{ ...defaultCronPreset(), freq: "Advanced", cron: "@once" }],
+                })
+              }
+            >
+              <Trans>One-time</Trans>
+            </DropdownMenuItem>
             {SCHEDULE_PRESETS.map((freq) => (
-              <DropdownMenuItem key={freq} onClick={() => addSchedule(freq)}>
+              <DropdownMenuItem
+                key={freq}
+                disabled={draft.schedules.some((schedule) => cronFromPreset(schedule) === "@once")}
+                onClick={() => addSchedule(freq)}
+              >
                 {freq === "Advanced" ? t`Advanced...` : cronFreqLabel(freq)}
               </DropdownMenuItem>
             ))}

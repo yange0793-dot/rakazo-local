@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { ORPCError } from "@orpc/server";
-import type { SandboxProvider } from "@rakazo/adapter-kit";
+import type { BrowserProvider, SandboxProvider } from "@rakazo/adapter-kit";
 import { computerControlExpireJobKey } from "@rakazo/adapter-kit";
 import type { ComputerExecutionLease } from "@rakazo/adapters";
 import {
@@ -11,6 +11,7 @@ import {
   computerSupportsTerminal,
   computerSupportsUpdate,
   computerUpdateView,
+  createBrowserProvider,
   diskUsedPercent,
   displayBotWorkspacePath,
   ensureComputerWorkspaceLayout,
@@ -33,6 +34,7 @@ import {
   toComputerRef,
   touchRunningComputer,
 } from "@rakazo/adapters";
+import type { Actor } from "@rakazo/contracts";
 import {
   attachmentMaxBytes,
   attachmentSizeLabel,
@@ -95,6 +97,61 @@ const COMPUTER_COMMAND_HISTORY_EVENTS = 200;
 
 export function computerRoutes(ctx: RouterContext) {
   const { deps, repos, taughtSkills, authed } = ctx;
+  let pageBrowser: BrowserProvider | undefined;
+  /** Called only after this authenticated RPC checked the user's bot and control lease. */
+  async function changeBrowserControl(
+    bot: Awaited<ReturnType<typeof repos.getBot>>,
+    actor: Actor,
+    action: "hand_off" | "resume",
+  ) {
+    if (!bot.computer?.providerRef) return;
+    pageBrowser ??= createBrowserProvider(undefined, { sandbox: deps.sandbox });
+    const browser = pageBrowser;
+    if (!browser.control || !browser.restore || !browser.checkpoint) return;
+    const last = await deps.prisma.externalEffect.findFirst({
+      where: {
+        spaceId: actor.spaceId,
+        run: { botId: bot.id, userId: actor.userId },
+        kind: { in: ["browser_navigate", "browser_snapshot", "browser_act"] },
+        status: "completed",
+        result: { path: ["browserState", "computerId"], equals: bot.computer.id },
+      },
+      orderBy: [{ updatedAt: "desc" }, { id: "desc" }],
+      select: { id: true, result: true },
+    });
+    const result = last?.result as Record<string, unknown> | null | undefined;
+    const saved = result?.browserState as { computerId?: unknown; provider?: unknown } | undefined;
+    if (!last || !result || saved?.computerId !== bot.computer.id) return;
+    const ref = toComputerRef(bot.computer);
+    const context = computerContext(actor, bot.id, `browser.${action}`);
+    browser.restore(ref, saved.provider, context);
+    // A record from a replaced computer or another provider never grants control.
+    if (!browser.checkpoint(ref, context)) return;
+    const changed = await browser.control(
+      ref,
+      {
+        action,
+        ...(action === "resume" ? { userConfirmed: true } : {}),
+      },
+      context,
+    );
+    if (!changed.ok) {
+      throw new ORPCError("CONFLICT", {
+        message: changed.error ?? "Browser control could not change",
+      });
+    }
+    // Keep the visible tool result unchanged; only its server-held recovery metadata advances.
+    // Persist before releaseComputerControl enqueues the waiting run on another worker.
+    await deps.prisma.externalEffect.update({
+      where: { id: last.id },
+      data: {
+        result: {
+          ...result,
+          browserState: { computerId: bot.computer.id, provider: browser.checkpoint(ref, context) },
+        } as never,
+      },
+    });
+  }
   return {
     computer: {
       status: authed.computer.status.handler(async ({ context, input }) =>
@@ -195,6 +252,8 @@ export function computerRoutes(ctx: RouterContext) {
           where: {
             botId: { not: bot.id },
             status: { in: [...ACTIVE_RUN_STATUSES] },
+            // A helper takes the computer only while a tool of its run holds the lease.
+            trigger: { not: "helper" },
             bot: { computerId: bot.computer.id },
             ...COMPUTER_USING_RUNS,
           },
@@ -367,6 +426,7 @@ export function computerRoutes(ctx: RouterContext) {
         }
         assertNotAnotherPersonsControl(bot.computer, context.actor);
         if (hasActiveComputerControl(bot.computer) && bot.computer.controlBotId === bot.id) {
+          await changeBrowserControl(bot, context.actor, "hand_off");
           await bindWaitingTakeoverToControl(deps, {
             spaceId: context.actor.spaceId,
             threadId: bot.thread?.id,
@@ -387,6 +447,11 @@ export function computerRoutes(ctx: RouterContext) {
           };
         }
         if (hasActiveComputerControl(bot.computer) && bot.computer.controlBotId !== bot.id) {
+          await changeBrowserControl(
+            await repos.getBot(context.actor, bot.computer.controlBotId!),
+            context.actor,
+            "resume",
+          );
           await releaseComputerControl(deps, context.actor, bot.computer.controlBotId!, "skipped");
           bot = await repos.getBot(context.actor, input.botId);
           if (!bot.computer) throw new IsolationError();
@@ -463,6 +528,11 @@ export function computerRoutes(ctx: RouterContext) {
             throw new ORPCError("CONFLICT", { message: "Computer control changed; try again" });
           }
           assertNotAnotherPersonsControl(current, context.actor);
+          await changeBrowserControl(
+            { ...bot, computer: { ...bot.computer, ...current } },
+            context.actor,
+            "hand_off",
+          );
           await bindWaitingTakeoverToControl(deps, {
             spaceId: context.actor.spaceId,
             threadId: bot.thread?.id,
@@ -513,6 +583,7 @@ export function computerRoutes(ctx: RouterContext) {
           await withdrawGrant();
           throw error;
         }
+        await changeBrowserControl(bot, context.actor, "hand_off");
         if (bot.thread) {
           await deps.events.append({
             spaceId: context.actor.spaceId,
@@ -544,6 +615,21 @@ export function computerRoutes(ctx: RouterContext) {
           if (waiting.userId !== context.actor.userId && !drivesThisRun) {
             throw new ORPCError("CONFLICT", { message: "The bot is waiting for someone else" });
           }
+        }
+        const computer = bot.computer;
+        const unopenedTakeover =
+          input.runId &&
+          computer?.controlHolder === "none" &&
+          computer.controlBotId === null &&
+          computer.controlLeaseId === null &&
+          computer.controlRunId === input.runId;
+        if (
+          computer &&
+          ((holdsComputerControl(computer, bot.id, context.actor) &&
+            (!input.runId || computer.controlRunId === input.runId)) ||
+            unopenedTakeover)
+        ) {
+          await changeBrowserControl(bot, context.actor, "resume");
         }
         const released = await releaseComputerControl(
           deps,

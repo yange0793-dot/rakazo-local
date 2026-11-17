@@ -146,6 +146,62 @@ afterEach(async () => {
   vi.unstubAllGlobals();
 });
 describe("shared role editor", () => {
+  it("keeps an unavailable saved model in its role while excluding it from new picks", async () => {
+    saved = {
+      primary: {
+        provider: "openai-compatible",
+        modelId: "provider-a/retired",
+        credentialId: "source-key",
+      },
+      backups: [],
+    };
+    api.forRole.mockResolvedValue([]);
+    await render({
+      credentials: [
+        {
+          id: "source-key",
+          provider: "openai-compatible",
+          label: "Channel A",
+          hasKey: false,
+          isDefault: true,
+          modelId: "provider-a/retired",
+          enabledModelIds: ["provider-a/current"],
+          catalogSource: {
+            id: "source-fixture",
+            label: "Model gateway",
+            group: "messages",
+            providerId: "provider-a",
+            available: true,
+            unavailableModelIds: ["provider-a/retired"],
+          },
+        },
+      ],
+    });
+    expect(rows()).toEqual(["provider-a/retiredUnavailable"]);
+    await click(trigger("Add fallback"));
+    const options = [...document.querySelectorAll<HTMLElement>('[role="option"]')].map(optionName);
+    expect(options).toContain("provider-a/current");
+    expect(options).not.toContain("provider-a/retired");
+    expect(document.body.textContent).toContain("Channel A");
+    expect(document.body.textContent).not.toContain("openai-compatible (Channel A)");
+    expect(api.setRole).not.toHaveBeenCalled();
+  });
+
+  it("labels the effective effort instead of the unsupported stored value", async () => {
+    saved = { primary: { ...chat, thinkingLevel: "max" }, backups: [] };
+    api.forRole.mockResolvedValue(
+      catalog.map((entry) => ({
+        ...entry,
+        thinkingLevels: ["low", "high"],
+      })),
+    );
+    await render({ thinking: true });
+    expect(container.textContent).toContain("Thinking: High");
+    expect(container.textContent).not.toContain("Thinking: Max");
+    expect(container.querySelector('[title="Saved Max; using High."]')).not.toBeNull();
+    expect(api.setRole).not.toHaveBeenCalled();
+  });
+
   it("selects an approval model through an existing connection and removes it back to the default", async () => {
     await render({ modelRole: "approval", title: "Approval model" });
     expect(container.querySelector('[data-testid="model-role-default"]')?.textContent).toContain(

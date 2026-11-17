@@ -15,6 +15,8 @@ import {
 } from "@rakazo/contracts";
 import {
   ACTIVE_RUN_STATUSES,
+  BACKGROUND_HELPER_TRIGGER,
+  CARD_TITLE_ESCAPED_CHARACTERS,
   callIdFromClientNonce,
   instructionUpdateDiff,
   isApprovalAskBlock,
@@ -60,10 +62,110 @@ export interface PauseRunForInput {
   leaseFence: number;
   blocks: MessageBlock[];
   /**
+   * The chat that shows this card when it is not the run's own thread: a background helper
+   * asks in the chat that started it. The run still matches, pauses and resumes in its own
+   * thread; only the card and its created event go here, and only for an approval effect that
+   * belongs to this run and a source card this chat really wrote.
+   */
+  cardThreadId?: string;
+  /**
    * Unredacted choice actions for resume. Persisted only on the run checkpoint
    * (not in message blocks) so clients still see redacted labels.
    */
   offeredActions?: Array<{ id: string; label: string }>;
+}
+
+function helperAskText(name: string, text: string): string {
+  const safe = name.replace(new RegExp(CARD_TITLE_ESCAPED_CHARACTERS, "g"), "\\$&");
+  return `Helper "${safe}": ${text}`;
+}
+
+type HelperCardBlock = Extract<MessageBlock, { kind: "subagent" }>;
+
+function helperCardOf(blocks: MessageBlock[]): HelperCardBlock | undefined {
+  return blocks.find((block): block is HelperCardBlock => block.kind === "subagent");
+}
+
+/** The paused or resumed state of the card this chat shows for its own helper. */
+function helperCardBlocks(blocks: MessageBlock[], status: "waiting" | "running"): MessageBlock[] {
+  const card = helperCardOf(blocks);
+  return card ? blocks.map((block) => (block === card ? { ...card, status } : block)) : blocks;
+}
+
+interface RoutedHelperApproval {
+  /** The subagent card that started this helper. */
+  cardMessageId: string;
+  /** The card's persisted blocks, which pause and resume update in place. */
+  cardBlocks: MessageBlock[];
+  /** The ask as the chat will show it: validated helper metadata and a name prefix. */
+  blocks: MessageBlock[];
+}
+
+/**
+ * A card shown outside the run's own thread must belong to a background helper this chat
+ * really started. Everything below is read from persisted rows, never from the caller's
+ * metadata: an arbitrary thread, a normal run, a missing or foreign source card, a choice,
+ * free-text or secret ask, or an effect of another run is refused before anything is written.
+ */
+async function routedHelperApproval(
+  tx: Prisma.TransactionClient,
+  input: PauseRunForInput,
+  cardThreadId: string,
+): Promise<RoutedHelperApproval | null> {
+  // A choice ask resumes from its checkpoint and is never routed between chats.
+  if (input.offeredActions?.length) return null;
+  const asks = input.blocks.filter(
+    (block): block is Extract<MessageBlock, { kind: "ask" }> => block.kind === "ask",
+  );
+  if (asks.length === 0) return null;
+  for (const ask of asks) {
+    if (!ask.approvalEffectId || !isApprovalAskBlock(ask)) return null;
+    const effect = await tx.externalEffect.findFirst({
+      where: {
+        id: ask.approvalEffectId,
+        spaceId: input.spaceId,
+        runId: input.runId,
+        status: "intended",
+      },
+      select: { id: true },
+    });
+    if (!effect) return null;
+  }
+  const run = await tx.run.findUnique({
+    where: { id: input.runId },
+    select: { trigger: true, botId: true, spaceId: true, sourceMessageId: true },
+  });
+  if (
+    !run ||
+    run.trigger !== BACKGROUND_HELPER_TRIGGER ||
+    run.botId !== input.botId ||
+    run.spaceId !== input.spaceId ||
+    !run.sourceMessageId
+  )
+    return null;
+  const source = await tx.message.findFirst({
+    where: { id: run.sourceMessageId, threadId: cardThreadId, botId: input.botId, role: "bot" },
+    select: { id: true, blocks: true },
+  });
+  const parsed = MessageBlockSchema.array().safeParse(source?.blocks);
+  if (!source || !parsed.success) return null;
+  const card = helperCardOf(parsed.data);
+  if (!card) return null;
+  return {
+    cardMessageId: source.id,
+    cardBlocks: parsed.data,
+    // The pause message carries the ask the run is waiting on, marked with the card that
+    // started this helper. The card's own blocks are only updated, never posted again.
+    blocks: input.blocks.map((block) =>
+      block.kind === "ask"
+        ? {
+            ...block,
+            helper: { messageId: source.id, name: card.name },
+            text: helperAskText(card.name, block.text),
+          }
+        : block,
+    ),
+  };
 }
 
 const CHOICE_ASK_CHECKPOINT_KIND = "choice_ask_v1";
@@ -181,19 +283,13 @@ async function findPendingAsk(
   return null;
 }
 
-async function commitAnswerRunInput(
-  tx: Prisma.TransactionClient,
-  input: AnswerRunInput,
-  runSecretWriter?: RunSecretWriter,
-): Promise<{
-  threadId: string;
-  seq: number;
-  approval?: { decision: string; effectKind: string };
-} | null> {
-  // Thread row first, then run rows — the same order as clearThread and finalizeRun, so a
-  // concurrent clear cannot deadlock against this transaction.
-  await tx.$queryRaw`SELECT id FROM threads WHERE id = ${input.threadId} FOR UPDATE`;
-  const run = await tx.run.findFirst({
+/**
+ * The waiting run an answer names. Normally it is the thread's own run; otherwise it is a
+ * background helper this chat started, linked through the persisted source card. An answer
+ * carrying an arbitrary run id never reaches a run another chat owns.
+ */
+async function findWaitingRun(tx: Prisma.TransactionClient, input: AnswerRunInput) {
+  const direct = await tx.run.findFirst({
     where: {
       id: input.runId,
       spaceId: input.spaceId,
@@ -206,12 +302,52 @@ async function commitAnswerRunInput(
       checkpoint: true,
       trigger: true,
       clientNonce: true,
+      threadId: true,
+      sourceMessageId: true,
       task: { select: { prompt: true } },
     },
   });
+  if (direct) return { run: direct, routed: false as const };
+  const helper = await tx.run.findFirst({
+    where: {
+      id: input.runId,
+      spaceId: input.spaceId,
+      status: "waiting_input",
+      trigger: BACKGROUND_HELPER_TRIGGER,
+      sourceMessage: { threadId: input.threadId },
+    },
+    select: {
+      botId: true,
+      userId: true,
+      checkpoint: true,
+      trigger: true,
+      clientNonce: true,
+      threadId: true,
+      sourceMessageId: true,
+      task: { select: { prompt: true } },
+    },
+  });
+  return helper ? { run: helper, routed: true as const } : null;
+}
+
+async function commitAnswerRunInput(
+  tx: Prisma.TransactionClient,
+  input: AnswerRunInput,
+  runSecretWriter?: RunSecretWriter,
+): Promise<{
+  threadId: string;
+  seq: number;
+  approval?: { decision: string; effectKind: string };
+} | null> {
+  // Thread row first, then run rows — the same order as clearThread and finalizeRun, so a
+  // concurrent clear cannot deadlock against this transaction.
+  await tx.$queryRaw`SELECT id FROM threads WHERE id = ${input.threadId} FOR UPDATE`;
+  const found = await findWaitingRun(tx, input);
+  if (!found) return null;
+  const { run, routed } = found;
   // An answer resumes the run with its user's credentials and rules, so in a shared space only
   // that user answers its cards; anyone else's message starts a run of their own.
-  if (!run || run.userId !== input.answeredByUserId) return null;
+  if (run.userId !== input.answeredByUserId) return null;
   const message = await tx.message.findFirst({
     where: {
       id: input.messageId,
@@ -226,6 +362,29 @@ async function commitAnswerRunInput(
     (block) => block.kind === "ask" && block.status !== "answered",
   );
   if (pendingAsk?.kind !== "ask") return null;
+  // A helper's card in another chat answers only that helper, only as an approval, and only
+  // when the card and its metadata match the source card this chat really wrote.
+  let helperCard: { messageId: string; blocks: MessageBlock[] } | null = null;
+  if (routed) {
+    if (!isApprovalAskBlock(pendingAsk)) return null;
+    const source = run.sourceMessageId
+      ? await tx.message.findFirst({
+          where: {
+            id: run.sourceMessageId,
+            threadId: input.threadId,
+            botId: run.botId,
+            role: "bot",
+          },
+          select: { id: true, blocks: true },
+        })
+      : null;
+    const sourceBlocks = MessageBlockSchema.array().safeParse(source?.blocks);
+    const card = source && sourceBlocks.success ? helperCardOf(sourceBlocks.data) : undefined;
+    const helper = pendingAsk.helper;
+    if (!source || !sourceBlocks.success || !card || !helper) return null;
+    if (helper.messageId !== source.id || helper.name !== card.name) return null;
+    helperCard = { messageId: source.id, blocks: sourceBlocks.data };
+  }
   const approvalAsk = isApprovalAskBlock(pendingAsk);
   const secretAsk = isSecretAskBlock(pendingAsk);
   const choiceAsk = !approvalAsk && !secretAsk && Boolean(pendingAsk.actions?.length);
@@ -320,7 +479,8 @@ async function commitAnswerRunInput(
     where: {
       id: input.runId,
       spaceId: input.spaceId,
-      threadId: input.threadId,
+      // The run resumes in its own thread, which a routed helper card only names indirectly.
+      threadId: run.threadId,
       status: "waiting_input",
     },
     data: {
@@ -482,9 +642,23 @@ async function commitAnswerRunInput(
     runId: input.runId,
     payload: { messageId: message.id, role: "bot", blocks },
   });
+  let latest = updated;
+  // The helper's own card says it is working again in the same transaction that resumed it.
+  if (helperCard) {
+    const restored = helperCardBlocks(helperCard.blocks, "running");
+    await tx.message.update({ where: { id: helperCard.messageId }, data: { blocks: restored } });
+    latest = await appendEventInTransaction(tx, {
+      spaceId: input.spaceId,
+      threadId: input.threadId,
+      botId: run.botId,
+      type: "thread.message.updated",
+      runId: input.runId,
+      payload: { messageId: helperCard.messageId, role: "bot", blocks: restored },
+    });
+  }
   return {
-    threadId: updated.threadId,
-    seq: updated.seq,
+    threadId: latest.threadId,
+    seq: latest.seq,
     ...(approvalEffect
       ? { approval: { decision: approvalAnswer, effectKind: approvalEffect.kind } }
       : {}),
@@ -688,10 +862,24 @@ export async function pauseRunForInput(
   input: PauseRunForInput,
   realtime?: RealtimeFanout,
 ): Promise<FinalizeRunResult | false> {
+  // A card routed to another chat is verified against persisted rows inside the transaction.
+  const cardThreadId =
+    input.cardThreadId && input.cardThreadId !== input.threadId ? input.cardThreadId : undefined;
   const committed = await prisma.$transaction(async (tx: Prisma.TransactionClient) => {
+    // A card shown in another chat locks that chat first, then the run's own thread — the
+    // order clearThread and returnHelperOutcome take, so a routed card can wait on either.
+    if (cardThreadId) {
+      const chat = await tx.$queryRaw<Array<{ id: string }>>`
+        SELECT id FROM threads
+        WHERE id = ${cardThreadId} AND "spaceId" = ${input.spaceId}
+        FOR UPDATE`;
+      if (chat.length !== 1) return null;
+    }
     // Thread row first, then run rows — the same order as clearThread and finalizeRun, so a
     // concurrent clear cannot deadlock against this transaction.
     await tx.$queryRaw`SELECT id FROM threads WHERE id = ${input.threadId} FOR UPDATE`;
+    const routed = cardThreadId ? await routedHelperApproval(tx, input, cardThreadId) : null;
+    if (cardThreadId && !routed) return null;
     const paused = await tx.run.updateMany({
       where: {
         id: input.runId,
@@ -725,25 +913,28 @@ export async function pauseRunForInput(
     });
     if (attempt.count !== 1) throw new Error("Active run attempt was not available to pause");
 
+    const responseThreadId = cardThreadId ?? input.threadId;
+    const responseBlocks = routed?.blocks ?? input.blocks;
     const message = await createThreadMessageInTransaction(tx, {
-      threadId: input.threadId,
+      threadId: responseThreadId,
       role: "bot",
-      blocks: input.blocks,
+      blocks: responseBlocks,
       botId: input.botId,
       runId: input.runId,
     });
     const response = await appendEventInTransaction(tx, {
       spaceId: input.spaceId,
-      threadId: input.threadId,
+      threadId: responseThreadId,
       botId: input.botId,
       type: "thread.message.created",
       runId: input.runId,
-      payload: { messageId: message.id, role: "bot", blocks: input.blocks },
+      payload: { messageId: message.id, role: "bot", blocks: responseBlocks },
     });
     const run = await tx.run.findUnique({
       where: { id: input.runId },
       select: { userId: true },
     });
+    // The run's own state stays on its thread: the parent chat never looks like its bot paused.
     const waitingEvent = await appendEventInTransaction(tx, {
       spaceId: input.spaceId,
       threadId: input.threadId,
@@ -755,10 +946,29 @@ export async function pauseRunForInput(
     await tx.event.deleteMany({
       where: { runId: input.runId, ...transientRunEventsWhere() },
     });
+    let cardSeq = response.seq;
+    if (routed && cardThreadId) {
+      const cardBlocks = helperCardBlocks(routed.cardBlocks, "waiting");
+      await tx.message.update({
+        where: { id: routed.cardMessageId },
+        data: { blocks: cardBlocks },
+      });
+      const cardEvent = await appendEventInTransaction(tx, {
+        spaceId: input.spaceId,
+        threadId: cardThreadId,
+        botId: input.botId,
+        type: "thread.message.updated",
+        runId: input.runId,
+        payload: { messageId: routed.cardMessageId, role: "bot", blocks: cardBlocks },
+      });
+      cardSeq = cardEvent.seq;
+    }
     const continuationRunId = await createPendingSteeringRun(tx, input);
     return {
       threadId: waitingEvent.threadId,
       seq: waitingEvent.seq,
+      cardThreadId,
+      cardSeq,
       continuationRunId,
       firstResponseRunId: response.firstResponse ? input.runId : undefined,
     };
@@ -772,7 +982,13 @@ export async function pauseRunForInput(
     committed.seq,
     committed.firstResponseRunId,
   );
-  return { continuationRunId: committed.continuationRunId };
+  // Only after commit, so a routed card's chat never reads a card that was not kept.
+  if (committed.cardThreadId)
+    await notifyRealtime(realtime, committed.cardThreadId, committed.cardSeq);
+  return {
+    continuationRunId: committed.continuationRunId,
+    ...(committed.cardThreadId ? { cardThreadId: committed.cardThreadId } : {}),
+  };
 }
 
 function alwaysAllowedSite(effect: {

@@ -73,6 +73,7 @@ afterEach(() => {
 async function mounted({
   client = new QueryClient({ defaultOptions: { queries: { retry: false } } }),
   beside = null as ReactNode,
+  onOpenChat = undefined as (() => void) | undefined,
 } = {}) {
   vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
   const container = document.createElement("div");
@@ -82,7 +83,7 @@ async function mounted({
     root.render(
       <QueryClientProvider client={client}>
         <MemoryRouter>
-          <RoutineRunHistory routineId="routine-1" />
+          <RoutineRunHistory routineId="routine-1" onOpenChat={onOpenChat} />
           {beside}
         </MemoryRouter>
       </QueryClientProvider>,
@@ -142,6 +143,19 @@ it("stays hidden until the first run and picks it up on the next poll", async ()
     await act(async () => vi.advanceTimersByTimeAsync(15_000));
     expect(view.rows()).toHaveLength(1);
     expect(view.container.querySelector("a")).toBeNull();
+  } finally {
+    await view.close();
+  }
+});
+
+it("reveals the chat when a run's reply is opened", async () => {
+  routines.history.mockResolvedValue(page([run]));
+  const onOpenChat = vi.fn();
+  const view = await mounted({ onOpenChat });
+  try {
+    await view.settled(() => expect(view.rows()).toHaveLength(1));
+    await act(async () => view.container.querySelector("a")?.click());
+    expect(onOpenChat).toHaveBeenCalledOnce();
   } finally {
     await view.close();
   }

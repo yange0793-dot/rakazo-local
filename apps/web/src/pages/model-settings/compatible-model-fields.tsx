@@ -1,6 +1,6 @@
 import { Plural, Trans, useLingui } from "@lingui/react/macro";
 import type { ThinkingLevel } from "@rakazo/contracts";
-import { compatibleThinkingLevels, toggleEnabledModelId } from "@rakazo/core";
+import { toggleEnabledModelId } from "@rakazo/core";
 import {
   Button,
   Checkbox,
@@ -29,6 +29,7 @@ export function CompatibleModelFields({
   busy,
   cancelOAuthAttempt,
   compatibleRows,
+  compatibleEffortLevels,
   contextWindow,
   defaultModelOptions,
   effectiveBaseUrl,
@@ -71,6 +72,7 @@ export function CompatibleModelFields({
   | "busy"
   | "cancelOAuthAttempt"
   | "compatibleRows"
+  | "compatibleEffortLevels"
   | "contextWindow"
   | "defaultModelOptions"
   | "effectiveBaseUrl"
@@ -123,6 +125,13 @@ export function CompatibleModelFields({
     selectedIds: [modelId, ...enabledModelIds],
   });
   const hasSearchQuery = query.trim().length > 0;
+  const managed = Boolean(credential?.catalogSource);
+  const unavailableModel = (id: string) =>
+    Boolean(
+      credential?.catalogSource &&
+        (!credential.catalogSource.available ||
+          credential.catalogSource.unavailableModelIds.includes(id)),
+    );
   return (
     <div className="block text-body text-muted-foreground">
       <label className="block" htmlFor="model-base-url">
@@ -130,6 +139,7 @@ export function CompatibleModelFields({
         <Input
           id="model-base-url"
           value={baseUrl}
+          readOnly={managed}
           onChange={(event) => updateBaseUrl(event.target.value)}
           aria-label={t`OpenAI-compatible server URL`}
           placeholder="http://127.0.0.1:8000/v1"
@@ -137,18 +147,20 @@ export function CompatibleModelFields({
           className="mt-2 h-10 text-foreground"
         />
       </label>
-      <div className="mt-3 flex items-center gap-2">
-        <Button
-          type="button"
-          variant="outline"
-          size="sm"
-          disabled={busy || probing || !effectiveBaseUrl}
-          onClick={() => void probeServerModels()}
-        >
-          {probing ? <Trans>Finding…</Trans> : <Trans>Find models</Trans>}
-        </Button>
-      </div>
-      {!endpointPreset ? (
+      {!managed ? (
+        <div className="mt-3 flex items-center gap-2">
+          <Button
+            type="button"
+            variant="outline"
+            size="sm"
+            disabled={busy || probing || !effectiveBaseUrl}
+            onClick={() => void probeServerModels()}
+          >
+            {probing ? <Trans>Finding…</Trans> : <Trans>Find models</Trans>}
+          </Button>
+        </div>
+      ) : null}
+      {!endpointPreset && !managed ? (
         <Disclosure
           className="mt-3 text-body text-muted-foreground"
           summary={<Trans>Setup help</Trans>}
@@ -165,7 +177,7 @@ export function CompatibleModelFields({
             id="model-protocol"
             className="mt-2 w-full text-foreground"
             value={apiProtocol}
-            disabled={busy}
+            disabled={busy || managed}
             onChange={(event) => {
               selectionRevisionRef.current += 1;
               updateApiProtocol(event.target.value as ModelSettingsState["apiProtocol"]);
@@ -193,7 +205,7 @@ export function CompatibleModelFields({
         <span>
           <Trans>Model</Trans>
         </span>
-        {compatibleRows.includes(modelId) ? (
+        {compatibleRows.includes(modelId) || (managed && modelId) ? (
           <NativeSelect
             className="mt-2 w-full text-foreground"
             value={modelId}
@@ -208,17 +220,20 @@ export function CompatibleModelFields({
             aria-label={t`Models from server`}
           >
             {defaultModelOptions.map((id) => (
-              <NativeSelectOption key={id} value={id}>
-                {id}
+              <NativeSelectOption key={id} value={id} disabled={unavailableModel(id)}>
+                {unavailableModel(id) ? t`${id} (Unavailable)` : id}
               </NativeSelectOption>
             ))}
-            <NativeSelectOption value="">
-              <Trans>Other model…</Trans>
-            </NativeSelectOption>
+            {!managed ? (
+              <NativeSelectOption value="">
+                <Trans>Other model…</Trans>
+              </NativeSelectOption>
+            ) : null}
           </NativeSelect>
         ) : (
           <Input
             value={modelId}
+            readOnly={managed}
             onChange={(event) => {
               cancelOAuthAttempt();
               selectionRevisionRef.current += 1;
@@ -255,7 +270,7 @@ export function CompatibleModelFields({
               <Label key={id} className="font-normal text-foreground">
                 <Checkbox
                   checked={id === modelId || enabledModelIds.includes(id)}
-                  disabled={busy || id === modelId}
+                  disabled={busy || id === modelId || unavailableModel(id)}
                   onCheckedChange={(checked) => {
                     selectionRevisionRef.current += 1;
                     setEnabledModelIds((current) => toggleEnabledModelId(current, id, checked));
@@ -303,10 +318,12 @@ export function CompatibleModelFields({
           setThinkingLevel(value as ThinkingLevel | null);
           setNotice(null);
         }}
-        thinkingLevelOptions={compatibleThinkingLevels(apiProtocol).map((level) => ({
-          value: level,
-          label: thinkingLevelLabels[level],
-        }))}
+        thinkingLevelOptions={compatibleEffortLevels
+          .filter((level) => level !== "off")
+          .map((level) => ({
+            value: level,
+            label: thinkingLevelLabels[level],
+          }))}
         thinkingLevelLabel={t`Reasoning effort`}
         thinkingLevelDefaultLabel={t`Default`}
         maxTokens={maxTokens}

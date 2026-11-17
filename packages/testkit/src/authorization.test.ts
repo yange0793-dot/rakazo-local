@@ -8,7 +8,7 @@ import {
   PrismaPushTokenStore,
 } from "@rakazo/adapters";
 import type { createApp } from "@rakazo/api/app";
-import type { appContract, Space, SpaceNavigation } from "@rakazo/contracts";
+import type { RpcInput, RpcPath, Space, SpaceNavigation } from "@rakazo/contracts";
 import {
   claimSpaceDeletionForMember,
   deleteClaimedSpaceForMember,
@@ -28,14 +28,10 @@ import { asSystem } from "./system-db.js";
 
 type App = { request: (input: string, init?: RequestInit) => Response | Promise<Response> };
 type AppHandles = Awaited<ReturnType<typeof createApp>>;
-type RpcPath<T, Prefix extends string = ""> = T extends { "~orpc": unknown }
-  ? Prefix
-  : T extends object
-    ? {
-        [Key in keyof T & string]: RpcPath<T[Key], Prefix extends "" ? Key : `${Prefix}/${Key}`>;
-      }[keyof T & string]
-    : never;
-type ProtectedRpcPath = Exclude<RpcPath<typeof appContract>, "health">;
+type ProtectedRpcPath = Exclude<RpcPath, "health">;
+type ProtectedRpcCall = {
+  [Method in ProtectedRpcPath]: readonly [method: Method, input?: RpcInput<Method>];
+}[ProtectedRpcPath];
 
 process.env.WAKEUP_DRIVER = "memory";
 process.env.SANDBOX_PROVIDER = "fake";
@@ -245,6 +241,8 @@ describeWithDatabase("API authorization and resource isolation", () => {
       ["updater/apply", {}],
       ["models/list"],
       ["models/credentials"],
+      ["models/sources"],
+      ["models/syncSources", {}],
       ["models/connect", { provider: "test", apiKey: "not-a-real-key" }],
       ["models/beginOAuth", { provider: "openai-codex" }],
       ["models/submitOAuthCode", { loginId: "missing-login", code: "fake-code" }],
@@ -387,6 +385,27 @@ describeWithDatabase("API authorization and resource isolation", () => {
       ["memory/connectProvider"],
       ["memory/setDefaultScope"],
       ["memory/disconnectProvider"],
+      ["memory/facts", { botId: "missing-bot", scope: "shared" }],
+      [
+        "memory/correctFact",
+        {
+          id: "missing-fact",
+          botId: "missing-bot",
+          scope: "shared",
+          content: "Nope",
+          expectedRevision: 1,
+        },
+      ],
+      [
+        "memory/forgetFact",
+        {
+          id: "missing-fact",
+          botId: "missing-bot",
+          scope: "shared",
+          expectedRevision: 1,
+        },
+      ],
+      ["memory/exportFacts", { botId: "missing-bot", scope: "shared" }],
       ["routines/list", { botId: "missing-bot" }],
       ["routines/listForMentions", { botIds: ["missing-bot"] }],
       ["routines/create", routineInput("missing-bot")],
@@ -2455,7 +2474,7 @@ function skillPlaybookInput() {
   };
 }
 
-function capabilityInput(name: string) {
+function capabilityInput(name: string): RpcInput<"capabilities/install"> {
   return { kind: "skill", name, source: "test://authorization", config: {} };
 }
 
@@ -2598,8 +2617,8 @@ interface Bot {
   name: string;
 }
 
-function exhaustiveProtectedCalls<
-  const Calls extends ReadonlyArray<readonly [ProtectedRpcPath, unknown?]>,
->(calls: Calls & (ProtectedRpcPath extends Calls[number][0] ? unknown : never)): Calls {
+function exhaustiveProtectedCalls<const Calls extends readonly ProtectedRpcCall[]>(
+  calls: Calls & (ProtectedRpcPath extends Calls[number][0] ? unknown : never),
+): Calls {
   return calls;
 }

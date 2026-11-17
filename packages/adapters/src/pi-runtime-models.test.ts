@@ -165,6 +165,50 @@ it.each([true, false, undefined])(
 );
 
 describe("resolveRuntimeModel", () => {
+  const compatible = {
+    provider: OPENAI_COMPATIBLE_PROVIDER_ID,
+    id: "route-id/fixture-model",
+    baseUrl: "http://localhost:8000/v1",
+    apiProtocol: "anthropic-messages" as const,
+    reasoning: true,
+  };
+
+  it("reports a saved level separately from the local effective selection", () => {
+    const config = { ...compatible, thinkingLevel: "max" as const };
+    expect(resolveRuntimeModel(config).thinking).toEqual({
+      requested: "max",
+      effective: "high",
+      adjusted: true,
+    });
+    expect(config.thinkingLevel).toBe("max");
+    expect(resolveRuntimeModel(compatible).thinking).toEqual({
+      requested: null,
+      effective: "medium",
+      adjusted: false,
+    });
+    expect(
+      resolveRuntimeModel({ ...compatible, reasoning: false, thinkingLevel: "max" }).thinking,
+    ).toEqual({ requested: "max", effective: "off", adjusted: true });
+  });
+
+  it("passes explicit per-model declarations to the runtime without changing other capabilities", () => {
+    const resolved = resolveRuntimeModel({
+      ...compatible,
+      thinkingLevel: "max",
+      reasoningCapabilities: { mode: "adaptive", levels: ["off", "low", "high", "max"] },
+      contextWindow: 1_000_000,
+      acceptsImages: true,
+    });
+    expect(resolved.model).toMatchObject({
+      id: compatible.id,
+      compat: { forceAdaptiveThinking: true },
+      contextWindow: 1_000_000,
+      input: ["text", "image"],
+    });
+    expect(getSupportedThinkingLevels(resolved.model!)).toEqual(["off", "low", "high", "max"]);
+    expect(resolved.thinking).toEqual({ requested: "max", effective: "max", adjusted: false });
+  });
+
   it("does not route an unavailable provider model through OpenRouter", () => {
     const resolved = resolveRuntimeModel({
       provider: "anthropic",
@@ -172,6 +216,7 @@ describe("resolveRuntimeModel", () => {
     });
     expect(resolved.provider).toBe("anthropic");
     expect(resolved.model).toBeUndefined();
+    expect(resolved.thinking).toBeUndefined();
   });
 
   it("does not treat a stringified null as a catalog model", () => {
@@ -200,6 +245,15 @@ it("resolves a saved Azure provider reference without changing its model id", ()
 describe("reasoning efforts an endpoint refuses", () => {
   const model = (thinkingLevelMap: Model<Api>["thinkingLevelMap"]) =>
     ({ id: "example", reasoning: true, thinkingLevelMap }) as Model<Api>;
+
+  it("does not restore a disabled level when an endpoint lists a broader effort set", () => {
+    const narrowed = acceptedReasoningEfforts(
+      model({ off: "none", minimal: null, low: "low", medium: null, high: "high" }),
+      "reasoning_effort must be one of: minimal, low, medium, high",
+    );
+    expect(getSupportedThinkingLevels(model(narrowed))).toEqual(["off", "low", "high"]);
+    expect(clampThinkingLevel(model(narrowed), "medium")).toBe("high");
+  });
 
   it("keeps only the levels a generic endpoint lists and sends no effort for off", () => {
     const levels = acceptedReasoningEfforts(

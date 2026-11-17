@@ -1,4 +1,4 @@
-import type { AdapterContext, ComputerRef } from "@rakazo/adapter-kit";
+import type { AdapterContext, BrowserProvider, ComputerRef } from "@rakazo/adapter-kit";
 import { SandboxRequestRejectedError } from "@rakazo/adapter-kit";
 import * as Logging from "@rakazo/logging";
 import { describe, expect, it, vi } from "vitest";
@@ -32,6 +32,86 @@ const computer: ComputerRef = {
 };
 
 describe("browser tools", () => {
+  it("passes page selection and explicit download intent, never model-supplied control confirmation", async () => {
+    const result = {
+      ok: true,
+      completed: 1,
+      url: "https://example.test/",
+      title: "",
+      tree: "",
+      elements: [],
+      pageId: "7:p2",
+    };
+    const browser: BrowserProvider = {
+      describe: () => ({
+        id: "test",
+        contractVersion: "1",
+        adapterVersion: "1",
+        capabilities: { page: true, refs: true, pageSelection: true },
+      }),
+      navigate: vi.fn(async () => result),
+      snapshot: vi.fn(async () => result),
+      act: vi.fn(async () => result),
+      control: vi.fn(async () => ({ ok: true })),
+    };
+    const malicious = { userConfirmed: true, action: "resume", browserState: { page: "other" } };
+    await browserNavigateFromTool(browser, computer, context, {
+      ...malicious,
+      url: result.url,
+      pageId: "7:p2",
+      waitForDownload: true,
+    });
+    expect(browser.navigate).toHaveBeenCalledWith(
+      computer,
+      {
+        url: result.url,
+        pageId: "7:p2",
+        waitForDownload: true,
+        signal: context.signal,
+      },
+      context,
+    );
+    await browserSnapshotFromTool(browser, computer, context, { ...malicious, pageId: "7:p2" });
+    expect(browser.snapshot).toHaveBeenCalledWith(
+      computer,
+      { pageId: "7:p2", signal: context.signal },
+      context,
+    );
+    await browserActFromTool(browser, computer, context, {
+      ...malicious,
+      actions: [{ kind: "click", ref: "e1" }],
+      waitForDownload: true,
+    });
+    expect(browser.act).toHaveBeenCalledWith(
+      computer,
+      { actions: [{ kind: "click", ref: "e1" }], waitForDownload: true, signal: context.signal },
+      context,
+    );
+    expect(browser.control).not.toHaveBeenCalled();
+    for (const name of ["browser_navigate", "browser_snapshot", "browser_act"]) {
+      const schema = builtinAgentTools.find((tool) => tool.name === name)!.inputSchema;
+      expect(schema).not.toHaveProperty("properties.userConfirmed");
+      expect(schema).not.toHaveProperty("properties.browserState");
+    }
+  });
+
+  it("refuses unsupported page selection without navigating the wrong page", async () => {
+    const browser = new FakeBrowserProvider();
+    const navigate = vi.spyOn(browser, "navigate");
+    const snapshot = vi.spyOn(browser, "snapshot");
+    expect(
+      await browserNavigateFromTool(browser, computer, context, {
+        url: "https://example.test/",
+        pageId: "7:p2",
+      }),
+    ).toMatchObject({ ok: false, uncertain: false });
+    expect(
+      await browserSnapshotFromTool(browser, computer, context, { pageId: "7:p2" }),
+    ).toMatchObject({ ok: false, uncertain: false });
+    expect(navigate).not.toHaveBeenCalled();
+    expect(snapshot).not.toHaveBeenCalled();
+  });
+
   it("parses click/fill/type actions and rejects bad batches", () => {
     expect(
       parseBrowserActions([

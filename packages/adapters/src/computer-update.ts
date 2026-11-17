@@ -144,7 +144,12 @@ export async function queueComputerUpdate(
               { computerSwitching: true },
               {
                 runs: {
-                  some: { status: { in: [...ACTIVE_RUN_STATUSES] }, ...COMPUTER_USING_RUNS },
+                  some: {
+                    status: { in: [...ACTIVE_RUN_STATUSES] },
+                    // A helper takes the computer only while a tool of its run holds the lease.
+                    trigger: { not: "helper" },
+                    ...COMPUTER_USING_RUNS,
+                  },
                 },
               },
             ],

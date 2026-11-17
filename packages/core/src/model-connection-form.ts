@@ -83,6 +83,7 @@ export function connectionFormFields(input: {
     | "baseUrl"
     | "apiProtocol"
     | "reasoning"
+    | "reasoningCapabilities"
     | "thinkingLevel"
     | "maxTokens"
     | "contextWindow"
@@ -98,7 +99,7 @@ export function connectionFormFields(input: {
   const compatible = provider === OPENAI_COMPATIBLE_PROVIDER_ID;
   const supportedThinking = compatible
     ? credential?.reasoning
-      ? compatibleThinkingLevels(credential?.apiProtocol)
+      ? compatibleThinkingLevels(credential?.apiProtocol, credential?.reasoningCapabilities)
       : []
     : catalog.find((entry) => entry.provider === provider && entry.id === modelId)?.thinkingLevels;
   return {
@@ -110,7 +111,7 @@ export function connectionFormFields(input: {
       credential?.modelId === modelId ? credential.thinkingLevel : null,
       supportedThinking,
     ) as ThinkingLevel | null,
-    maxTokens: connectionMaxTokensField(provider, credential?.maxTokens),
+    maxTokens: connectionMaxTokensField(credential?.maxTokens),
     contextWindow: String(credential?.contextWindow ?? DEFAULT_MODEL_CONTEXT_WINDOW),
     supportsImages: credential?.supportsImages ?? false,
     maxImagesPerPrompt: String(credential?.maxImagesPerPrompt ?? ""),
@@ -176,7 +177,10 @@ export function modelConnectRequest(input: {
     ModelCatalogEntry,
     "provider" | "providerName" | "id" | "thinkingLevels" | "routingFields"
   >;
-  credential?: Pick<ModelCredential, "modelId" | "thinkingLevel">;
+  credential?: Pick<
+    ModelCredential,
+    "modelId" | "thinkingLevel" | "reasoningCapabilities" | "baseUrl" | "apiProtocol"
+  >;
   credentialId: string | null;
   settingsOnly?: boolean;
   makeDefault?: { makeDefault: boolean; scope: SettingsScope };
@@ -196,7 +200,7 @@ export function modelConnectRequest(input: {
     return { status: "incomplete" };
   }
   const maxTokens = form.maxTokens.trim() ? parseModelMaxTokens(form.maxTokens) : undefined;
-  if ((compatible || form.maxTokens.trim()) && maxTokens === undefined) {
+  if (form.maxTokens.trim() && maxTokens === undefined) {
     return { status: "invalid", field: "maxTokens" };
   }
   const maxImagesPerPrompt = compatible
@@ -216,11 +220,17 @@ export function modelConnectRequest(input: {
   }
   // The staged effort belongs to the model on screen. Clamp it before a connect or a limit
   // save so a previous model's level cannot stick.
+  const reasoningCapabilities =
+    compatible &&
+    savedCompatibleEndpointMatches(baseUrl, credential?.baseUrl) &&
+    form.apiProtocol === (credential?.apiProtocol ?? "chat-completions")
+      ? credential?.reasoningCapabilities
+      : undefined;
   const thinkingLevel = clampCatalogThinkingLevel(
     form.thinkingLevel,
     compatible
       ? form.reasoning
-        ? compatibleThinkingLevels(form.apiProtocol)
+        ? compatibleThinkingLevels(form.apiProtocol, reasoningCapabilities)
         : []
       : selected.thinkingLevels,
   ) as ThinkingLevel | null;
@@ -240,7 +250,7 @@ export function modelConnectRequest(input: {
         enabledModelIds: form.enabledModelIds.filter((id) => id !== modelId),
         reasoning: form.reasoning,
         thinkingLevel,
-        maxTokens,
+        maxTokens: maxTokens ?? null,
         contextWindow,
         supportsImages: form.supportsImages,
         maxImagesPerPrompt:

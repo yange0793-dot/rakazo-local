@@ -129,6 +129,14 @@ function assertCompatibleModelEnabled(
 ) {
   if (credential.provider !== OPENAI_COMPATIBLE_PROVIDER_ID) return;
   if (secret.kind !== "openai_compatible") return;
+  if (secret.managedCatalog) {
+    const id = secret.managedCatalog.aliases[modelId] ?? modelId;
+    if (!enabledOpenAiCompatibleModelIds(secret, credential.defaultModel).includes(id))
+      throw new UnavailableModelForAuthError(
+        "This model is no longer available from its catalog source. Choose another model.",
+      );
+    return;
+  }
   if (secret.enabledModelIds !== undefined) {
     if (!enabledOpenAiCompatibleModelIds(secret, credential.defaultModel).includes(modelId)) {
       throw new UnavailableModelForAuthError("Unknown model for that provider");
@@ -199,6 +207,7 @@ async function resolveModelKeyMaterial(
   registerSecrets?: (values: string[]) => void,
   { requireStoredSecret = false }: { requireStoredSecret?: boolean } = {},
 ): Promise<{
+  routingModelId?: string;
   apiKey?: string;
   accountId?: string;
   gatewayId?: string;
@@ -209,6 +218,7 @@ async function resolveModelKeyMaterial(
   cacheCapabilities?: AgentRunRequest["model"]["cacheCapabilities"];
   contextWindow?: number;
   reasoning?: boolean;
+  reasoningCapabilities?: AgentRunRequest["model"]["reasoningCapabilities"];
   maxTokens?: number;
   thinkingLevel?: AgentRunRequest["model"]["thinkingLevel"];
   acceptsImages?: boolean;
@@ -316,7 +326,12 @@ async function resolveModelKeyMaterial(
       const accountId = resolved.secret.kind === "api_key" ? resolved.secret.accountId : undefined;
       const gatewayId = resolved.secret.kind === "api_key" ? resolved.secret.gatewayId : undefined;
       cloudflareProviderEnv({ provider, accountId, gatewayId });
+      const catalog =
+        resolved.secret.kind === "openai_compatible" ? resolved.secret.managedCatalog : undefined;
+      const routingModelId = catalog?.aliases[modelId] ?? (catalog ? modelId : undefined);
+      const capabilities = catalog?.capabilities[routingModelId ?? modelId];
       return {
+        routingModelId,
         apiKey: resolved.apiKey,
         accountId,
         gatewayId,
@@ -327,9 +342,18 @@ async function resolveModelKeyMaterial(
         allowPrivateEndpoint,
         cacheCapabilities:
           resolved.secret.kind !== "oauth" ? resolved.secret.cacheCapabilities : undefined,
-        contextWindow: resolved.secret.kind !== "oauth" ? resolved.secret.contextWindow : undefined,
+        contextWindow:
+          (resolved.secret.kind !== "oauth" ? resolved.secret.contextWindow : undefined) ??
+          capabilities?.contextWindow,
         reasoning:
           resolved.secret.kind === "openai_compatible" ? resolved.secret.reasoning : undefined,
+        reasoningCapabilities:
+          (resolved.secret.kind === "openai_compatible"
+            ? resolved.secret.reasoningCapabilities
+            : undefined) ??
+          (capabilities?.thinkingLevels || capabilities?.reasoningMode
+            ? { levels: capabilities.thinkingLevels, mode: capabilities.reasoningMode }
+            : undefined),
         maxTokens: resolved.secret.maxTokens,
         thinkingLevel:
           resolved.secret.kind === "openai_compatible" ? resolved.secret.thinkingLevel : undefined,
@@ -393,10 +417,14 @@ async function resolveModelKeyMaterial(
 }
 
 /** Translate resolved credentials and capabilities consistently for every run path. */
-export function resolvedModelRunFields(
-  resolved: Awaited<ReturnType<typeof resolveModelKey>>,
-): Omit<AgentRunRequest["model"], "provider" | "id" | "connectionId" | "thinkingLevel"> {
+export function resolvedModelRunFields(resolved: Awaited<ReturnType<typeof resolveModelKey>>): Omit<
+  AgentRunRequest["model"],
+  "provider" | "id" | "connectionId" | "thinkingLevel"
+> & {
+  id?: string;
+} {
   return {
+    ...(resolved.routingModelId ? { id: resolved.routingModelId } : {}),
     apiKey: resolved.oauth ? undefined : resolved.apiKey,
     callObserver: resolved.callObserver,
     ...(resolved.accountId ? { accountId: resolved.accountId } : {}),
@@ -408,6 +436,7 @@ export function resolvedModelRunFields(
     cacheCapabilities: resolved.cacheCapabilities,
     contextWindow: resolved.contextWindow,
     reasoning: resolved.reasoning,
+    reasoningCapabilities: resolved.reasoningCapabilities,
     maxTokens: resolved.maxTokens,
     acceptsImages: resolved.acceptsImages,
     maxImagesPerPrompt: resolved.maxImagesPerPrompt,

@@ -100,7 +100,21 @@ body,
 
 /* A page prints alone and light: the app under an open page, its popups and its backdrop stay
    off the paper, and the paper stays white past the page's end, whatever the app's theme. */
+@page rakazo-page {
+  size: A4;
+  margin: 12mm;
+}
+
+[data-page-print-preparing] [data-page-frame] {
+  width: 186mm;
+  margin-inline: auto;
+}
+
 @media print {
+  [data-page-print] {
+    page: rakazo-page;
+    width: 100%;
+  }
   html:has([data-page-print]),
   html:has([data-page-print]) body,
   html:has([data-page-print]) #root {

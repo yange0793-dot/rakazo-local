@@ -120,6 +120,19 @@ beforeEach(() => {
 afterEach(() => {
   act(() => root.unmount());
   localStorage.clear();
+  vi.unstubAllGlobals();
+});
+
+it("sends a message without opening a browser permission prompt", async () => {
+  const requestPermission = vi.fn(async () => "default");
+  vi.stubGlobal("Notification", { permission: "default", requestPermission });
+  botsRef.current = [{ id: activeChat, notifyOnFinish: true } as Bot];
+  rpc.threads.send.mockResolvedValue({ runId: "run-1", taskId: "task-1" });
+  await act(async () => {
+    await latest.sendMessage("hello", [], "send-1");
+  });
+  expect(rpc.threads.send).toHaveBeenCalledOnce();
+  expect(requestPermission).not.toHaveBeenCalled();
 });
 
 it.each([undefined, 1, 8])(

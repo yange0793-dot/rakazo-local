@@ -5,7 +5,6 @@ import {
   compatibleEndpointPresets,
   connectionDisplayName,
   DEFAULT_MODEL_CONTEXT_WINDOW,
-  DEFAULT_MODEL_MAX_TOKENS,
   MAX_MODEL_CONTEXT_WINDOW,
   MAX_MODEL_MAX_TOKENS,
   matchCompatibleEndpointPreset,
@@ -59,6 +58,7 @@ import { errorText } from "../../lib/user-error";
 
 type ModelSelection = {
   modelId?: string;
+  keepForm?: boolean;
 };
 
 type FeedbackAnchor = "probe" | "model" | "connection" | "limits";
@@ -95,7 +95,7 @@ export default function ModelConnection() {
   const [headerRows, setHeaderRows] = useState<ModelHeaderRow[] | null>(null);
   const [reasoning, setReasoning] = useState(false);
   const [thinkingLevel, setThinkingLevel] = useState<ThinkingLevel | null>(null);
-  const [maxTokens, setMaxTokens] = useState(String(DEFAULT_MODEL_MAX_TOKENS));
+  const [maxTokens, setMaxTokens] = useState("");
   const [contextWindow, setContextWindow] = useState(String(DEFAULT_MODEL_CONTEXT_WINDOW));
   const [supportsImages, setSupportsImages] = useState(false);
   const [maxImagesPerPrompt, setMaxImagesPerPrompt] = useState("");
@@ -106,6 +106,7 @@ export default function ModelConnection() {
   const [modelProbe] = useState(() => createModelProbe(setProbe));
   const resetOpenAiCompatibleProbe = modelProbe.reset;
   const [loading, setLoading] = useState(true);
+  const loadedRef = useRef(false);
   const [pending, setPending] = useState<"connect" | "disconnect" | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [savedNotice, setSavedNotice] = useState<string | null>(null);
@@ -163,6 +164,8 @@ export default function ModelConnection() {
       setMe(nextMe);
       setCatalog(nextCatalog);
       setCredentials(nextCredentials);
+      if (preferred.keepForm) return nextMe;
+      loadedRef.current = true;
       resetOpenAiCompatibleProbe();
       setModelId(nextModel);
       setHeaderRows(null);
@@ -185,6 +188,17 @@ export default function ModelConnection() {
   const modelsForProvider = catalog.filter((entry) => entry.provider === provider);
   const selected = modelsForProvider.find((entry) => entry.id === modelId) ?? modelsForProvider[0];
   const credential = credentials.find((entry) => entry.id === credentialId);
+  const savedEndpointMatches = savedCompatibleEndpointMatches(baseUrl, credential?.baseUrl);
+  const reasoningCapabilities =
+    savedEndpointMatches && apiProtocol === (credential?.apiProtocol ?? "chat-completions")
+      ? credential?.reasoningCapabilities
+      : undefined;
+  const compatibleEffortLevels =
+    selected?.id === modelId &&
+    savedEndpointMatches &&
+    apiProtocol === (credential?.apiProtocol ?? "chat-completions")
+      ? (selected.thinkingLevels ?? compatibleThinkingLevels(apiProtocol, reasoningCapabilities))
+      : compatibleThinkingLevels(apiProtocol, reasoningCapabilities);
   const {
     oauth,
     pasteCode,
@@ -225,7 +239,7 @@ export default function ModelConnection() {
 
   useFocusEffect(
     useCallback(() => {
-      void load()
+      void load({ keepForm: loadedRef.current })
         .catch((err: unknown) =>
           publishFeedback("connection", {
             error: errorText(err, t`Could not load model settings`),
@@ -242,7 +256,9 @@ export default function ModelConnection() {
       ? matchCompatibleEndpointPreset(compatibleEndpointPresets(catalog), baseUrl)
       : undefined;
   const selectedProviderLabel = credential
-    ? connectionDisplayName(credential, providerName)
+    ? credential.catalogSource
+      ? credential.label
+      : connectionDisplayName(credential, providerName)
     : (endpointPreset?.name ?? providerName);
   useLayoutEffect(() => {
     if (selectedProviderLabel) navigation.setOptions({ title: selectedProviderLabel });
@@ -273,7 +289,7 @@ export default function ModelConnection() {
     credential,
     keyRequired: Boolean(endpointPreset),
   });
-  const limitsDirty = maxTokens !== connectionMaxTokensField(provider, credential?.maxTokens);
+  const limitsDirty = maxTokens !== connectionMaxTokensField(credential?.maxTokens);
   const gatewayDirty =
     accountId.trim() !== (credential?.accountId ?? "") ||
     gatewayId.trim() !== (credential?.gatewayId ?? "");
@@ -298,7 +314,15 @@ export default function ModelConnection() {
     setThinkingLevel(
       clampCatalogThinkingLevel(
         thinkingLevel,
-        reasoning ? compatibleThinkingLevels(nextProtocol) : [],
+        reasoning
+          ? compatibleThinkingLevels(
+              nextProtocol,
+              savedEndpointMatches &&
+                nextProtocol === (credential?.apiProtocol ?? "chat-completions")
+                ? credential?.reasoningCapabilities
+                : undefined,
+            )
+          : [],
       ) as ThinkingLevel | null,
     );
     resetOpenAiCompatibleProbe();
@@ -374,7 +398,11 @@ export default function ModelConnection() {
     setThinkingLevel(
       clampCatalogThinkingLevel(
         credential?.modelId === nextModelId ? credential.thinkingLevel : null,
-        reasoning ? compatibleThinkingLevels(apiProtocol) : [],
+        reasoning
+          ? ((savedEndpointMatches
+              ? modelsForProvider.find((entry) => entry.id === nextModelId)?.thinkingLevels
+              : undefined) ?? compatibleThinkingLevels(apiProtocol, reasoningCapabilities))
+          : [],
       ) as ThinkingLevel | null,
     );
   }
@@ -494,6 +522,8 @@ export default function ModelConnection() {
       onChangeBaseUrl={updateBaseUrl}
       onFindModels={() => void probeServerModels()}
       hasPreset={Boolean(endpointPreset)}
+      managed={Boolean(credential?.catalogSource)}
+      unavailableModelIds={credential?.catalogSource?.unavailableModelIds}
       showEndpointHelp={showEndpointHelp}
       onToggleEndpointHelp={() => setShowEndpointHelp((visible) => !visible)}
       apiProtocol={apiProtocol}
@@ -511,6 +541,7 @@ export default function ModelConnection() {
       reasoning={reasoning}
       setReasoning={setReasoning}
       thinkingLevel={thinkingLevel}
+      thinkingLevels={compatibleEffortLevels}
       setThinkingLevel={setThinkingLevel}
       supportsImages={supportsImages}
       setSupportsImages={setSupportsImages}
@@ -791,7 +822,13 @@ export default function ModelConnection() {
   const connectedStatusRow = credential ? (
     <View style={styles.statusRow}>
       <View style={styles.providerCopy}>
-        <Text style={styles.secondary}>{t`Connected`}</Text>
+        <Text style={styles.secondary}>
+          {credential.catalogSource && !credential.catalogSource.available
+            ? t`Unavailable`
+            : credential.catalogSource?.unavailableModelIds.length
+              ? t`Some models unavailable`
+              : t`Connected`}
+        </Text>
       </View>
       <NativeActionButton
         disabled={busy}

@@ -5,6 +5,7 @@ import {
   createModels,
   fauxAssistantMessage,
   fauxProvider,
+  getSupportedThinkingLevels,
   normalizeContext,
 } from "@earendil-works/pi-ai";
 import { builtinModels } from "@earendil-works/pi-ai/providers/all";
@@ -1359,7 +1360,7 @@ describe("anthropic-messages wire protocol", () => {
     expect(model.api).toBe("anthropic-messages");
     // The endpoint the SDK appends /v1/messages to must not carry /v1 itself.
     expect(model.baseUrl).toBe("http://127.0.0.1:8000");
-    expect(model.thinkingLevelMap).toBeUndefined();
+    expect(getSupportedThinkingLevels(model)).toEqual(["off"]);
   });
 
   it.each(["stream", "streamSimple"] as const)(
@@ -1446,14 +1447,15 @@ describe("anthropic-messages wire protocol", () => {
     expect(typeof body.thinking.budget_tokens).toBe("number");
   });
 
-  it("uses adaptive thinking with an effort for models the built-in catalog marks adaptive", async () => {
-    const modelId = "claude-opus-5-5";
+  it("uses adaptive thinking only when the connection explicitly declares it", async () => {
+    const modelId = "fixture-adaptive";
     const models = registerOpenAiCompatibleRuntime(createModels(), {
       ...input,
       modelId,
       apiProtocol: "anthropic-messages",
       allowPrivate: true,
       reasoning: true,
+      reasoningCapabilities: { mode: "adaptive" },
     });
     const provider = models.getProvider(OPENAI_COMPATIBLE_PROVIDER_ID)!;
     const model = models.getModel(OPENAI_COMPATIBLE_PROVIDER_ID, modelId)!;

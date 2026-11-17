@@ -413,3 +413,29 @@ it("stops a background helper from its saved running card, never a turn's live o
     messageId: "card-1",
   });
 });
+
+it("stops a group helper in the group that owns its saved card", () => {
+  const spaceRpc = { threads: { stopHelper: vi.fn(async () => ({ ok: true })) } };
+  renderView("bot", [], {
+    artifactTarget: { groupId: "group-1" },
+    rpc: spaceRpc as never,
+    message: {
+      id: "group-helper-card",
+      threadId: "group-thread",
+      botId: "bot-1",
+      seq: 1,
+      role: "bot",
+      createdAt: new Date().toISOString(),
+      blocks: [
+        { kind: "subagent", agentId: "helper-1", name: "Scout", task: "venues", status: "running" },
+      ],
+    },
+  });
+  act(() =>
+    [...container.querySelectorAll("button")].find((node) => node.textContent === "Stop")?.click(),
+  );
+  expect(spaceRpc.threads.stopHelper).toHaveBeenCalledExactlyOnceWith({
+    groupId: "group-1",
+    messageId: "group-helper-card",
+  });
+});

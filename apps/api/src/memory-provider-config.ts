@@ -2,8 +2,9 @@ import { ORPCError } from "@orpc/server";
 import type { SecretStore } from "@rakazo/adapter-kit";
 import {
   classifyMemoryProviderSettings,
+  LOCAL_MEMORY_ALLOWED_URLS_ENV,
   MemoryProviderPrivateEndpointRequiredError,
-  memoryProviderRequiresPrivateEndpoint,
+  memoryProviderEndpointAuthorized,
   prepareMemoryProviderConnection,
   toStringRecord,
 } from "@rakazo/adapters";
@@ -13,7 +14,7 @@ import { findSpaceMemoryConfig, Prisma, requireSpaceOwner, withTransactionRetry 
 
 export interface MemoryProviderConfigDeps {
   prisma: PrismaClient;
-  env?: { mcpAllowPrivateEndpoint?: boolean };
+  env?: { mcpAllowPrivateEndpoint?: boolean; localMemoryAllowedUrls?: string };
   secrets: Pick<SecretStore, "put">;
   /** Test seam: override DNS/trust classification without probing. */
   classifySettings?: (
@@ -38,33 +39,29 @@ export async function persistMemoryProviderConfig(
 ) {
   await requireSpaceOwner(deps.prisma, actor);
   let prepared: Awaited<ReturnType<typeof prepareMemoryProviderConnection>>;
+  const endpointPolicy = () => ({
+    allowPrivateEndpoint: deps.env?.mcpAllowPrivateEndpoint === true,
+    localAllowedUrls:
+      deps.env?.localMemoryAllowedUrls ?? process.env[LOCAL_MEMORY_ALLOWED_URLS_ENV],
+  });
   try {
-    if (
-      memoryProviderRequiresPrivateEndpoint(input.provider, input.settings) &&
-      deps.env?.mcpAllowPrivateEndpoint !== true
-    ) {
+    if (!memoryProviderEndpointAuthorized(input.provider, input.settings, endpointPolicy())) {
       throw new ORPCError("FORBIDDEN");
     }
     const classify = deps.classifySettings ?? classifyMemoryProviderSettings;
     const prepare = deps.prepareConnection ?? prepareMemoryProviderConnection;
-    // Classify DNS/trust before any credentialed probe so LAN endpoints stay operator-authorized.
+    // Classify DNS/trust before any credentialed probe. Managed local memory uses
+    // its exact operator allowlist; this does not authorize private MCP endpoints.
     const classifiedSettings = await classify(input.provider, input.settings);
-    if (
-      memoryProviderRequiresPrivateEndpoint(input.provider, classifiedSettings) &&
-      deps.env?.mcpAllowPrivateEndpoint !== true
-    ) {
+    if (!memoryProviderEndpointAuthorized(input.provider, classifiedSettings, endpointPolicy())) {
       throw new ORPCError("FORBIDDEN");
     }
     prepared = await prepare({
       ...input,
       settings: classifiedSettings,
-      allowPrivateEndpoint: deps.env?.mcpAllowPrivateEndpoint === true,
+      ...endpointPolicy(),
     });
-    // Defense in depth if prepare reclassified further.
-    if (
-      memoryProviderRequiresPrivateEndpoint(prepared.provider, prepared.settings) &&
-      deps.env?.mcpAllowPrivateEndpoint !== true
-    ) {
+    if (!memoryProviderEndpointAuthorized(prepared.provider, prepared.settings, endpointPolicy())) {
       throw new ORPCError("FORBIDDEN");
     }
   } catch (error) {

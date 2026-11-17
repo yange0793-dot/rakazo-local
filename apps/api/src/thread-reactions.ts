@@ -1,4 +1,5 @@
 import type { JobPublisher } from "@rakazo/adapter-kit";
+import { runJobKey } from "@rakazo/adapter-kit";
 import type { Actor, MessageBlock, MessageReaction } from "@rakazo/contracts";
 import { ACTIVE_RUN_STATUSES, messageReaction, QUEUE_HOLDING_RUN_STATUSES } from "@rakazo/core";
 import type { Prisma, PrismaClient } from "@rakazo/db";
@@ -11,6 +12,7 @@ import {
   THREAD_LOCK_TRANSACTION_OPTIONS,
   touchGroupUpdatedAt,
 } from "@rakazo/db";
+import { getLogger } from "@rakazo/logging";
 import type { ThreadTarget } from "./thread-target.js";
 import {
   cancelSupersededQueuedRuns,
@@ -88,12 +90,13 @@ export async function reactToThreadMessage(
       replyToMessageId: parent.id,
       clientNonce: input.clientNonce,
     });
-    const runs = replyBotId
+    const started = replyBotId
       ? await startReactionTurn(tx, actor, target.threadId, replyBotId, parent, message, {
           ...input,
           canReleaseTakeover: Boolean(releaseTakeover),
         })
-      : [];
+      : { runs: [], supersededRunIds: [] };
+    const runs = started.runs;
     if (target.kind === "group") await touchGroupUpdatedAt(tx, target.groupId);
     const event = await appendEventInTransaction(tx, {
       spaceId: actor.spaceId,
@@ -110,8 +113,19 @@ export async function reactToThreadMessage(
         ...(runs.length ? { runIds: runs.map((run) => run.id) } : {}),
       },
     });
-    return { eventSeq: event.seq, runs };
+    return { eventSeq: event.seq, runs, supersededRunIds: started.supersededRunIds };
   }, THREAD_LOCK_TRANSACTION_OPTIONS);
+  const supersededRunIds = committed.supersededRunIds ?? [];
+  if (supersededRunIds.length > 0) {
+    // A superseded run needs no scheduled start; waking it would only find it cancelled.
+    await Promise.all(
+      supersededRunIds.map((runId) =>
+        deps.jobs
+          .cancel(runJobKey(runId))
+          .catch((error) => getLogger().error("superseded run job cancel", error)),
+      ),
+    );
+  }
   if (releaseTakeover) {
     for (const run of committed.runs) {
       if (run.status === "waiting_takeover") await releaseTakeover(run.id);
@@ -156,7 +170,10 @@ async function startReactionTurn(
   parent: { id: string; runId: string | null },
   message: { id: string; seq: number },
   input: { reaction: MessageReaction; clientNonce: string; canReleaseTakeover: boolean },
-): Promise<Array<{ id: string; taskId: string; status: string }>> {
+): Promise<{
+  runs: Array<{ id: string; taskId: string; status: string }>;
+  supersededRunIds: string[];
+}> {
   const activeRuns = await tx.run.findMany({
     where: { threadId, botId, status: { in: [...ACTIVE_RUN_STATUSES] } },
     select: { id: true, taskId: true, status: true, userId: true },
@@ -182,7 +199,7 @@ async function startReactionTurn(
         data: { messageId: message.id, botId, userId: actor.userId, runId: active.id },
       });
       await tx.message.update({ where: { id: message.id }, data: { runId: active.id } });
-      return [active];
+      return { runs: [active], supersededRunIds: [] };
     }
     // A question waits for the person whose run asked it, as with a typed answer.
     if (
@@ -201,12 +218,12 @@ async function startReactionTurn(
       });
       if (answered) {
         await tx.message.update({ where: { id: message.id }, data: { runId: active.id } });
-        return [{ ...active, status: "queued" }];
+        return { runs: [{ ...active, status: "queued" }], supersededRunIds: [] };
       }
       // Approval and secret cards still require an explicit card answer.
-      return [];
+      return { runs: [], supersededRunIds: [] };
     }
-    if (holdingRuns.length) return [];
+    if (holdingRuns.length) return { runs: [], supersededRunIds: [] };
   }
   // The cooldown limits new turns only, so a quick answer to a pending ask still goes through.
   const recentReaction = await tx.run.findFirst({
@@ -219,7 +236,7 @@ async function startReactionTurn(
     },
     select: { id: true },
   });
-  if (recentReaction) return [];
+  if (recentReaction) return { runs: [], supersededRunIds: [] };
   const task = await tx.task.create({
     data: {
       spaceId: actor.spaceId,
@@ -244,6 +261,10 @@ async function startReactionTurn(
     },
   });
   await tx.message.update({ where: { id: message.id }, data: { runId: run.id } });
-  await cancelSupersededQueuedRuns(tx, { threadId, botIds: [botId], keepRunIds: [run.id] });
-  return [run];
+  const supersededRunIds = await cancelSupersededQueuedRuns(tx, {
+    threadId,
+    botIds: [botId],
+    keepRunIds: [run.id],
+  });
+  return { runs: [run], supersededRunIds };
 }

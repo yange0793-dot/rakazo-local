@@ -177,6 +177,33 @@ describe("createBackgroundJobHandlers", () => {
     },
   );
 
+  it("dispatches automatic extraction independently of legacy history policy", async () => {
+    const archive = vi.fn(async () => undefined);
+    const source = { ...owner, botId: "bot-1" };
+    const handlers = createBackgroundJobHandlers({
+      executor: { contextStrategy: "retrieval" } as ReturnType<typeof createRunExecutor>,
+      prisma: { thread: { findUnique: vi.fn(async () => source) } } as unknown as PrismaClient,
+      sandbox: {} as SandboxProvider,
+      home: {} as AgentHomeStore,
+      artifacts: {} as ArtifactStore,
+      jobs: {} as JobPublisher,
+      events: {} as ThreadEvents,
+      workerId: "worker-1",
+      runtime: {} as AgentRuntime,
+      secretStore: {} as EncryptedSecretStore,
+      memoryProviders: { resolve: vi.fn(async () => null) },
+      archiveConversationMemory: archive,
+    });
+    await handlers["memory.extract"]({ threadId: "thread-1", botId: "bot-1", userId: "user-1" });
+    expect(archive).toHaveBeenCalledWith(
+      { threadId: "thread-1", botId: "bot-1", userId: "user-1" },
+      expect.objectContaining({ ...owner, botId: "bot-1", signal: expect.any(AbortSignal) }),
+    );
+    await handlers["memory.extract"]({ threadId: "thread-1", botId: "bot-other", userId: "user-1" });
+    await handlers["memory.extract"]({ threadId: "thread-1", botId: "bot-1", userId: "user-other" });
+    expect(archive).toHaveBeenCalledOnce();
+  });
+
   it("runs a job as the tenant of the row it acts for, and skips one whose row is gone", async () => {
     const seen: unknown[] = [];
     const continueRun = vi.fn(async () => {

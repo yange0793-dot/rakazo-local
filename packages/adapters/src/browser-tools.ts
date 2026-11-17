@@ -111,10 +111,19 @@ export async function browserNavigateFromTool(
   if (!/^https?:$/.test(parsed.protocol) || parsed.username || parsed.password) {
     return refusedInput(NAVIGATE_URL_REQUIRED);
   }
+  const pageId = typeof args.pageId === "string" ? args.pageId.trim() : undefined;
+  if (pageId && !browser.describe().capabilities.pageSelection)
+    return refusedInput("This browser does not support page selection.");
   try {
     const result = await browser.navigate(
       computer,
-      { url, downloads: options.downloads?.folder, signal: context.signal },
+      {
+        url,
+        ...(pageId ? { pageId } : {}),
+        ...(args.waitForDownload === true ? { waitForDownload: true } : {}),
+        downloads: options.downloads?.folder,
+        signal: context.signal,
+      },
       context,
     );
     return formatBrowserResult(withBotPaths(result, options), options);
@@ -135,10 +144,18 @@ export async function browserSnapshotFromTool(
   options: PageToolOptions = {},
 ) {
   const query = typeof args.query === "string" ? args.query.trim().slice(0, MAX_QUERY) : "";
+  const pageId = typeof args.pageId === "string" ? args.pageId.trim() : undefined;
+  if (pageId && !browser.describe().capabilities.pageSelection)
+    return refusedInput("This browser does not support page selection.");
   try {
     const result = await browser.snapshot(
       computer,
-      { ...(query ? { query } : {}), downloads: options.downloads?.folder, signal: context.signal },
+      {
+        ...(query ? { query } : {}),
+        ...(pageId ? { pageId } : {}),
+        downloads: options.downloads?.folder,
+        signal: context.signal,
+      },
       context,
     );
     return formatBrowserResult(withBotPaths(result, options), options);
@@ -328,7 +345,12 @@ export async function browserActFromTool(
     }
     const result = await browser.act(
       computer,
-      { actions, downloads: options.downloads?.folder, signal: context.signal },
+      {
+        actions,
+        ...(args.waitForDownload === true ? { waitForDownload: true } : {}),
+        downloads: options.downloads?.folder,
+        signal: context.signal,
+      },
       context,
     );
     // A purchase the page refused (it changed, or another step failed first) never went through.

@@ -3,8 +3,18 @@ import { settleRunSubagents } from "@rakazo/core";
 import type * as Db from "@rakazo/db";
 import { appendEventInTransaction, createThreadMessageInTransaction } from "@rakazo/db";
 import { describe, expect, it, vi } from "vitest";
-import { returnHelperOutcome, startBackgroundHelper } from "./background-helpers.js";
+import {
+  helperPrompt,
+  resultPrompt,
+  returnHelperOutcome,
+  startBackgroundHelper,
+} from "./background-helpers.js";
+import { validateConnectedModelChoice } from "./model-selection.js";
 import type { RunContext } from "./run-context.js";
+
+vi.mock("./model-selection.js", () => ({
+  validateConnectedModelChoice: vi.fn(async () => undefined),
+}));
 
 vi.mock("@rakazo/db", async (original) => ({
   ...(await original<typeof Db>()),
@@ -40,8 +50,14 @@ function harness(overrides: { trigger?: string; threadBotId?: string | null } = 
   };
   const enqueue = vi.fn(async () => undefined);
   const ctx = {
-    deps: { prisma, events: { notify: vi.fn(async () => undefined) }, jobs: { enqueue } },
+    deps: {
+      prisma,
+      events: { notify: vi.fn(async () => undefined) },
+      jobs: { enqueue },
+      billingEnabled: false,
+    },
     run: { id: "run-1", spaceId: "space", userId: "user", trigger: overrides.trigger ?? "user" },
+    model: { provider: "openai-compatible", id: "route/model", thinkingLevel: "high" },
     runId: "run-1",
     bot: { id: "bot" },
     thread: {
@@ -65,7 +81,14 @@ describe("starting a background helper", () => {
       }),
       select: { id: true },
     });
-    expect(h.createRun.mock.calls[0]?.[0]).not.toHaveProperty("data.modelPinned");
+    expect(h.createRun.mock.calls[0]?.[0]).toMatchObject({
+      data: {
+        modelPinned: true,
+        modelProvider: "openai-compatible",
+        modelId: "route/model",
+        thinkingLevel: "high",
+      },
+    });
     expect(h.enqueue).toHaveBeenCalledExactlyOnceWith(runContinueJob("helper-run"));
     // It takes the chat's lock, which a snapshot read can hold for a while.
     expect(h.prisma.$transaction).toHaveBeenCalledWith(expect.any(Function), {
@@ -84,8 +107,30 @@ describe("starting a background helper", () => {
     expect(event.runId).toBeUndefined();
   });
 
+  it("keeps the helper's brief and its result framed as the bot's, not the user's", () => {
+    const brief = helperPrompt({ name: "scout", task: "find the venue", instructions: "" });
+    expect(brief).toContain("Task from the bot (not from the user):");
+    expect(brief).toContain("You cannot talk to the user");
+    // The brief names what it may do and where an approval it cannot answer goes.
+    expect(brief).toContain("page browser");
+    expect(brief).toContain("its card goes to the chat that started you");
+    expect(brief).toContain("buy anything");
+    expect(brief).toContain("type saved logins or cards");
+    const back = resultPrompt("scout", "completed", "the venue is booked");
+    expect(back).toContain("This is its result, not a message from the user.");
+    expect(back).toContain('<helper_result from="scout" status="completed">');
+  });
+
+  it("starts one from a group chat", async () => {
+    const h = harness({ threadBotId: null });
+    await expect(startBackgroundHelper(h.ctx, START)).resolves.toEqual({
+      ok: true,
+      name: START.name,
+      note: expect.stringContaining("is working in the background"),
+    });
+  });
+
   it.each([
-    ["a group or connected team chat", { threadBotId: null }],
     ["a linked Telegram or SMS chat", { trigger: "messaging" }],
     ["a routine", { trigger: "routine" }],
     ["another bot's request", { trigger: "bot_message" }],
@@ -93,7 +138,7 @@ describe("starting a background helper", () => {
   ])("refuses to start one from %s", async (_label, overrides) => {
     const h = harness(overrides);
     await expect(startBackgroundHelper(h.ctx, START)).resolves.toEqual({
-      error: expect.stringContaining("only from the user's own app chat"),
+      error: expect.stringContaining("only from a chat with a person"),
     });
     expect(h.prisma.$transaction).not.toHaveBeenCalled();
   });
@@ -114,6 +159,20 @@ describe("starting a background helper", () => {
       startBackgroundHelper(half.ctx, { ...START, modelProvider: "openai" }),
     ).resolves.toEqual({ error: "model_provider and model_id must both be set" });
     expect(half.prisma.$transaction).not.toHaveBeenCalled();
+  });
+
+  it("rejects a disconnected override before creating any helper or card", async () => {
+    const h = harness();
+    vi.mocked(validateConnectedModelChoice).mockResolvedValueOnce(
+      "Connect that model provider first",
+    );
+    await expect(
+      startBackgroundHelper(h.ctx, { ...START, modelProvider: "route", modelId: "model" }),
+    ).resolves.toMatchObject({
+      error: expect.stringContaining("omit both model_provider and model_id"),
+    });
+    expect(h.prisma.$transaction).not.toHaveBeenCalled();
+    expect(h.enqueue).not.toHaveBeenCalled();
   });
 });
 

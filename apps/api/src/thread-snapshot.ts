@@ -1,11 +1,12 @@
 import type { ThreadSnapshot } from "@rakazo/contracts";
 import {
   ACTIVE_RUN_STATUSES,
+  BACKGROUND_HELPER_TRIGGER,
   BACKGROUND_RUN_TRIGGERS,
   projectMessages,
   runFailureError,
 } from "@rakazo/core";
-import type { PrismaClient } from "@rakazo/db";
+import type { Prisma, PrismaClient } from "@rakazo/db";
 import { spaceIsShared } from "@rakazo/db";
 import { resolveBusyBotName, toComputerStatus } from "./computer-status.js";
 import { THREAD_MESSAGE_PAGE_SIZE } from "./routes/shared.js";
@@ -31,40 +32,42 @@ export async function threadSnapshot(
       deps.prisma.$transaction(
         async (tx) => {
           await tx.$queryRaw`SELECT id FROM threads WHERE id = ${target.threadId} FOR SHARE`;
-          const [messagePage, last, activeRuns, busyOrFailed, shared] = await Promise.all([
-            loadMessagePage(tx, target.threadId, undefined, THREAD_MESSAGE_PAGE_SIZE),
-            tx.event.findFirst({
-              where: { threadId: target.threadId },
-              orderBy: { seq: "desc" },
-              select: { seq: true },
-            }),
-            tx.run.findMany({
-              where: {
-                botId: target.botId,
-                threadId: target.threadId,
-                status: { in: [...ACTIVE_RUN_STATUSES] },
-                OR: [
-                  { trigger: { notIn: [...BACKGROUND_RUN_TRIGGERS] } },
-                  { status: { in: ["waiting_input", "waiting_takeover"] } },
-                ],
-              },
-              orderBy: [{ createdAt: "desc" }, { id: "desc" }],
-              include: { routine: { select: { name: true } } },
-            }),
-            tx.run.findFirst({
-              where: {
-                botId: target.botId,
-                threadId: target.threadId,
-                // Background ticket work stays silent; waiting is handled above.
-                trigger: { notIn: [...BACKGROUND_RUN_TRIGGERS] },
-                status: { in: [...ACTIVE_RUN_STATUSES, "failed"] },
-              },
-              // The id tiebreak keeps ordering deterministic under equal
-              // timestamps, matching the supersession probe below.
-              orderBy: [{ createdAt: "desc" }, { id: "desc" }],
-            }),
-            spaceIsShared(tx, target.bot.spaceId),
-          ]);
+          const [messagePage, last, activeRuns, helperRuns, busyOrFailed, shared] =
+            await Promise.all([
+              loadMessagePage(tx, target.threadId, undefined, THREAD_MESSAGE_PAGE_SIZE),
+              tx.event.findFirst({
+                where: { threadId: target.threadId },
+                orderBy: { seq: "desc" },
+                select: { seq: true },
+              }),
+              tx.run.findMany({
+                where: {
+                  botId: target.botId,
+                  threadId: target.threadId,
+                  status: { in: [...ACTIVE_RUN_STATUSES] },
+                  OR: [
+                    { trigger: { notIn: [...BACKGROUND_RUN_TRIGGERS] } },
+                    { status: { in: ["waiting_input", "waiting_takeover"] } },
+                  ],
+                },
+                orderBy: [{ createdAt: "desc" }, { id: "desc" }],
+                include: { routine: { select: { name: true } } },
+              }),
+              waitingHelperRuns(tx, target.threadId),
+              tx.run.findFirst({
+                where: {
+                  botId: target.botId,
+                  threadId: target.threadId,
+                  // Background ticket work stays silent; waiting is handled above.
+                  trigger: { notIn: [...BACKGROUND_RUN_TRIGGERS] },
+                  status: { in: [...ACTIVE_RUN_STATUSES, "failed"] },
+                },
+                // The id tiebreak keeps ordering deterministic under equal
+                // timestamps, matching the supersession probe below.
+                orderBy: [{ createdAt: "desc" }, { id: "desc" }],
+              }),
+              spaceIsShared(tx, target.bot.spaceId),
+            ]);
           const run = pickPrimaryPrivateActiveRun(activeRuns) ?? busyOrFailed;
           // A failure only surfaces while it is still the newest terminal run, or a stale
           // failure would reappear on every load. Compare by ordering, not timestamps:
@@ -105,7 +108,7 @@ export async function threadSnapshot(
                   orderBy: { seq: "asc" },
                 })
               : [];
-          return { messagePage, last, run: currentRun, activeRuns, liveEvents, shared };
+          return { messagePage, last, run: currentRun, activeRuns, helperRuns, liveEvents, shared };
         },
         { timeout: 15_000, maxWait: 5_000 },
       ),
@@ -117,7 +120,10 @@ export async function threadSnapshot(
       messages: messagesWithLiveEvents(core.messagePage.messages, core.liveEvents, core.activeRuns),
       olderCursor: core.messagePage.olderCursor,
       run: core.run ? mapRun(core.run) : null,
-      activeRuns: core.activeRuns.map(mapRun),
+      activeRuns: [
+        ...core.activeRuns.map(mapRun),
+        ...core.helperRuns.map((run) => mapHelperRun(run, target.threadId)),
+      ],
       computer: toComputerStatus(
         target.botId,
         target.bot.computer,
@@ -131,7 +137,7 @@ export async function threadSnapshot(
   const core = await deps.prisma.$transaction(
     async (tx) => {
       await tx.$queryRaw`SELECT id FROM threads WHERE id = ${target.threadId} FOR SHARE`;
-      const [messagePage, last, activeRuns, recentTerminals] = await Promise.all([
+      const [messagePage, last, activeRuns, helperRuns, recentTerminals] = await Promise.all([
         loadMessagePage(tx, target.threadId, undefined, THREAD_MESSAGE_PAGE_SIZE),
         tx.event.findFirst({
           where: { threadId: target.threadId },
@@ -152,6 +158,7 @@ export async function threadSnapshot(
           orderBy: { createdAt: "desc" },
           include: { routine: { select: { name: true } } },
         }),
+        waitingHelperRuns(tx, target.threadId),
         // Recently updated terminals (completion bumps updatedAt). pickLatestTerminalRun then
         // ranks by completedAt ?? createdAt so null timestamps cannot revive a stale failure.
         tx.run.findMany({
@@ -188,6 +195,7 @@ export async function threadSnapshot(
         messagePage,
         last,
         activeRuns,
+        helperRuns,
         terminalRun: pickLatestTerminalRun(recentTerminals),
         liveEvents,
       };
@@ -211,8 +219,32 @@ export async function threadSnapshot(
         : primaryActiveRun
           ? mapRun(primaryActiveRun)
           : null,
-    activeRuns: core.activeRuns.map(mapRun),
+    activeRuns: [
+      ...core.activeRuns.map(mapRun),
+      ...core.helperRuns.map((run) => mapHelperRun(run, target.threadId)),
+    ],
   };
+}
+
+/**
+ * Background helpers waiting on their owner in this chat. They work on their own threads, so the
+ * thread's own runs never include them; the approval card they left here is the link back.
+ */
+function waitingHelperRuns(tx: Prisma.TransactionClient, threadId: string) {
+  return tx.run.findMany({
+    where: {
+      trigger: BACKGROUND_HELPER_TRIGGER,
+      status: "waiting_input",
+      sourceMessage: { threadId },
+    },
+    orderBy: [{ createdAt: "desc" as const }, { id: "desc" as const }],
+    include: { routine: { select: { name: true } } },
+  });
+}
+
+/** Its run stays on the helper's thread; the chat answers it as a card of this thread. */
+function mapHelperRun(run: Parameters<typeof mapRun>[0], threadId: string) {
+  return { ...mapRun(run), threadId };
 }
 
 /** Keep waiting asks and takeovers in the group headline ahead of newer busy runs. */

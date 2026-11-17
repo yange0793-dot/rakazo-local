@@ -45,6 +45,14 @@ export default function MemoryScreen() {
         contentInsetAdjustmentBehavior="automatic"
         refreshControl={<RefreshControl refreshing={refreshing} onRefresh={refresh} />}
       >
+        <SettingsGroup>
+          <SettingsRow
+            accessibilityRole="button"
+            chevron="right"
+            onPress={() => router.push("/semantic-memory")}
+            title={t`Saved facts`}
+          />
+        </SettingsGroup>
         {!notes && !error ? (
           <ActivityIndicator color={native.secondaryLabel} accessibilityLabel={t`Loading…`} />
         ) : null}

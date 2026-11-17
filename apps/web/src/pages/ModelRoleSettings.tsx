@@ -14,7 +14,12 @@ import {
   MAX_MODEL_BACKUPS,
   modelRoleChoiceKey,
 } from "@rakazo/contracts";
-import { createModelRoleSettings, modelRoleListPatch } from "@rakazo/core";
+import {
+  clampCatalogThinkingLevel,
+  createModelRoleSettings,
+  credentialForModel,
+  modelRoleListPatch,
+} from "@rakazo/core";
 import {
   Button,
   DropdownMenu,
@@ -177,6 +182,27 @@ export function ModelRoleSettings({
         canonicalPiProviderId(entry.provider) === canonicalPiProviderId(choice.provider) &&
         entry.id === choice.modelId,
     );
+  const connectionFor = (choice: ModelRoleChoice) =>
+    choice.credentialId
+      ? credentials.find((entry) => entry.id === choice.credentialId)
+      : (credentialForModel(credentials, choice.provider, choice.modelId) ??
+        credentials.find(
+          (entry) =>
+            entry.provider === choice.provider &&
+            (entry.modelId === choice.modelId ||
+              entry.catalogSource?.unavailableModelIds.includes(choice.modelId)),
+        ) ??
+        credentials.find(
+          (entry) =>
+            canonicalPiProviderId(entry.provider) === canonicalPiProviderId(choice.provider) &&
+            !entry.catalogSource,
+        ));
+  const unavailable = (choice: ModelRoleChoice) => {
+    const source = connectionFor(choice)?.catalogSource;
+    return Boolean(
+      source && (!source.available || source.unavailableModelIds.includes(choice.modelId)),
+    );
+  };
   const thinkingLevels =
     thinking && primary
       ? (entryFor(primary)?.thinkingLevels ?? []).filter((level) => level !== "off")
@@ -186,25 +212,24 @@ export function ModelRoleSettings({
     state.catalog,
     credentials,
     role === "computer",
-  ).map((choice) => ({
-    ...(entryFor(choice) ?? {
-      provider: choice.provider,
-      id: choice.modelId,
-      label: choice.label,
-      billing: "",
-    }),
-    providerName: choice.credentialId ? choice.connectionName : providerLabel(choice.provider),
-    ...(choice.credentialId ? { credentialId: choice.credentialId } : {}),
-  }));
-  // A pinned row runs on its connection; others on the provider's newest.
-  const connectionFor = (choice: ModelRoleChoice) =>
-    choice.credentialId
-      ? credentials.find((entry) => entry.id === choice.credentialId)
-      : credentials.find(
-          (entry) =>
-            canonicalPiProviderId(entry.provider) === canonicalPiProviderId(choice.provider),
-        );
+  )
+    .filter((choice) => !unavailable(choice))
+    .map((choice) => ({
+      ...(entryFor(choice) ?? {
+        provider: choice.provider,
+        id: choice.modelId,
+        label: choice.label,
+        billing: "",
+      }),
+      providerName: connectionFor(choice)?.catalogSource
+        ? connectionFor(choice)?.label
+        : choice.credentialId
+          ? choice.connectionName
+          : providerLabel(choice.provider),
+      ...(choice.credentialId ? { credentialId: choice.credentialId } : {}),
+    }));
   const providerName = (choice: ModelRoleChoice) =>
+    (connectionFor(choice)?.catalogSource ? connectionFor(choice)?.label : undefined) ||
     (choice.credentialId &&
       options.find((option) => option.credentialId === choice.credentialId)?.providerName) ||
     providerLabel(choice.provider);
@@ -344,6 +369,11 @@ export function ModelRoleSettings({
           const name = modelLabel(choice);
           const offset = primary ? 0 : 1;
           const connection = connectionFor(choice);
+          const missing = unavailable(choice);
+          const effectiveThinking = clampCatalogThinkingLevel(
+            choice.thinkingLevel,
+            thinkingLevels,
+          ) as ThinkingLevel | null;
           return (
             <li
               key={modelRoleChoiceKey(choice)}
@@ -374,7 +404,7 @@ export function ModelRoleSettings({
                 </>
               ) : null}
               <RoleModelPicker
-                trigger={pickerTrigger(name, providerName(choice))}
+                trigger={pickerTrigger(name, missing ? t`Unavailable` : providerName(choice))}
                 label={t`Change ${name}`}
                 options={options}
                 defaultOption={
@@ -393,9 +423,16 @@ export function ModelRoleSettings({
                 reopen={reopenFor(isPrimary ? "primary" : index)}
                 onReopened={() => setReopen(null)}
               />
-              {isPrimary && thinkingLevels.length && choice.thinkingLevel ? (
-                <span className="shrink-0 rounded-full bg-accent px-2 py-0.5 text-body-sm text-muted-foreground">
-                  <Trans>Thinking: {thinkingLevelLabel(choice.thinkingLevel)}</Trans>
+              {isPrimary && !missing && effectiveThinking ? (
+                <span
+                  className="shrink-0 rounded-full bg-accent px-2 py-0.5 text-body-sm text-muted-foreground"
+                  title={
+                    choice.thinkingLevel !== effectiveThinking
+                      ? t`Saved ${thinkingLevelLabel(choice.thinkingLevel!)}; using ${thinkingLevelLabel(effectiveThinking)}.`
+                      : undefined
+                  }
+                >
+                  <Trans>Thinking: {thinkingLevelLabel(effectiveThinking)}</Trans>
                 </span>
               ) : null}
               <DropdownMenu>
@@ -413,7 +450,7 @@ export function ModelRoleSettings({
                   <MoreHorizontal />
                 </DropdownMenuTrigger>
                 <DropdownMenuContent align="end" className="min-w-[200px]">
-                  {isPrimary && thinkingLevels.length ? (
+                  {isPrimary && !missing && thinkingLevels.length ? (
                     <>
                       <DropdownMenuSub>
                         <DropdownMenuSubTrigger>
@@ -421,7 +458,7 @@ export function ModelRoleSettings({
                         </DropdownMenuSubTrigger>
                         <DropdownMenuSubContent>
                           <DropdownMenuRadioGroup
-                            value={choice.thinkingLevel ?? ""}
+                            value={effectiveThinking ?? ""}
                             onValueChange={(value) =>
                               void setThinking((value || null) as ThinkingLevel | null)
                             }

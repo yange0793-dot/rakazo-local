@@ -1,6 +1,7 @@
 import type { SpaceMemoryConfig } from "@rakazo/contracts";
 import type { ComponentType } from "react";
 import { HonchoSettingsForm } from "./HonchoSettingsForm";
+import { LocalMemorySettingsForm } from "./LocalMemorySettingsForm";
 import { SerenitySettingsForm } from "./SerenitySettingsForm";
 import { SupermemorySettingsForm } from "./SupermemorySettingsForm";
 
@@ -22,6 +23,12 @@ export interface MemoryProviderSettingsRegistration {
 }
 
 export const MEMORY_PROVIDER_SETTINGS: readonly MemoryProviderSettingsRegistration[] = [
+  {
+    id: "local",
+    name: "Local memory",
+    SettingsForm: LocalMemorySettingsForm,
+    connectedLabel: (config) => config.settings.baseUrl ?? "",
+  },
   {
     id: "supermemory",
     name: "Supermemory",

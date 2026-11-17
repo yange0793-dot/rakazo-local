@@ -14,7 +14,7 @@ import {
   PopoverContent,
   PopoverTrigger,
 } from "@rakazo/ui-web";
-import { ChevronDownIcon } from "lucide-react";
+import { ChevronDownIcon, LoaderCircle, Star } from "lucide-react";
 import { useId, useMemo, useState } from "react";
 import { TextOnlyMark } from "../../components/TextOnlyMark";
 import { useListSearch } from "../../lib/use-list-search";
@@ -25,11 +25,23 @@ export function ChatModelPicker({
   choices,
   value,
   onChange,
+  defaultKey,
+  onSetDefault,
+  unavailableKey,
+  disabled = false,
+  saving = false,
 }: {
   id: string;
   choices: readonly ChatModelChoice[];
   value: string;
   onChange: (key: string) => void;
+  /** The model run by bots that picked none; its row carries the filled star. */
+  defaultKey?: string;
+  onSetDefault?: (choice: ChatModelChoice) => void;
+  /** A saved choice kept visible after its source stopped offering it. */
+  unavailableKey?: string;
+  disabled?: boolean;
+  saving?: boolean;
 }) {
   const { t } = useLingui();
   const imagesHintId = useId();
@@ -51,11 +63,18 @@ export function ChatModelPicker({
           className="w-full"
           aria-describedby={textOnly ? imagesHintId : undefined}
           value={value}
+          disabled={disabled}
+          aria-busy={saving || undefined}
+          aria-invalid={value === unavailableKey || undefined}
           onChange={(event) => onChange(event.target.value)}
         >
           {choices.map((choice) => (
-            <NativeSelectOption key={choice.key} value={choice.key}>
-              {choice.label}
+            <NativeSelectOption
+              key={choice.key}
+              value={choice.key}
+              disabled={choice.key === unavailableKey}
+            >
+              {choice.key === unavailableKey ? t`${choice.label} (Unavailable)` : choice.label}
             </NativeSelectOption>
           ))}
         </NativeSelect>
@@ -79,12 +98,21 @@ export function ChatModelPicker({
       <PopoverTrigger
         id={id}
         aria-describedby={textOnly ? imagesHintId : undefined}
+        aria-invalid={value === unavailableKey || undefined}
+        disabled={disabled}
+        aria-busy={saving || undefined}
         className="mt-2 flex h-8 w-full items-center justify-between gap-2 rounded-lg border border-input bg-transparent pr-2.5 pl-2.5 text-start text-body text-foreground outline-none transition-colors focus-visible:border-ring focus-visible:ring-3 focus-visible:ring-ring/50 dark:bg-input/30 dark:hover:bg-input/50"
       >
-        <span className="min-w-0 truncate">{selected?.label}</span>
+        <span className="min-w-0 truncate">
+          {selected?.key === unavailableKey ? t`${selected?.label} (Unavailable)` : selected?.label}
+        </span>
         <span className="flex shrink-0 items-center gap-2 text-muted-foreground">
           {textOnly ? <TextOnlyMark /> : null}
-          <ChevronDownIcon className="size-4" aria-hidden="true" />
+          {saving ? (
+            <LoaderCircle className="size-4 animate-spin" aria-hidden="true" />
+          ) : (
+            <ChevronDownIcon className="size-4" aria-hidden="true" />
+          )}
         </span>
       </PopoverTrigger>
       {open ? (
@@ -115,6 +143,7 @@ export function ChatModelPicker({
                     <CommandItem
                       key={choice.key}
                       aria-label={choice.label}
+                      disabled={choice.key === unavailableKey}
                       // cmdk falls back to the row's text for an empty value.
                       value={choice.key || "space-default"}
                       data-checked={choice.key === value}
@@ -125,8 +154,34 @@ export function ChatModelPicker({
                       }}
                     >
                       <span className="min-w-0 flex-1 truncate">
-                        {choice.title ?? choice.label}
+                        {choice.key === unavailableKey
+                          ? t`${choice.title ?? choice.label} (Unavailable)`
+                          : (choice.title ?? choice.label)}
                       </span>
+                      {onSetDefault &&
+                      choice.provider &&
+                      choice.modelId &&
+                      choice.key !== unavailableKey ? (
+                        <button
+                          type="button"
+                          aria-label={t`Default model for all bots`}
+                          aria-pressed={choice.key === defaultKey}
+                          className="shrink-0 rounded p-0.5 text-muted-foreground transition-colors hover:text-foreground"
+                          onClick={(event) => {
+                            event.stopPropagation();
+                            onSetDefault(choice);
+                          }}
+                        >
+                          <Star
+                            className={
+                              choice.key === defaultKey
+                                ? "size-4 fill-current text-foreground"
+                                : "size-4"
+                            }
+                            aria-hidden="true"
+                          />
+                        </button>
+                      ) : null}
                       {choice.images === false ? (
                         <span className="shrink-0 text-muted-foreground">
                           <TextOnlyMark />

@@ -385,6 +385,118 @@ describe("openai-codex API key guard", () => {
 });
 
 describe("modelCredentialDto", () => {
+  it("uses a managed route's reasoning mode in the saved connection and runtime model", () => {
+    const plaintext = serializeModelSecret({
+      kind: "openai_compatible",
+      baseUrl: "http://127.0.0.1:8000/v1",
+      apiProtocol: "anthropic-messages",
+      reasoning: true,
+      managedCatalog: {
+        sourceId: "source",
+        sourceLabel: "Gateway",
+        group: "messages",
+        providerId: "channel",
+        providerLabel: "Channel",
+        availableModelIds: ["channel/current"],
+        unavailableModelIds: [],
+        aliases: {},
+        capabilities: {
+          "channel/current": {
+            source: "declared",
+            reasoningMode: "adaptive",
+            thinkingLevels: ["low", "medium", "high", "xhigh", "max"],
+          },
+        },
+      },
+    });
+    const dto = modelCredentialDto(
+      {
+        id: "credential",
+        provider: "openai-compatible",
+        label: "Channel",
+        defaultModel: "channel/current",
+      },
+      plaintext,
+    );
+    expect(dto.reasoningCapabilities).toEqual({
+      mode: "adaptive",
+      levels: ["low", "medium", "high", "xhigh", "max"],
+    });
+    expect(dto.thinkingLevels).toEqual(["low", "medium", "high", "xhigh", "max"]);
+    expect(dto.maxTokens).toBeUndefined();
+  });
+
+  it("rejects saving a retired managed model before changing the connection", () => {
+    const previous = serializeModelSecret({
+      kind: "openai_compatible",
+      baseUrl: "http://127.0.0.1:8000/v1",
+      apiProtocol: "anthropic-messages",
+      managedCatalog: {
+        sourceId: "source",
+        sourceLabel: "Gateway",
+        group: "messages",
+        providerId: "channel",
+        providerLabel: "Channel",
+        availableModelIds: ["channel/current"],
+        unavailableModelIds: ["channel/removed"],
+        aliases: {},
+        capabilities: {},
+      },
+    });
+    expect(() =>
+      connectAsOwner(
+        {
+          provider: "openai-compatible",
+          baseUrl: "http://127.0.0.1:8000/v1",
+          apiProtocol: "anthropic-messages",
+          modelId: "channel/removed",
+        },
+        previous,
+      ),
+    ).toThrow("no longer available");
+  });
+
+  it("preserves explicit reasoning declarations through save and reports matching levels", () => {
+    const input = {
+      provider: "openai-compatible",
+      baseUrl: "http://127.0.0.1:8000/v1",
+      apiProtocol: "anthropic-messages" as const,
+      modelId: "model-a",
+      reasoning: true,
+      reasoningCapabilities: { mode: "adaptive" as const, levels: ["low", "max"] as const },
+    };
+    const plaintext = connectAsOwner({
+      ...input,
+      reasoningCapabilities: {
+        ...input.reasoningCapabilities,
+        levels: [...input.reasoningCapabilities.levels],
+      },
+    });
+    const updated = connectAsOwner(
+      {
+        provider: input.provider,
+        baseUrl: input.baseUrl,
+        modelId: input.modelId,
+      },
+      plaintext,
+    );
+    expect(parseModelSecret(updated)).toMatchObject({
+      reasoning: true,
+      reasoningCapabilities: { mode: "adaptive", levels: ["low", "max"] },
+    });
+    const dto = modelCredentialDto(
+      {
+        id: "credential",
+        provider: input.provider,
+        label: "Fixture",
+        defaultModel: input.modelId,
+      },
+      updated,
+    );
+    expect(dto.thinkingLevels).toEqual(["low", "max"]);
+    expect(dto.maxTokens).toBeUndefined();
+  });
+
   it("returns stored baseUrl and modelId for openai-compatible credentials", () => {
     const plaintext = serializeModelSecret({
       kind: "openai_compatible",

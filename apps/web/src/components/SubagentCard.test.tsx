@@ -21,7 +21,9 @@ function mountCard(
   const container = document.createElement("div");
   document.body.append(container);
   const root = createRoot(container);
-  flushSync(() => root.render(<SubagentCard block={block} onStop={onStop} />));
+  const render = (next: typeof block) =>
+    flushSync(() => root.render(<SubagentCard block={next} onStop={onStop} />));
+  render(block);
   const get = (id: string) => container.querySelector(`[data-testid="${id}"]`);
   const toggle = () => container.querySelector<HTMLButtonElement>("button[aria-expanded]");
   const click = () => flushSync(() => toggle()?.click());
@@ -29,6 +31,7 @@ function mountCard(
     get,
     toggle,
     click,
+    render,
     unmount: () => {
       root.unmount();
       container.remove();
@@ -46,18 +49,23 @@ const finished = {
 };
 
 describe("SubagentCard", () => {
-  it.each(["running", "completed", "failed"] as const)(
+  it.each(["running", "waiting", "completed", "failed"] as const)(
     "labels %s helpers and respects reduced motion",
     (status) => {
       const card = mountCard({ ...finished, agentId: `label-${status}`, status });
-      const label =
-        status === "running" ? "Running" : status === "completed" ? "Completed" : "Failed";
+      const label = {
+        running: "Running",
+        waiting: "Waiting",
+        completed: "Completed",
+        failed: "Failed",
+      }[status];
       expect(card.toggle()?.textContent).toContain(label);
       const pill = [...(card.toggle()?.querySelectorAll("span") ?? [])].find(
         (span) => span.textContent === label,
       );
       expect(pill?.getAttribute("style")).toBeNull();
       if (status === "running") expect(pill?.className).toContain("motion-safe:animate-");
+      else expect(pill?.className).not.toContain("motion-safe:animate-");
       card.unmount();
     },
   );
@@ -131,23 +139,74 @@ describe("SubagentCard", () => {
     saved.unmount();
   });
 
-  it("offers Stop only while a background helper runs", () => {
+  it("offers Stop while a background helper runs or waits", () => {
     const onStop = vi.fn(async () => ({ ok: true }));
     const stopButton = () =>
       [...document.querySelectorAll("button")].find((button) => button.textContent === "Stop");
-    const running = mountCard({ ...finished, agentId: "bg-1", status: "running" }, onStop);
-    flushSync(() => stopButton()?.click());
-    expect(onStop).toHaveBeenCalledOnce();
-    expect(stopButton()?.disabled).toBe(true);
-    running.unmount();
+    for (const status of ["running", "waiting"] as const) {
+      const card = mountCard({ ...finished, agentId: `bg-${status}`, status }, onStop);
+      flushSync(() => stopButton()?.click());
+      expect(onStop).toHaveBeenCalledOnce();
+      expect(stopButton()?.disabled).toBe(true);
+      onStop.mockClear();
+      card.unmount();
+    }
     for (const [block, stop] of [
       [{ ...finished, agentId: "bg-2", status: "running" as const }, undefined],
       [{ ...finished, agentId: "bg-3" }, onStop],
+      [{ ...finished, agentId: "bg-4", status: "waiting" as const }, undefined],
+      [{ ...finished, agentId: "bg-5", status: "failed" as const }, onStop],
     ] as const) {
       const card = mountCard(block, stop);
       expect(stopButton()).toBeUndefined();
       card.unmount();
     }
+  });
+
+  it("moves a helper from Waiting to Running and then to a terminal label", () => {
+    const onStop = vi.fn(async () => ({ ok: true }));
+    const stopButton = () =>
+      [...document.querySelectorAll("button")].find((button) => button.textContent === "Stop");
+    const card = mountCard(
+      {
+        ...finished,
+        agentId: "bg-transition",
+        status: "waiting",
+        result: undefined,
+        progress: "Waiting for approval",
+      },
+      onStop,
+    );
+    const label = () => card.toggle()?.textContent;
+    expect(label()).toContain("Waiting");
+    expect(label()).not.toContain("Running");
+    expect(stopButton()).not.toBeUndefined();
+    card.click();
+    expect(card.get("subagent-body")?.textContent).toBe("Waiting for approval");
+
+    card.render({
+      ...finished,
+      agentId: "bg-transition",
+      status: "running",
+      result: undefined,
+      progress: "Reading files",
+    });
+    expect(label()).toContain("Running");
+    expect(label()).not.toContain("Waiting");
+    expect(card.toggle()?.getAttribute("aria-expanded")).toBe("true");
+    expect(card.get("subagent-body")?.textContent).toBe("Reading files");
+    expect(stopButton()).not.toBeUndefined();
+
+    card.render({ ...finished, agentId: "bg-transition", status: "completed", result: "Done" });
+    expect(label()).toContain("Completed");
+    expect(label()).not.toContain("Waiting");
+    expect(card.get("subagent-body")?.textContent).toBe("Done");
+    expect(stopButton()).toBeUndefined();
+
+    card.render({ ...finished, agentId: "bg-transition", status: "failed", result: "boom" });
+    expect(label()).toContain("Failed");
+    expect(stopButton()).toBeUndefined();
+    card.unmount();
   });
 
   it("shows a stopped helper as stopped, not failed", () => {

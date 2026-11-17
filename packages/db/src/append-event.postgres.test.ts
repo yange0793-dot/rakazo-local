@@ -1,11 +1,12 @@
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
-import type { PrismaClient } from "./client.js";
+import type { Pool, PrismaClient } from "./client.js";
 import { createDb } from "./client.js";
 import type { AppendEventInput } from "./events.js";
-import { appendEvent } from "./events.js";
+import { appendEvent, appendEventInTransaction } from "./events.js";
 import { RunHistoryWriteError } from "./messages.js";
 import { provisionMessagingIdentity } from "./messaging.js";
 import { asSystem, runAsSystem, runAsTenant } from "./row-security.js";
+import { runTimingFields } from "./run-timing.js";
 
 const databaseUrl = process.env.DATABASE_URL;
 const describePostgres =
@@ -14,7 +15,9 @@ const describePostgres =
 describePostgres("appending a thread event (PostgreSQL)", () => {
   let prisma: PrismaClient;
   let system: PrismaClient;
+  let pool: Pool;
   let close: () => Promise<void>;
+  let fixtureStartedAt: number;
   let provisioned = false;
   let userId: string;
   let spaceId: string;
@@ -72,8 +75,15 @@ describePostgres("appending a thread event (PostgreSQL)", () => {
   }
 
   beforeAll(async () => {
-    const db = createDb(databaseUrl!);
+    fixtureStartedAt = Date.now();
+    const url = new URL(databaseUrl!);
+    url.searchParams.set(
+      "options",
+      `${url.searchParams.get("options") ?? ""} -c timezone=Asia/Shanghai`,
+    );
+    const db = createDb(url.href);
     prisma = db.prisma;
+    pool = db.pool;
     system = asSystem(prisma);
     close = async () => {
       try {
@@ -143,6 +153,68 @@ describePostgres("appending a thread event (PostgreSQL)", () => {
     const run = await system.run.findUniqueOrThrow({ where: { id: runId } });
     expect(run.firstResponseAt?.toISOString()).toBe(reply.createdAt);
   });
+
+  it("keeps SQL timestamp defaults in UTC on the separate content-key connection", async () => {
+    const [key] = await system.$queryRaw<Array<{ createdAt: Date }>>`
+      SELECT "createdAt" FROM space_keys WHERE "spaceId" = ${spaceId}`;
+    expect(key).toBeDefined();
+    expect(key!.createdAt.getTime()).toBeGreaterThanOrEqual(fixtureStartedAt);
+    expect(key!.createdAt.getTime()).toBeLessThanOrEqual(Date.now());
+  });
+
+  it("initializes every application connection in UTC despite connection-string options", async () => {
+    const clients = await Promise.all([pool.connect(), pool.connect()]);
+    try {
+      for (const client of clients) {
+        expect((await client.query("SHOW TimeZone")).rows).toEqual([{ TimeZone: "UTC" }]);
+      }
+    } finally {
+      for (const client of clients) client.release(true);
+    }
+    // Replacements must receive the same initialization before their first query.
+    expect((await pool.query("SHOW TimeZone")).rows).toEqual([{ TimeZone: "UTC" }]);
+  });
+
+  it.each(["Asia/Shanghai", "America/New_York"])(
+    "keeps raw events, ORM events and first-response timing in UTC in a %s session",
+    async (timezone) => {
+      const { reply, ormEvent, run, expectedUtc } = await system.$transaction(async (tx) => {
+        await tx.$queryRaw`SELECT set_config('TimeZone', ${timezone}, true)`;
+        const [clock] = await tx.$queryRaw<Array<{ timezone: string; utc: Date }>>`
+          SELECT current_setting('TimeZone') AS timezone,
+            (CURRENT_TIMESTAMP AT TIME ZONE 'UTC')::timestamp(3) AS utc`;
+        expect(clock!.timezone).toBe(timezone);
+        const input: AppendEventInput = {
+          spaceId,
+          threadId,
+          botId,
+          runId,
+          type: "thread.progress",
+          payload: { delta: "reply", streaming: true },
+        };
+        const reply = await appendEvent(tx as unknown as PrismaClient, input);
+        const ormEvent = await appendEventInTransaction(tx, input);
+        const run = await tx.run.update({
+          where: { id: runId },
+          data: { status: "completed", completedAt: new Date() },
+          include: { sourceMessage: { select: { createdAt: true } } },
+        });
+        return { reply, ormEvent, run, expectedUtc: clock!.utc };
+      });
+
+      expect(reply.createdAt).toBe(expectedUtc.toISOString());
+      expect(run.firstResponseAt?.toISOString()).toBe(reply.createdAt);
+      expect(ormEvent.createdAt.getTime()).toBeGreaterThanOrEqual(run.startedAt!.getTime());
+      expect(ormEvent.createdAt.getTime()).toBeLessThanOrEqual(run.completedAt!.getTime());
+      const timing = runTimingFields(run);
+      expect(timing["run.first_response_ms"]).toBeGreaterThanOrEqual(0);
+      expect(timing["run.first_response_ms"]).toBeLessThanOrEqual(Number(timing["run.total_ms"]));
+      expect(timing["run.total_ms"]).toBeLessThan(30_000);
+      const stored = await system.event.findUniqueOrThrow({ where: { id: reply.id } });
+      expect(stored.createdAt.toISOString()).toBe(reply.createdAt);
+      expect((await pool.query("SHOW TimeZone")).rows).toEqual([{ TimeZone: "UTC" }]);
+    },
+  );
 
   it("gives concurrent writers distinct seqs in commit order", async () => {
     const events = await Promise.all(

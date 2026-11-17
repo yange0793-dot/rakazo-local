@@ -1,5 +1,6 @@
 import { hostname } from "node:os";
 import type {
+  AdapterContext,
   ArtifactStore,
   ConnectorProvider,
   ManagedConnectorProvider,
@@ -8,9 +9,15 @@ import type {
 } from "@rakazo/adapter-kit";
 import { phoneCallSettings, resolveEncryptionKey, uploadSizeFromEnv } from "@rakazo/core";
 import type { PrismaClient, ThreadEvents } from "@rakazo/db";
-import { createSecurityEventPruner, securityEventRetentionDays } from "@rakazo/db";
+import { createSecurityEventPruner, recordUsage, securityEventRetentionDays } from "@rakazo/db";
 import { auditLogConfig, createAuditLogReconciler } from "./audit-forwarding.js";
+import { archiveConversationMemory, reconcileAutomaticMemory } from "./automatic-memory.js";
 import { createBackgroundJobHandlers } from "./background-job-handlers.js";
+import {
+  commandCredentialRedactions,
+  loadBotCommandEnvironment,
+  loadLoginPasswordRedactions,
+} from "./bot-secrets.js";
 import { reconcileCloudAgents } from "./cloud-agent-service.js";
 import type { ComposioProvider } from "./composio-connector.js";
 import { ComposioConnector, isComposioEnabled } from "./composio-connector.js";
@@ -25,6 +32,10 @@ import type { RemoteConnectorDependencies } from "./installed-connectors.js";
 import { InstalledConnectorProvider } from "./installed-connectors.js";
 import { IntegrationProviderSettings } from "./integration-provider-settings.js";
 import { createJobReconciler } from "./job-reconciler.js";
+import {
+  createLangMemExtractor,
+  createRuntimeMemoryCompletion,
+} from "./langmem-memory-extractor.js";
 import { McpConnector, mcpStdioOptionsFromEnv } from "./mcp-connector.js";
 import { McpOAuthBroker } from "./mcp-oauth.js";
 import { reconcileMediaVideos } from "./media-video-poll.js";
@@ -38,6 +49,7 @@ import {
   pipedreamConfigFromEnv,
 } from "./pipedream-connector.js";
 import { reconcilePurchases } from "./purchase-poll.js";
+import { reconcileSemanticMemoryIndex } from "./semantic-memory-sync.js";
 import { createStrategicInitiativeReconciler } from "./strategic-initiative.js";
 import { createWebProvider } from "./web-provider-factory.js";
 
@@ -62,6 +74,9 @@ export interface RunRuntimeEnv extends PipedreamEnvironmentValues {
   maxUploadSizeBytes: number;
   /** Only names a bot's address to it; the API receives the mail. */
   inboundEmailDomain: string | undefined;
+  /** Explicit optional local subprocess adapter; no new upstream model connection. */
+  memoryExtractorPython?: string;
+  memoryExtractorScript?: string;
 }
 
 /** The worker's reading of the run runtime settings, values and defaults as the worker has them. */
@@ -90,6 +105,8 @@ export function runRuntimeEnvFromProcess(source: NodeJS.ProcessEnv): RunRuntimeE
     ...phoneCallSettings(source),
     maxUploadSizeBytes: uploadSizeFromEnv(source),
     inboundEmailDomain: source.INBOUND_EMAIL_DOMAIN?.trim().toLowerCase() || undefined,
+    memoryExtractorPython: source.RAKAZO_MEMORY_EXTRACTOR_PYTHON?.trim() || undefined,
+    memoryExtractorScript: source.RAKAZO_MEMORY_EXTRACTOR_SCRIPT?.trim() || undefined,
   };
 }
 
@@ -184,20 +201,26 @@ export function createRunRuntime(
   },
 ) {
   const { messaging, ...executorDeps } = deps;
+  const extractionConfigured = Boolean(env.memoryExtractorPython && env.memoryExtractorScript);
+  if (Boolean(env.memoryExtractorPython) !== Boolean(env.memoryExtractorScript)) {
+    throw new Error("Automatic memory requires both its Python executable and extraction script.");
+  }
+  const runSecrets = [
+    env.deploymentModelKey ?? "",
+    localModelsApiKey() ?? "",
+    env.composioApiKey ?? "",
+    env.cursorApiKey ?? "",
+    process.env.TYPESAFE_API_KEY ?? "",
+  ].filter(Boolean);
   const executor = createRunExecutor({
     ...executorDeps,
+    automaticMemory: extractionConfigured ? { enabled: true } : executorDeps.automaticMemory,
     maxUploadSizeBytes: env.maxUploadSizeBytes,
     connector: connectors.stack.connector,
     connectors: connectors.stack.connector,
     listConnectedPluginSlugs: (userId) =>
       connectors.integrationSettings.listConnectedPluginSlugs(userId),
-    secrets: [
-      env.deploymentModelKey ?? "",
-      localModelsApiKey() ?? "",
-      env.composioApiKey ?? "",
-      env.cursorApiKey ?? "",
-      process.env.TYPESAFE_API_KEY ?? "",
-    ].filter(Boolean),
+    secrets: runSecrets,
     mcpAllowPrivateEndpoint: env.mcpAllowPrivateEndpoint,
     deploymentModelKey: env.deploymentModelKey,
     deploymentModelConfigured: env.deploymentModelConfigured,
@@ -210,6 +233,60 @@ export function createRunRuntime(
     messaging: messaging ? createMessagingContextLoader(deps.prisma) : undefined,
     web: createWebProvider(),
   });
+  const automaticMemory = extractionConfigured
+    ? {
+        prisma: deps.prisma,
+        memory: deps.memory,
+        memoryProviders: deps.memoryProviders,
+        jobs: deps.jobs,
+        secrets: runSecrets,
+        loadSecrets: async (context: AdapterContext) => {
+          if (!context.botId) throw new Error("Automatic memory requires its bot scope.");
+          const scope = { spaceId: context.spaceId, userId: context.userId, botId: context.botId };
+          const [commandEnvironment, loginRedactions, model] = await Promise.all([
+            loadBotCommandEnvironment(deps.prisma, deps.secretStore, scope),
+            loadLoginPasswordRedactions(deps.prisma, deps.secretStore, scope),
+            executor.resolveModel(scope),
+          ]);
+          return [
+            ...commandCredentialRedactions(commandEnvironment),
+            ...loginRedactions,
+            ...(model.apiKey ? [model.apiKey] : []),
+            ...(model.oauth ? [model.oauth.credential.access, model.oauth.credential.refresh] : []),
+          ].filter((value): value is string => Boolean(value));
+        },
+        extractor: createLangMemExtractor({
+          pythonPath: env.memoryExtractorPython!,
+          scriptPath: env.memoryExtractorScript!,
+          complete: createRuntimeMemoryCompletion({
+            runtime: deps.runtime,
+            resolveModel: async (context) => {
+              const model = await executor.resolveModel({
+                userId: context.userId,
+                spaceId: context.spaceId,
+                botId: context.botId,
+              });
+              return model;
+            },
+            onUsage: (event, context) =>
+              recordUsage(deps.prisma, event, {
+                spaceId: context.spaceId,
+                userId: context.userId,
+                botId: context.botId,
+                operationId: context.operationId,
+                operationKind: "compaction",
+              }),
+          }),
+        }),
+      }
+    : undefined;
+  const archiveMemory = automaticMemory
+    ? (
+        input: { threadId: string; botId: string; userId: string },
+        context: AdapterContext,
+        options?: { maxBatches?: number; force?: boolean },
+      ) => archiveConversationMemory(automaticMemory, input, context, options)
+    : undefined;
   const jobHandlers = createBackgroundJobHandlers({
     executor,
     prisma: deps.prisma,
@@ -224,6 +301,7 @@ export function createRunRuntime(
     notifications: deps.notifications instanceof ExpoPushProvider ? deps.notifications : undefined,
     secretStore: deps.secretStore,
     memoryProviders: deps.memoryProviders,
+    archiveConversationMemory: archiveMemory,
     deploymentModelKey: env.deploymentModelKey,
     deploymentModelConfigured: env.deploymentModelConfigured,
     messaging,
@@ -232,7 +310,7 @@ export function createRunRuntime(
     mediaGeneration: deps.mediaGeneration,
     maxUploadSizeBytes: env.maxUploadSizeBytes,
   });
-  return { executor, jobHandlers };
+  return { executor, jobHandlers, archiveConversationMemory: archiveMemory };
 }
 
 type JobReconcilerDeps = Parameters<typeof createJobReconciler>[0];
@@ -277,5 +355,11 @@ export function createRunReconciler(
     ),
     reconcileAuditLog: createAuditLogReconciler(prisma, auditLogConfig()),
     reconcileIdleComputers: createIdleComputerSweeper({ prisma, jobs }),
+    reconcileSemanticMemory: async () => {
+      await Promise.all([
+        reconcileSemanticMemoryIndex({ prisma, jobs }),
+        reconcileAutomaticMemory({ prisma, jobs }),
+      ]);
+    },
   });
 }

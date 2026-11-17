@@ -1,4 +1,5 @@
 import { useLingui } from "@lingui/react/macro";
+import type { ModelCatalogSourceStatus } from "@rakazo/contracts";
 import {
   canonicalPiProviderId,
   compatibleEndpointPresets,
@@ -6,7 +7,7 @@ import {
   savedCompatibleEndpointMatches,
 } from "@rakazo/contracts";
 import { popularModelProvidersFirst } from "@rakazo/core";
-import { fetchFresh } from "@rakazo/core/query";
+import { fetchFresh, writeSaved } from "@rakazo/core/query";
 import { isCancelledError, useQuery } from "@tanstack/react-query";
 import type { Href } from "expo-router";
 import { useFocusEffect, useLocalSearchParams, useRouter } from "expo-router";
@@ -28,13 +29,14 @@ import type { ModelPickerRequest } from "../../lib/model-picker-selection";
 import { closeModelPicker, openModelPicker } from "../../lib/model-picker-selection";
 import { native, useThemedStyles } from "../../lib/native";
 import { queryClient, rpcQuery } from "../../lib/query";
-import { settingsTarget } from "../../lib/settings-target";
+import { settingsRpc, settingsTarget } from "../../lib/settings-target";
 import { useSideInsets } from "../../lib/side-insets";
 import { errorText } from "../../lib/user-error";
 
 const noModels: MobileModel[] = [];
 const noCredentials: MobileModelCredential[] = [];
 const noBots: MobileBot[] = [];
+const noSources: ModelCatalogSourceStatus[] = [];
 
 /**
  * The main and approval model lists; connecting a provider opens its own screen. Opened with a
@@ -43,6 +45,7 @@ const noBots: MobileBot[] = [];
 export default function Models() {
   const params = useLocalSearchParams<{ spaceId?: string }>();
   const target = useMemo(() => settingsTarget(params.spaceId), [params.spaceId]);
+  const targetRpc = useMemo(() => settingsRpc(target), [target]);
   // A Space's override is read from that Space even when another one is selected.
   const spaceId = target.scope === "space" ? target.spaceId : undefined;
   const sideInsets = useSideInsets();
@@ -65,9 +68,13 @@ export default function Models() {
   const bots =
     useQuery({ ...rpcQuery("bots/list", undefined, spaceId), enabled: false }, queryClient).data ??
     noBots;
+  const sources =
+    useQuery({ ...rpcQuery("models/sources", undefined, spaceId), enabled: false }, queryClient)
+      .data ?? noSources;
   const [error, setError] = useState<string | null>(null);
   const [loadError, setLoadError] = useState<string | null>(null);
-  const openedRef = useRef(false);
+  const [syncingSources, setSyncingSources] = useState(false);
+  const [sourceError, setSourceError] = useState<string | null>(null);
   const pickerRequestRef = useRef<string | null>(null);
   const connectionRequestRef = useRef<string | null>(null);
   const returningFromPickerRef = useRef(false);
@@ -106,15 +113,38 @@ export default function Models() {
     [spaceId, t],
   );
 
+  const syncSources = useCallback(
+    async (sourceId?: string) => {
+      setSyncingSources(true);
+      setSourceError(null);
+      try {
+        const nextSources = await targetRpc("models/syncSources", sourceId ? { sourceId } : {});
+        await writeSaved(
+          queryClient,
+          rpcQuery("models/sources", undefined, spaceId).queryKey,
+          () => nextSources,
+        );
+      } catch (err) {
+        setSourceError(errorText(err, t`Could not sync model sources`));
+        // The last successful catalog remains usable if its source is offline.
+        await fetchFresh(queryClient, rpcQuery("models/sources", undefined, spaceId)).catch(
+          () => undefined,
+        );
+      }
+      await load();
+      setSyncingSources(false);
+    },
+    [load, spaceId, t, targetRpc],
+  );
+
   useFocusEffect(
     useCallback(() => {
       // A picker pick saves through the list itself; only connections change what loads here.
       if (returningFromPickerRef.current) returningFromPickerRef.current = false;
       else {
-        void load(!openedRef.current);
-        openedRef.current = true;
+        void syncSources();
       }
-    }, [load]),
+    }, [syncSources]),
   );
 
   /** A picker reopened after connecting returns to a list that must reload its connections. */
@@ -302,6 +332,10 @@ export default function Models() {
             {/* Connections are the account's in every Space, so a Space's override lists only its models. */}
             {target.scope === "account" ? (
               <ModelProviders
+                sources={sources}
+                sourceError={sourceError}
+                syncingSources={syncingSources}
+                onSync={(sourceId) => void syncSources(sourceId)}
                 catalog={catalog}
                 credentials={credentials}
                 onManage={manage}

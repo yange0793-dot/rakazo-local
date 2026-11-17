@@ -1,4 +1,3 @@
-import { DEFAULT_MODEL_MAX_TOKENS } from "@rakazo/contracts";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   billedPromptTokens,
@@ -13,7 +12,6 @@ import {
   modelStreamMaxRetries,
   modelStreamTimeoutMs,
   operatorMaxTokens,
-  REASONING_MODEL_MAX_TOKENS,
   resolveCompletionMaxTokens,
   TOOL_RESULT_TEXT_LIMIT,
 } from "./pi-runtime-limits.js";
@@ -174,7 +172,7 @@ describe("effectiveOutputReserve", () => {
 
   it("resolves an omitted maxTokens before applying the context limit", () => {
     expect(resolveCompletionMaxTokens(undefined, undefined, undefined, false, 4096)).toBe(1024);
-    expect(resolveCompletionMaxTokens(undefined, undefined, undefined, false, 262_144)).toBe(4096);
+    expect(resolveCompletionMaxTokens(undefined, undefined, undefined, false, 262_144)).toBe(65_536);
   });
 });
 
@@ -206,8 +204,8 @@ describe("resolveCompletionMaxTokens", () => {
     vi.unstubAllEnvs();
   });
 
-  it("uses the shared default instead of a model-card ceiling", () => {
-    expect(resolveCompletionMaxTokens(128_000)).toBe(DEFAULT_MODEL_MAX_TOKENS);
+  it("follows the model card when the connection sets no cap", () => {
+    expect(resolveCompletionMaxTokens(128_000)).toBe(128_000);
   });
 
   it("honors a configured escape hatch up to the model cap", () => {
@@ -215,24 +213,20 @@ describe("resolveCompletionMaxTokens", () => {
     expect(resolveCompletionMaxTokens(2_048, 8_192)).toBe(2_048);
   });
 
-  it("clamps an agent-supplied options maxTokens to the user cap", () => {
-    expect(resolveCompletionMaxTokens(128_000, undefined, 128_000)).toBe(DEFAULT_MODEL_MAX_TOKENS);
+  it("lets an agent-supplied options maxTokens stay under the user cap", () => {
+    expect(resolveCompletionMaxTokens(128_000, undefined, 128_000)).toBe(128_000);
     expect(resolveCompletionMaxTokens(128_000, 16_384, 128_000)).toBe(16_384);
   });
 
-  it("gives a reasoning model room for thinking and a reply", () => {
-    expect(resolveCompletionMaxTokens(128_000, undefined, undefined, true)).toBe(
-      REASONING_MODEL_MAX_TOKENS,
-    );
+  it("gives a reasoning model the model card's full budget", () => {
+    expect(resolveCompletionMaxTokens(128_000, undefined, undefined, true)).toBe(128_000);
     // A smaller model ceiling still wins.
     expect(resolveCompletionMaxTokens(8_192, undefined, undefined, true)).toBe(8_192);
   });
 
-  it("keeps the configured cap and the non-reasoning default intact", () => {
+  it("keeps a configured cap and otherwise follows the model card", () => {
     expect(resolveCompletionMaxTokens(128_000, 8_192, undefined, true)).toBe(8_192);
-    expect(resolveCompletionMaxTokens(128_000, undefined, undefined, false)).toBe(
-      DEFAULT_MODEL_MAX_TOKENS,
-    );
+    expect(resolveCompletionMaxTokens(128_000, undefined, undefined, false)).toBe(128_000);
   });
 });
 

@@ -1,4 +1,5 @@
 import type {
+  AdapterContext,
   AgentHomeStore,
   ArtifactStore,
   JobPublisher,
@@ -34,8 +35,9 @@ import type {
 } from "@rakazo/adapters";
 import type { Auth } from "@rakazo/auth";
 import type { NavLink } from "@rakazo/contracts";
-import type { BoardEvents, PrismaClient, ThreadEvents } from "@rakazo/db";
+import type { BoardEvents, PrismaClient, SemanticFactStore, ThreadEvents } from "@rakazo/db";
 import type { BillingService } from "./billing.js";
+import type { ModelCatalogSync } from "./model-catalog-sync.js";
 import { accountRoutes } from "./routes/account.js";
 import { availabilityRoutes } from "./routes/availability.js";
 import { boardsRoutes } from "./routes/boards.js";
@@ -84,12 +86,20 @@ export interface RouterDeps {
   sandbox: SandboxProvider;
   memory: MemoryStore;
   memoryProviders: MemoryProviderResolver;
+  semanticFacts?: Pick<SemanticFactStore, "retireScope" | "purgeHistory">;
+  /** Drains scheduled personal-chat memory before a clear removes its source messages. */
+  archiveConversationMemory?: (
+    input: { threadId: string; botId: string; userId: string },
+    context: AdapterContext,
+    options?: { maxBatches?: number; force?: boolean },
+  ) => Promise<void>;
   home: AgentHomeStore;
   secrets: SecretStore;
   oauthLogins: PiOAuthLogins;
   /** Live Codex catalog seam; defaults to the shared per-process cache. */
   codexCatalog?: CodexLiveCatalog;
   providerCatalog?: ProviderCatalogCache;
+  modelCatalogSync?: Pick<ModelCatalogSync, "list" | "sync" | "models">;
   /** Subscription allowance readings; defaults to the shared per-process cache. */
   planLimits?: PlanLimitsReader;
   /** HTTP transport for model connection checks and catalog probes. */
@@ -151,6 +161,7 @@ export interface RouterDeps {
     gitSha?: string;
     integrationsCatalogUrl?: string;
     mcpAllowPrivateEndpoint?: boolean;
+    localMemoryAllowedUrls?: string;
     desktopHostChoiceEnabled?: boolean;
     computerSettingsEnabled?: boolean;
     mcpStdioEnabled?: boolean;

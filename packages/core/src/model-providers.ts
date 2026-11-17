@@ -1,9 +1,7 @@
-import type { Bot, ModelApiProtocol, ModelCatalogEntry } from "@rakazo/contracts";
+import type { Bot, ModelApiProtocol, ModelCatalogEntry, ThinkingLevel } from "@rakazo/contracts";
 import {
   canonicalPiProviderId,
-  DEFAULT_MODEL_MAX_TOKENS,
   normalizeOpenAiCompatibleBaseUrl,
-  OPENAI_COMPATIBLE_PROVIDER_ID,
   selectCompatibleModelCredential,
   withConnectionName,
 } from "@rakazo/contracts";
@@ -16,7 +14,7 @@ export function botsWithOwnModel<T extends Pick<Bot, "modelProvider" | "modelId"
   return bots.filter((bot) => Boolean(bot.modelProvider && bot.modelId));
 }
 
-/** Effort choices an OpenAI-compatible endpoint stores when reasoning is enabled. */
+/** Levels the compatible serializers can encode, not evidence of endpoint support. */
 export const COMPATIBLE_THINKING_LEVELS = [
   "minimal",
   "low",
@@ -26,29 +24,37 @@ export const COMPATIBLE_THINKING_LEVELS = [
   "max",
 ] as const;
 
+/** Explicit connection metadata; never inferred from a compatible model's name. */
+export type CompatibleReasoningCapabilities = {
+  /** Messages defaults to budgets. Adaptive effort needs an explicit declaration. */
+  mode?: "budget" | "adaptive";
+  /** Omitted means protocol defaults; an empty list disables reasoning controls. */
+  levels?: readonly ThinkingLevel[];
+};
+
 /**
- * Effort choices by wire protocol. Anthropic Messages maps every level to a
- * budget, and pi-ai's budgets top out at the "high" level, so the two levels
- * above it are not offered for that protocol.
+ * Distinct settings the selected serializer can emit, narrowed by declared capabilities.
+ * Budget thinking has no budget above high; adaptive thinking has no distinct minimal effort.
+ * Being encodable does not establish that the connected endpoint accepts a level.
  */
 export function compatibleThinkingLevels(
   apiProtocol: ModelApiProtocol | undefined,
+  capabilities?: CompatibleReasoningCapabilities,
 ): readonly (typeof COMPATIBLE_THINKING_LEVELS)[number][] {
-  return apiProtocol === "anthropic-messages"
-    ? COMPATIBLE_THINKING_LEVELS.filter((level) => level !== "xhigh" && level !== "max")
-    : COMPATIBLE_THINKING_LEVELS;
+  return COMPATIBLE_THINKING_LEVELS.filter(
+    (level) =>
+      (apiProtocol !== "anthropic-messages" ||
+        (capabilities?.mode === "adaptive"
+          ? level !== "minimal"
+          : level !== "xhigh" && level !== "max")) &&
+      (capabilities?.levels === undefined || capabilities.levels.includes(level)),
+  );
 }
 
 const THINKING_LEVELS = ["off", ...COMPATIBLE_THINKING_LEVELS] as const;
 
-/**
- * The max-tokens field for a connection. An OpenAI-compatible endpoint always sends a limit, so
- * an unsaved one shows the default it would get; catalog providers leave it blank to use theirs.
- */
-export function connectionMaxTokensField(providerId: string, stored: number | undefined): string {
-  if (providerId === OPENAI_COMPATIBLE_PROVIDER_ID) {
-    return String(stored ?? DEFAULT_MODEL_MAX_TOKENS);
-  }
+/** Blank while the connection sets no cap of its own; the model's own ceiling applies. */
+export function connectionMaxTokensField(stored: number | undefined): string {
   return stored !== undefined ? String(stored) : "";
 }
 
@@ -175,6 +181,10 @@ type CredentialModelRef = {
   enabledModelIds?: readonly string[] | null;
   isDefault?: boolean;
   preferenceRank?: number;
+  catalogSource?: {
+    available: boolean;
+    unavailableModelIds: readonly string[];
+  };
 };
 
 function modelToken(value: string): string {
@@ -236,13 +246,14 @@ export function resolveSelectableModelId(
 }
 
 function freeFormChoice(credential: CredentialModelRef, modelId: string): ConnectedModelChoice {
+  const modelLabel = credential.catalogSource ? modelId.slice(modelId.indexOf("/") + 1) : modelId;
   return {
     key: modelOptionKey(credential.provider, modelId),
     provider: credential.provider,
     modelId,
-    label: withConnectionName(modelId, credential.label),
+    label: withConnectionName(modelLabel, credential.label),
     providerLabel: credential.label,
-    modelLabel: modelId,
+    modelLabel,
   };
 }
 
@@ -311,6 +322,7 @@ export function connectedModelChoices(
   const choices: ConnectedModelChoice[] = [];
   const seen = new Set<string>();
   for (const credential of credentials) {
+    if (credential.catalogSource?.available === false) continue;
     const providerModels = catalog.filter(
       (entry) =>
         canonicalPiProviderId(entry.provider) === canonicalPiProviderId(credential.provider) &&
@@ -321,9 +333,11 @@ export function connectedModelChoices(
     const resolvedInCatalog = providerModels.some(
       (entry) => resolveSelectableModelId(providerModels, entry.provider, entry.id) === resolved,
     );
-    const enabled = (credential.enabledModelIds ?? []).map((id) => id.trim()).filter(Boolean);
+    const enabled = (credential.enabledModelIds ?? [])
+      .map((id) => id.trim())
+      .filter((id) => id && !credential.catalogSource?.unavailableModelIds.includes(id));
     const next: ConnectedModelChoice[] =
-      enabled.length > 0
+      enabled.length > 0 || credential.catalogSource
         ? enabled.map((id) => ({
             ...freeFormChoice(credential, id),
             images: providerModels.find((entry) => entry.id === id)?.images,

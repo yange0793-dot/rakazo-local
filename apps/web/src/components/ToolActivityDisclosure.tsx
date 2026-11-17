@@ -1,3 +1,4 @@
+import { t } from "@lingui/core/macro";
 import { Plural, Trans } from "@lingui/react/macro";
 import { ChatMarkdown } from "@rakazo/chat-ui/web";
 import type { ThreadMessage } from "@rakazo/contracts";
@@ -7,7 +8,7 @@ import {
   CollapsibleContent,
   CollapsibleTrigger,
 } from "@rakazo/ui-web/components/ui/collapsible";
-import { ChevronRight } from "lucide-react";
+import { Check, ChevronRight, CircleX, Clock3, Minus, Square } from "lucide-react";
 import type { ReactNode } from "react";
 import { Fragment } from "react";
 import { toolStepCount } from "../lib/tool-activity-view";
@@ -38,7 +39,27 @@ export function ToolSteps({
       ) : null}
       {shown.map((step, offset) => {
         const index = hidden + offset;
-        const isCurrent = index === currentIndex;
+        const succeeded = step.outcomes?.succeeded ?? 0;
+        const failed = step.outcomes?.failed ?? 0;
+        const stopped = step.outcomes?.stopped ?? 0;
+        const isCurrent = index === currentIndex && succeeded + failed + stopped < step.count;
+        const outcome = isCurrent
+          ? "running"
+          : failed
+            ? "failed"
+            : stopped
+              ? "stopped"
+              : succeeded === step.count
+                ? "succeeded"
+                : "unknown";
+        const presentation = {
+          running: { icon: Clock3, label: t`Running`, color: "text-warning" },
+          failed: { icon: CircleX, label: t`Failed`, color: "text-destructive" },
+          stopped: { icon: Square, label: t`Stopped`, color: "text-muted-foreground" },
+          succeeded: { icon: Check, label: t`Succeeded`, color: "text-success" },
+          unknown: { icon: Minus, label: t`Outcome unavailable`, color: "text-muted-foreground" },
+        }[outcome];
+        const Icon = presentation.icon;
         return (
           <Fragment key={index}>
             {step.note ? (
@@ -48,10 +69,14 @@ export function ToolSteps({
             ) : null}
             <div className="flex min-w-0 items-center gap-2 leading-5">
               <span
-                className={`text-label ${isCurrent ? "text-warning" : "text-success"}`}
+                role="img"
+                aria-label={presentation.label}
+                title={presentation.label}
+                data-outcome={outcome}
+                className={`flex size-3.5 shrink-0 items-center justify-center ${presentation.color}`}
                 style={{ animation: isCurrent ? "rkPulse 1.2s ease-in-out infinite" : undefined }}
               >
-                {isCurrent ? "◷" : "✓"}
+                <Icon aria-hidden size={14} strokeWidth={1.8} />
               </span>
               <span
                 className={`min-w-0 flex-1 truncate text-body-sm ${

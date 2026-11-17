@@ -41,7 +41,6 @@ export function ShellSidePanel({
   computer,
   computerOpen,
   booting,
-  computerPanel,
   routinesPanel,
   routineEditorProps,
   openBot,
@@ -69,7 +68,6 @@ export function ShellSidePanel({
   computer: ComputerStatus | null;
   computerOpen: boolean;
   booting: boolean;
-  computerPanel: ReactNode;
   routinesPanel: ReactNode;
   routineEditorProps: ComponentProps<typeof RoutineEditor> | null;
   openBot: (botId: string) => void;
@@ -195,7 +193,6 @@ export function ShellSidePanel({
                 setPanel(tab);
                 if (tab === "computer") void refreshThread(active.id).catch(() => undefined);
               }}
-              computer={computerPanel}
               routines={routinesPanel}
               focusModel={modelFocusRequest}
               onOpenConnections={() => openSettings("models")}

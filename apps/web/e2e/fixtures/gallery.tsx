@@ -372,6 +372,28 @@ const secrets: Scenario = {
   ],
 };
 
+// A helper paused for its parent chat's approval: the ask below links back to this card.
+const waitingHelper = bot([
+  {
+    kind: "subagent",
+    agentId: "agent-4",
+    name: "Concierge",
+    task: "Check the venue deposit terms",
+    status: "waiting",
+  },
+]);
+const waitingHelperAsk = bot([
+  {
+    kind: "ask",
+    text: "Allow Concierge to open the venue booking page on example.test?",
+    approvalEffectId: "effect-helper-1",
+    site: "example.test",
+    helper: { messageId: waitingHelper.id, name: "Concierge" },
+    status: "pending",
+    actions: approvalActions,
+  },
+]);
+
 const working: Scenario = {
   id: "working",
   label: "Working",
@@ -382,9 +404,10 @@ const working: Scenario = {
       {
         kind: "steps",
         steps: [
-          { label: "Open calendar", count: 1 },
-          { label: "Read events", count: 3 },
-          { label: "Search inbox", count: 2 },
+          { label: "Open calendar", count: 1, outcomes: { succeeded: 1 } },
+          { label: "Read events", count: 3, outcomes: { succeeded: 2, failed: 1 } },
+          { label: "Search inbox", count: 2, outcomes: { stopped: 2 } },
+          { label: "Earlier calendar lookup", count: 1 },
         ],
         durationMs: 8_200,
       },
@@ -419,6 +442,8 @@ const working: Scenario = {
         result: "The booking site timed out.",
       },
     ]),
+    waitingHelper,
+    waitingHelperAsk,
     bot([
       {
         kind: "cloud_agent",

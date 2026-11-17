@@ -39,11 +39,59 @@ their notes. In **Settings → Memory**, choose **Connect memory provider**:
 
 Once connected, **Default scope** decides what bots share in the provider:
 
-- **Isolated**: each bot recalls only what it saved. This is the default.
-- **Shared**: bots in the space recall from one pool.
+- **Isolated**: automatic recall and writes use the bot's own facts. This is the default.
+- **Shared**: automatic recall and writes use the space's shared pool. Some external providers also
+  include the bot's own facts in a shared search.
 
 Each bot's settings also gain a **Memory scope** under **Advanced**, so one bot can differ from the
-default.
+default. In a direct chat, the bot can explicitly search its own facts, the shared pool, or both.
+This does not change where it writes. Groups, external channels, routines and background helpers
+cannot use this explicit search to expand beyond their configured scope. A resumed attempt or a
+run that has read outside content also stays within its configured scope.
+
+## Local managed memory
+
+A deployment can enable **Local memory** alongside the existing Markdown notes. Its server keeps
+revisioned facts and their sources in the encrypted application database. A local index searches
+those facts; recalled text is always checked against the current database revision and scope.
+
+For this provider, a direct message from the chat's user triggers one bounded recall before the bot
+answers, including in a new chat that has not been compacted. It requests up to 20 facts, adding up
+to two recent messages from the same user and thread to the search query so a follow-up has context.
+Explicit searches can request up to 50 facts. Both paths keep whole facts and source citations within
+a 10,000-byte response budget; the result reports how many matches fit and how many were omitted.
+These counts describe the returned candidate set, not every matching fact in the store.
+Server diagnostics record candidate and returned counts, elapsed retrieval time, and selected
+context counts and bytes without logging the query or recalled text.
+
+The local index supplies up to 50 candidates before the database filters obsolete revisions and
+history generations. A stale first match therefore does not consume the entire requested result
+slot when a valid match is later in that candidate set. This is a bounded search, not pagination
+through the entire store.
+
+External channels and the existing routine/creation history restrictions are not widened.
+Background helpers may recall memory but cannot change it. Recalled memories are historical context,
+never approval or instructions to override the current request. Bots are guided to save stable facts
+with their source, revise a changed fact atomically, and keep only a short standing summary in their
+Markdown notes.
+
+In **Settings → Memory → Saved facts**, choose a bot and an isolated or shared scope. You can search,
+inspect a source, correct a fact, forget it, or export the selected scope. Corrections and forgetting
+use the displayed revision, so a concurrent update is not silently overwritten. Forgotten and
+superseded revisions stop appearing in normal recall even if index cleanup is still pending.
+Disconnecting disables the provider; it does not erase saved facts. Forgetting a fact does not remove
+its text from old chats, Markdown notes, or backups.
+
+The operator must authorize the service's exact loopback origin using
+`RAKAZO_LOCAL_MEMORY_ALLOWED_URLS`; this does not grant general access to private MCP endpoints.
+The connection uses a private bearer token, and the local index must have its own data directory.
+Local storage does not mean recalled facts stay out of model requests: the selected facts are sent
+to the model that answers the chat.
+
+An explicit legacy import can copy source-attributed facts into a chosen scope without modifying the
+original store. It defaults to a dry run; private bot mappings and sharing must be explicit. Imported
+status and timestamps are preserved, while historical correction metadata is not represented as a
+newly verified fact or a complete earlier revision history.
 
 ## Open work
 

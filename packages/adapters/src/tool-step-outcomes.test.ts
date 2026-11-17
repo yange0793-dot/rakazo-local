@@ -2,7 +2,7 @@ import { appendToolCallSegment } from "@rakazo/core";
 import { describe, expect, it } from "vitest";
 import type { ReplyState } from "./run-context.js";
 import { withReplyToolOutcomes } from "./run-progress.js";
-import { toolCompletionOutcome } from "./tool-completion-audit.js";
+import { toolCompletionAuditPayload, toolCompletionOutcome } from "./tool-completion-audit.js";
 
 const base = { name: "shell", executionId: "call-1", durationMs: 5 };
 
@@ -27,6 +27,16 @@ describe("tool step outcomes", () => {
     expect(
       toolCompletionOutcome({ ...base, result: { content: [], details: { exitCode: 2 } } }),
     ).toBe("failed");
+  });
+
+  it("does not log a cancelled command as successful", () => {
+    expect(
+      toolCompletionAuditPayload({ ...base, result: { code: 130, stderr: "aborted" } }),
+    ).toMatchObject({ outcome: "error", exitCode: 130 });
+    expect(toolCompletionAuditPayload({ ...base, result: { code: 0 } })).toMatchObject({
+      outcome: "succeeded",
+      exitCode: 0,
+    });
   });
 
   it("saves each call's outcome on its step, and counts unfinished calls when stopped", () => {

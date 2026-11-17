@@ -6,6 +6,7 @@ import {
   BUILTIN_TOOL_NAMES,
 } from "@rakazo/contracts";
 import type { ChatModelChoice } from "@rakazo/core";
+import { clampCatalogThinkingLevel } from "@rakazo/core";
 import {
   Button,
   NativeSelect,
@@ -15,10 +16,13 @@ import {
   Textarea,
   Toggle,
 } from "@rakazo/ui-web";
-import { Download, Settings, X } from "lucide-react";
-import type { ReactNode, RefObject } from "react";
+import { Bell, Download, Loader2, Settings, X } from "lucide-react";
+import type { CSSProperties, ReactNode, RefObject } from "react";
+import { useEffect, useId, useRef, useState } from "react";
+import { requestBrowserNotificationPermission } from "../../lib/browser-notifications";
 import { thinkingLevelLabel } from "../../lib/model-catalog";
 import { ChatModelPicker } from "./chat-model-picker";
+import "./effort-bar.css";
 
 const rowLabelClass = "text-body text-foreground";
 
@@ -86,6 +90,17 @@ export function NotificationsSection({
   notifyOnFinish: boolean;
   onNotifyOnFinishChange: (checked: boolean) => void;
 }) {
+  const [permission, setPermission] = useState(() =>
+    typeof Notification === "undefined" ? undefined : Notification.permission,
+  );
+  const [requesting, setRequesting] = useState(false);
+  useEffect(() => {
+    const refresh = () =>
+      setPermission(typeof Notification === "undefined" ? undefined : Notification.permission);
+    window.addEventListener("focus", refresh);
+    return () => window.removeEventListener("focus", refresh);
+  }, []);
+
   return (
     <section className="mt-6">
       <SectionHeading variant="label" className="mb-2">
@@ -108,11 +123,198 @@ export function NotificationsSection({
           onCheckedChange={onNotifyOnFinishChange}
         />
       </div>
+      {notifyOnFinish && permission === "default" ? (
+        <Button
+          variant="ghost"
+          size="sm"
+          className="mt-2"
+          disabled={requesting}
+          onClick={async () => {
+            setRequesting(true);
+            setPermission(await requestBrowserNotificationPermission());
+            setRequesting(false);
+          }}
+        >
+          <Bell className="size-4" aria-hidden />
+          <Trans>Enable browser notifications</Trans>
+        </Button>
+      ) : null}
+      {notifyOnFinish && permission === "denied" ? (
+        <p className="mt-2 text-caption text-muted-foreground">
+          <Trans>Notifications are blocked in your browser's site settings.</Trans>
+        </p>
+      ) : null}
     </section>
   );
 }
 
-/** The model picker and, when the model offers levels, its thinking level. */
+/** Preview while adjusting; persist only the released or keyboard-confirmed value. */
+export function EffortBar({
+  level,
+  levels,
+  onChange,
+  onPreview,
+  disabled = false,
+}: {
+  level: ThinkingLevel;
+  levels: readonly ThinkingLevel[];
+  onChange: (level: ThinkingLevel) => void;
+  onPreview?: (level: ThinkingLevel | null) => void;
+  disabled?: boolean;
+}) {
+  const { t } = useLingui();
+  const id = useId();
+  const available: readonly ThinkingLevel[] = levels.filter((option) => option !== "off");
+  const effectiveLevel = clampCatalogThinkingLevel(level, available) as ThinkingLevel | null;
+  const [draft, setDraft] = useState(effectiveLevel);
+  const [dragging, setDragging] = useState(false);
+  const committed = useRef(level);
+  useEffect(() => {
+    setDraft(effectiveLevel);
+    committed.current = level;
+  }, [level, effectiveLevel]);
+  const shownLevel = draft && available.includes(draft) ? draft : effectiveLevel;
+  const activeIndex = shownLevel ? available.indexOf(shownLevel) : 0;
+
+  function preview(index: number) {
+    setDraft(available[index]!);
+    onPreview?.(available[index]!);
+  }
+
+  function commit(index: number) {
+    const next = available[index]!;
+    setDraft(next);
+    if (committed.current !== next) {
+      committed.current = next;
+      onChange(next);
+    }
+  }
+
+  if (!shownLevel) {
+    return (
+      <p className="text-body-sm text-muted-foreground">
+        <Trans>Effort unavailable for this model</Trans>
+      </p>
+    );
+  }
+  const adjusted = effectiveLevel !== level;
+  const requestedLabel = thinkingLevelLabel(level);
+  const effectiveLabel = effectiveLevel ? thinkingLevelLabel(effectiveLevel) : "";
+  return (
+    <div
+      className="effort-bar pt-1"
+      data-dragging={dragging}
+      data-disabled={disabled}
+      style={
+        {
+          "--effort-count": available.length,
+          "--effort-step": `${100 / available.length}%`,
+          "--effort-inset": `${50 / available.length}%`,
+        } as CSSProperties
+      }
+    >
+      <label htmlFor={id} className="text-label font-medium text-muted-foreground">
+        <Trans>Effort</Trans>
+      </label>
+      <div className="effort-axis text-caption text-muted-foreground" aria-hidden="true">
+        <span>
+          <Trans>Faster</Trans>
+        </span>
+        <span>
+          <Trans>Smarter</Trans>
+        </span>
+      </div>
+      <div className="effort-control">
+        <div className="effort-track" aria-hidden="true" />
+        <div
+          className="effort-cursor"
+          style={{ transform: `translateX(${activeIndex * 100}%)` }}
+          aria-hidden="true"
+        >
+          <span className="effort-pointer" />
+        </div>
+        <input
+          id={id}
+          type="range"
+          min={0}
+          max={available.length - 1}
+          step={1}
+          value={activeIndex}
+          disabled={disabled || available.length === 1}
+          aria-label={t`Effort`}
+          aria-valuetext={thinkingLevelLabel(shownLevel)}
+          aria-describedby={adjusted ? `${id}-effective` : undefined}
+          onChange={(event) => preview(event.currentTarget.valueAsNumber)}
+          onFocus={() => onPreview?.(available[activeIndex]!)}
+          onPointerDown={() => {
+            setDragging(true);
+            onPreview?.(available[activeIndex]!);
+          }}
+          onPointerUp={(event) => {
+            commit(event.currentTarget.valueAsNumber);
+            setDragging(false);
+            onPreview?.(null);
+          }}
+          onPointerCancel={() => {
+            setDraft(effectiveLevel);
+            setDragging(false);
+            onPreview?.(null);
+          }}
+          onKeyDown={(event) => {
+            if (event.key === "Escape") {
+              event.preventDefault();
+              setDraft(effectiveLevel);
+              onPreview?.(null);
+            }
+          }}
+          onKeyUp={(event) => {
+            if (event.key === "Enter") commit(event.currentTarget.valueAsNumber);
+          }}
+          onBlur={(event) => {
+            if (draft !== effectiveLevel) commit(event.currentTarget.valueAsNumber);
+            setDragging(false);
+            onPreview?.(null);
+          }}
+        />
+      </div>
+      <div className="effort-stops">
+        {available.map((option, index) => (
+          <button
+            key={option}
+            type="button"
+            tabIndex={available.length === 1 ? 0 : -1}
+            disabled={disabled}
+            aria-label={thinkingLevelLabel(option)}
+            aria-pressed={option === shownLevel}
+            onPointerEnter={() => {
+              if (!disabled) onPreview?.(option);
+            }}
+            onPointerLeave={() => onPreview?.(null)}
+            onPointerDown={(event) => event.preventDefault()}
+            onClick={() => {
+              preview(index);
+              commit(index);
+            }}
+          >
+            <span className="effort-stop-hit" aria-hidden="true">
+              <span className="effort-stop-dot" />
+            </span>
+            <span className="text-caption font-mono">{option}</span>
+          </button>
+        ))}
+      </div>
+      {adjusted ? (
+        <p id={`${id}-effective`} className="mt-2 text-body-sm text-warning" role="status">
+          <Trans>
+            Saved {requestedLabel}; using {effectiveLabel}.
+          </Trans>
+        </p>
+      ) : null}
+    </div>
+  );
+}
+
+/** The model picker and the effort every model runs at. */
 export function ModelSection({
   ids,
   containerRef,
@@ -120,10 +322,17 @@ export function ModelSection({
   choices,
   value,
   onModelChange,
-  thinkingOptions,
-  thinkingLevel,
-  defaultThinkingLevel,
-  onThinkingLevelChange,
+  modelDisabled = false,
+  modelSaving = false,
+  modelLoading = false,
+  effortLevel,
+  effortLevels = [],
+  onEffortChange,
+  onEffortPreview,
+  effortDisabled = false,
+  modelUnavailable = false,
+  defaultModelKey,
+  onSetDefaultModel,
 }: {
   ids: string;
   containerRef: RefObject<HTMLDivElement | null>;
@@ -131,12 +340,29 @@ export function ModelSection({
   choices: readonly ChatModelChoice[];
   value: string;
   onModelChange: (key: string) => void;
-  thinkingOptions: ThinkingLevel[];
-  thinkingLevel: string;
-  defaultThinkingLevel: ThinkingLevel;
-  onThinkingLevelChange: (level: string) => void;
+  modelDisabled?: boolean;
+  modelSaving?: boolean;
+  modelLoading?: boolean;
+  effortLevel: ThinkingLevel;
+  effortLevels?: readonly ThinkingLevel[];
+  onEffortChange: (level: ThinkingLevel) => void;
+  onEffortPreview?: (level: ThinkingLevel | null) => void;
+  effortDisabled?: boolean;
+  modelUnavailable?: boolean;
+  defaultModelKey?: string;
+  onSetDefaultModel?: (choice: ChatModelChoice) => void;
 }) {
   const { t } = useLingui();
+  const thinking = (
+    <EffortBar
+      key={`${value}:${effortLevels.join(":")}`}
+      level={effortLevel}
+      levels={effortLevels}
+      onChange={onEffortChange}
+      onPreview={onEffortPreview}
+      disabled={effortDisabled}
+    />
+  );
   return (
     <div ref={containerRef}>
       <div className="mb-2 flex items-center justify-between text-label font-medium text-muted-foreground pe-1">
@@ -163,32 +389,24 @@ export function ModelSection({
               choices={choices}
               value={value}
               onChange={onModelChange}
+              disabled={modelDisabled}
+              saving={modelSaving}
+              defaultKey={defaultModelKey}
+              onSetDefault={onSetDefaultModel}
+              unavailableKey={modelUnavailable ? value : undefined}
             />
           </div>
         </div>
-        {thinkingOptions.length ? (
-          <label
-            htmlFor={`${ids}-thinking`}
-            className="flex min-h-11 items-center justify-between gap-3 text-body text-foreground"
-          >
-            <Trans>Thinking</Trans>
-            <NativeSelect
-              id={`${ids}-thinking`}
-              className="max-w-2/3"
-              value={thinkingLevel}
-              onChange={(event) => onThinkingLevelChange(event.target.value)}
-            >
-              <NativeSelectOption value="">
-                {t`Default (${thinkingLevelLabel(defaultThinkingLevel)})`}
-              </NativeSelectOption>
-              {thinkingOptions.map((level) => (
-                <NativeSelectOption key={level} value={level}>
-                  {thinkingLevelLabel(level)}
-                </NativeSelectOption>
-              ))}
-            </NativeSelect>
-          </label>
-        ) : null}
+        {modelLoading ? (
+          <div className="flex min-h-20 items-center justify-center" role="status">
+            <Loader2 className="size-4 animate-spin text-muted-foreground" aria-hidden />
+            <span className="sr-only">
+              <Trans>Loading</Trans>
+            </span>
+          </div>
+        ) : modelUnavailable ? null : (
+          thinking
+        )}
       </div>
     </div>
   );

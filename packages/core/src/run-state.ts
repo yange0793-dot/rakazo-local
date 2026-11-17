@@ -117,18 +117,20 @@ export const STOPPED_HELPER_RESULT = "stopped";
 export function helperCardState(block: { status: string; result?: string; progress?: string }): {
   stopped: boolean;
   failed: boolean;
+  waiting: boolean;
   body: string;
 } {
   const stopped = block.status === "failed" && block.result === STOPPED_HELPER_RESULT;
   return {
     stopped,
     failed: block.status === "failed" && !stopped,
+    waiting: block.status === "waiting",
     body: stopped ? "" : block.result || block.progress || "",
   };
 }
 
-/** Runs that may use their bot's computer: a background helper never does. */
-export const COMPUTER_USING_RUNS = { trigger: { not: BACKGROUND_HELPER_TRIGGER } } as const;
+/** Runs that may use their bot's computer: helpers do too, so any active run counts. */
+export const COMPUTER_USING_RUNS = {} as const;
 
 /** Prompt of a run created to answer messages that waited behind another turn. */
 export const STEERING_CONTINUATION_PROMPT = "Respond to the user's steering context.";

@@ -192,7 +192,7 @@ describe("browser notifications", () => {
     expect(show).toHaveBeenCalledTimes(3);
   });
 
-  it("allows a later send gesture to retry a dismissed permission prompt", async () => {
+  it("allows an explicit request to retry a dismissed permission prompt", async () => {
     let resolvePermission: ((permission: "default") => void) | undefined;
     const requestPermission = vi.fn(
       () =>

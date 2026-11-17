@@ -174,6 +174,7 @@ import {
   ModelBackupChoiceSchema,
   ModelBackupListSchema,
   ModelCatalogEntrySchema,
+  ModelCatalogSourceStatusSchema,
   ModelConnectInputSchema,
   ModelConnectionLabelSchema,
   ModelConnectionTargetSchema,
@@ -206,6 +207,15 @@ import {
 } from "./runs.js";
 import { SearchQueryOutputSchema } from "./search.js";
 import { SecurityEventListInputSchema, SecurityEventSchema } from "./security-events.js";
+import {
+  SemanticFactCorrectRequestSchema,
+  SemanticFactExportRequestSchema,
+  SemanticFactExportSchema,
+  SemanticFactForgetRequestSchema,
+  SemanticFactListRequestSchema,
+  SemanticFactPageSchema,
+  SemanticFactSchema,
+} from "./semantic-memory.js";
 import { SettingsScopeSchema, SpaceSettingSchema, settingsScopeInput } from "./settings-scope.js";
 import { SpaceAvailabilitySchema } from "./space-availability.js";
 
@@ -518,6 +528,10 @@ export const appContract = {
       .output(ModelRoleViewSchema),
     list: oc.output(z.array(ModelCatalogEntrySchema)),
     credentials: oc.output(z.array(ModelCredentialSchema)),
+    sources: oc.output(z.array(ModelCatalogSourceStatusSchema)),
+    syncSources: oc
+      .input(z.object({ sourceId: z.string().optional() }))
+      .output(z.array(ModelCatalogSourceStatusSchema)),
     backups: oc.output(z.array(ModelBackupChoiceSchema)),
     setBackups: oc.input(ModelBackupListSchema).output(z.object({ ok: z.literal(true) })),
     connect: oc.input(ModelConnectInputSchema).output(ModelCredentialSchema),
@@ -911,6 +925,10 @@ export const appContract = {
       .input(z.object({ defaultMemoryScope: MemoryScopeSchema }))
       .output(SpaceMemoryConfigSchema),
     disconnectProvider: oc.output(z.object({ ok: z.literal(true) })),
+    facts: oc.input(SemanticFactListRequestSchema).output(SemanticFactPageSchema),
+    correctFact: oc.input(SemanticFactCorrectRequestSchema).output(SemanticFactSchema),
+    forgetFact: oc.input(SemanticFactForgetRequestSchema).output(z.object({ ok: z.literal(true) })),
+    exportFacts: oc.input(SemanticFactExportRequestSchema).output(SemanticFactExportSchema),
   },
   routines: {
     listForMentions: oc

@@ -1,5 +1,6 @@
 import type { Models } from "@earendil-works/pi-ai";
 import { builtinModels } from "@earendil-works/pi-ai/providers/all";
+import type { ManagedModelCatalog } from "@rakazo/contracts";
 import { canonicalPiProviderId } from "@rakazo/contracts";
 import { DEFAULT_OPENROUTER_MODEL_ID } from "./deployment-model.js";
 import { liveModelSibling, withLiveImageInput } from "./pi-live-model.js";
@@ -35,9 +36,20 @@ export function modelIdSupportsImages(
 /** Whether a compatible connection lists the model as seeing images. */
 export function compatibleModelSeesImages(
   credential: { supportsImages?: boolean | null; defaultModel?: string | null },
-  secret: { visionModelIds?: readonly string[] },
+  secret: { visionModelIds?: readonly string[]; managedCatalog?: ManagedModelCatalog },
   modelId: string,
 ): boolean {
+  if (secret.managedCatalog) {
+    const id = secret.managedCatalog.aliases[modelId] ?? modelId;
+    if (secret.visionModelIds !== undefined)
+      return modelIdSupportsImages(secret.visionModelIds, id);
+    return (
+      (credential.supportsImages === true &&
+        (secret.managedCatalog.aliases[credential.defaultModel ?? ""] ??
+          credential.defaultModel) === id) ||
+      secret.managedCatalog.capabilities[id]?.supportsImages === true
+    );
+  }
   return (
     modelIdSupportsImages(secret.visionModelIds, modelId) ||
     // Legacy secrets have no per-model list, so keep their existing

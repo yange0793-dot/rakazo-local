@@ -75,6 +75,7 @@ import {
   resolveRuntimeModel,
   sameModelTarget,
   thinkingLevelFor,
+  thinkingSelectionFor,
 } from "./pi-runtime-models.js";
 import { conversationSessionId, reliableModelStream } from "./pi-runtime-stream.js";
 import { MAX_PARALLEL_SUBAGENTS } from "./pi-runtime-subagent.js";
@@ -462,8 +463,26 @@ export class PiAgentRuntime implements AgentRuntime {
                 withCloudflareAuth(target.config, options),
                 target.config.maxTokens,
                 () => target.credentials?.accessToken ?? target.apiKey,
-                (preparedOptions) =>
-                  observedPiStream(
+                (preparedOptions) => {
+                  const requestedThinkingLevel = target.config.thinkingLevel ?? null;
+                  const effectiveThinkingLevel = thinkingSelectionFor(
+                    target.model,
+                    preparedOptions.reasoning ?? "off",
+                  ).effective;
+                  getLogger().info("model.reasoning_selected", {
+                    runId: request.runId,
+                    threadId: request.threadId,
+                    provider: target.model.provider,
+                    modelId: target.model.id,
+                    connectionId: target.config.connectionId,
+                    api: target.model.api,
+                    requestedThinkingLevel,
+                    effectiveThinkingLevel,
+                    reasoningAdjusted:
+                      requestedThinkingLevel !== null &&
+                      requestedThinkingLevel !== effectiveThinkingLevel,
+                  });
+                  return observedPiStream(
                     target.models,
                     target.model,
                     ctx,
@@ -480,7 +499,8 @@ export class PiAgentRuntime implements AgentRuntime {
                       prepareContext,
                       onProviderError: (message) => providerFailures.add(message.content),
                     },
-                  ),
+                  );
+                },
                 target.config.cacheCapabilities?.retentionMode,
               ),
               setThinking,
@@ -780,6 +800,7 @@ export class PiAgentRuntime implements AgentRuntime {
         let currentMessageStreamed = "";
         let toolCalls = 0;
         let toolActivityShowing = false;
+        const activeToolActivities = new Map<string, string>();
         let silentToolContinuations = 0;
         // A reply cut off by a dropped connection continues in the same bubble: no turn break,
         // and a continuation that starts by repeating the end of the cut text loses that repeat.
@@ -804,6 +825,14 @@ export class PiAgentRuntime implements AgentRuntime {
         // it counts as the final reply, including when the completed message omits it.
         let streamedBeforePendingFinal = 0;
         agent.subscribe(async (event) => {
+          if (event.type === "tool_execution_end") {
+            activeToolActivities.delete(event.toolCallId);
+            if (toolActivityShowing) {
+              const text = [...activeToolActivities.values()].at(-1) ?? "";
+              toolActivityShowing = text.length > 0;
+              queue.push({ type: "progress", text, activity: true });
+            }
+          }
           if (event.type === "tool_execution_end" && isTerminatingReplyResult(event.result)) {
             terminatedReply = terminatingReplyText(event.result) ?? terminatedReply;
           }
@@ -832,12 +861,14 @@ export class PiAgentRuntime implements AgentRuntime {
             toolCalls += 1;
             // Live activity feedback: without this the thread shows a bare
             // "working…" for the whole tool call with nothing actionable.
+            const activity = describeToolActivity(event.toolName, event.args, (name) =>
+              toolsByAgentName.get(name),
+            );
+            activeToolActivities.set(event.toolCallId, activity);
             toolActivityShowing = true;
             queue.push({
               type: "progress",
-              text: describeToolActivity(event.toolName, event.args, (name) =>
-                toolsByAgentName.get(name),
-              ),
+              text: activity,
               activity: true,
             });
           }

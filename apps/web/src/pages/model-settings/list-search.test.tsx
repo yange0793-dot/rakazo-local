@@ -59,6 +59,10 @@ it("uses the shared matcher in Add provider and keeps an active search after the
   const render = (rows: typeof providers) =>
     root.render(
       <ProvidersSection
+        sources={[]}
+        sourceError={null}
+        syncingSources={false}
+        onSync={() => undefined}
         credentials={[]}
         providers={rows}
         name={() => ""}

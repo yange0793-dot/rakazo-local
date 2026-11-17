@@ -22,6 +22,7 @@ import {
   createCloudAgentConnection,
   createConnectorRuntime,
   createDeadJobPruner,
+  createManagedMemoryProvider,
   createMediaGenerationProvider,
   createPaymentWalletProvider,
   createPostgresReconciliationLeadership,
@@ -161,7 +162,6 @@ async function main() {
   })
     ? new ChatSdkMessagingSurface(messagingPlatforms)
     : undefined;
-  const memoryProviders = new SpaceMemoryProviderResolver(prisma, secrets);
   const home = createAgentHomeStore(env.dataDir, prisma);
   void home.removeStaleStaging().catch((error) => logger.error("home staging cleanup", error));
   const artifacts = createArtifactStore(env.dataDir, prisma);
@@ -170,6 +170,9 @@ async function main() {
   const runs = new RunStarter(realtime, { signal: shutdown.signal });
   const jobs: JobPublisher =
     inMemoryJobs ?? new RunJobPublisher(prisma, new GraphileJobPublisher(pool, prisma), runs);
+  const memoryProviders = new SpaceMemoryProviderResolver(prisma, secrets, {
+    createManagedMemoryProvider: (index) => createManagedMemoryProvider({ prisma, index, jobs }),
+  });
   const { messaging } = installedMessaging(
     prisma,
     secrets,

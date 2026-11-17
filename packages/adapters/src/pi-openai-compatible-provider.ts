@@ -7,12 +7,12 @@ import type {
   MutableModels,
   Provider,
   ProviderStreams,
+  ThinkingLevelMap,
 } from "@earendil-works/pi-ai";
-import { createProvider } from "@earendil-works/pi-ai";
+import { clampThinkingLevel, createProvider } from "@earendil-works/pi-ai";
 import { anthropicMessagesApi } from "@earendil-works/pi-ai/api/anthropic-messages.lazy";
 import { openAICompletionsApi } from "@earendil-works/pi-ai/api/openai-completions.lazy";
 import { openAIResponsesApi } from "@earendil-works/pi-ai/api/openai-responses.lazy";
-import { builtinModels } from "@earendil-works/pi-ai/providers/all";
 import type { ModelApiProtocol } from "@rakazo/contracts";
 import {
   DEFAULT_MODEL_CONTEXT_WINDOW,
@@ -24,6 +24,8 @@ import {
   MODEL_KEY_REJECTED_ERROR,
   parseModelHeaders,
 } from "@rakazo/contracts";
+import type { CompatibleReasoningCapabilities } from "@rakazo/core";
+import { COMPATIBLE_THINKING_LEVELS, compatibleThinkingLevels } from "@rakazo/core";
 import type { Dispatcher } from "undici";
 import { Agent } from "undici";
 import { declaredVisionModelIds, inputModalities } from "./model-modalities.js";
@@ -90,7 +92,15 @@ export function openAiCompatibleModel(
   maxTokens = DEFAULT_MODEL_MAX_TOKENS,
   contextWindow = DEFAULT_MODEL_CONTEXT_WINDOW,
   apiProtocol: ModelApiProtocol = "chat-completions",
+  reasoningCapabilities?: CompatibleReasoningCapabilities,
 ): Model<"openai-completions" | "openai-responses" | "anthropic-messages"> {
+  const levels = reasoning ? compatibleThinkingLevels(apiProtocol, reasoningCapabilities) : [];
+  const thinkingLevelMap: ThinkingLevelMap = {
+    off: reasoningCapabilities?.levels?.includes("off") === false ? null : "none",
+  };
+  for (const level of COMPATIBLE_THINKING_LEVELS) {
+    thinkingLevelMap[level] = levels.includes(level) ? level : null;
+  }
   return {
     id,
     name: id,
@@ -102,11 +112,11 @@ export function openAiCompatibleModel(
           : "openai-completions",
     provider: OPENAI_COMPATIBLE_PROVIDER_ID,
     baseUrl: apiProtocol === "anthropic-messages" ? anthropicMessagesBaseUrl(baseUrl) : baseUrl,
-    reasoning,
+    reasoning: reasoning && levels.length > 0,
     ...(apiProtocol === "anthropic-messages"
-      ? // pi-ai derives budget-based thinking from `reasoning` alone, which newer models
-        // reject; a model the built-in catalog knows keeps its own thinking settings.
-        anthropicCatalogThinking(id)
+      ? reasoningCapabilities?.mode === "adaptive"
+        ? { compat: { forceAdaptiveThinking: true } }
+        : {}
       : {
           compat: {
             // `store: false` is already the default, and Google's endpoint rejects the field.
@@ -115,35 +125,12 @@ export function openAiCompatibleModel(
             supportsReasoningEffort: reasoning,
             thinkingFormat: "openai",
           },
-          thinkingLevelMap: reasoning
-            ? { off: "none", xhigh: "xhigh", max: "max" }
-            : { off: "none" },
         }),
+    thinkingLevelMap,
     input: inputModalities(acceptsImages),
     cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
     contextWindow,
     maxTokens,
-  };
-}
-
-let anthropicCatalog: ReturnType<typeof builtinModels> | undefined;
-
-/**
- * The built-in Anthropic catalog's thinking settings for the same model id, if any. Only the
- * thinking shape is copied: the catalog's other flags (mid-conversation effort and system
- * messages, fallbacks) describe Anthropic's own API, which a compatible endpoint may not accept.
- */
-function anthropicCatalogThinking(
-  id: string,
-): Pick<Model<"anthropic-messages">, "compat" | "thinkingLevelMap"> {
-  anthropicCatalog ??= builtinModels();
-  const known = anthropicCatalog.getModel("anthropic", id) as
-    | Model<"anthropic-messages">
-    | undefined;
-  if (known?.api !== "anthropic-messages") return {};
-  return {
-    ...(known.compat?.forceAdaptiveThinking ? { compat: { forceAdaptiveThinking: true } } : {}),
-    ...(known.thinkingLevelMap ? { thinkingLevelMap: known.thinkingLevelMap } : {}),
   };
 }
 
@@ -183,14 +170,17 @@ function openAiCompatibleProvider(
           fetch: createOpenAiCompatibleFetch(options?.fetch, undefined, streamPolicy),
         }),
       ),
-    streamSimple: (model, context, options) =>
-      answerOnly(
+    streamSimple: (model, context, options) => {
+      const reasoning = clampThinkingLevel(model, options?.reasoning ?? "off");
+      return answerOnly(
         model,
         api(model.api).streamSimple(model, context, {
           ...options,
+          reasoning: reasoning === "off" ? undefined : reasoning,
           fetch: createOpenAiCompatibleFetch(options?.fetch, undefined, streamPolicy),
         }),
-      ),
+      );
+    },
   };
   return createProvider({
     id: OPENAI_COMPATIBLE_PROVIDER_ID,
@@ -434,6 +424,7 @@ export function registerOpenAiCompatibleRuntime(
     apiProtocol?: ModelApiProtocol;
     headers?: Record<string, string>;
     reasoning?: boolean;
+    reasoningCapabilities?: CompatibleReasoningCapabilities;
     acceptsImages?: boolean;
     maxTokens?: number;
     contextWindow?: number;
@@ -455,6 +446,7 @@ export function registerOpenAiCompatibleRuntime(
           opts.maxTokens,
           opts.contextWindow,
           opts.apiProtocol,
+          opts.reasoningCapabilities,
         ),
       ],
       { allowPrivate: opts.allowPrivate, headers: opts.headers },

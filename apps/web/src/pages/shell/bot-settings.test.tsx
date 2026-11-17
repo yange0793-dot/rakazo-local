@@ -14,6 +14,8 @@ vi.mock("../../lib/rpc", () => {
     models: {
       credentials: vi.fn(async () => []),
       list: vi.fn(async () => []),
+      role: vi.fn(async () => ({ primary: null, fallbacks: [] })),
+      setRole: vi.fn(async () => undefined),
     },
     me: vi.fn(async () => ({})),
     // This server receives no email, so the panel offers no address.
@@ -89,6 +91,7 @@ vi.mock("../KnowledgeSection", () => ({ KnowledgeSection: () => null }));
 vi.mock("./avatar-studio-popover", () => ({ AvatarStudioPopover: () => null }));
 
 import { BotSettings } from "./bot-panel";
+import { NotificationsSection } from "./bot-settings-sections";
 
 const bot = {
   id: "bot-1",
@@ -134,6 +137,7 @@ async function flush() {
 }
 
 beforeEach(() => {
+  (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
   container = document.createElement("div");
   document.body.appendChild(container);
   root = createRoot(container);
@@ -146,6 +150,7 @@ afterEach(() => {
   });
   queryClient.clear();
   container.remove();
+  vi.unstubAllGlobals();
 });
 
 type SavePatch = {
@@ -186,6 +191,46 @@ async function renderSettings(onSave: (patch: SavePatch) => Promise<void>, curre
   });
   await flush();
 }
+
+it("requests notification permission only from the explicit browser button", async () => {
+  const requestPermission = vi.fn(async () => "granted");
+  vi.stubGlobal("Notification", { permission: "default", requestPermission });
+  await act(async () => {
+    root.render(
+      <NotificationsSection
+        ids="notifications"
+        notifyOnFinish
+        onNotifyOnFinishChange={() => undefined}
+      />,
+    );
+  });
+  expect(requestPermission).not.toHaveBeenCalled();
+  const button = [...container.querySelectorAll("button")].find((element) =>
+    element.textContent?.includes("Enable browser notifications"),
+  )!;
+  await act(async () => button.click());
+  expect(requestPermission).toHaveBeenCalledOnce();
+  expect(container.textContent).not.toContain("Enable browser notifications");
+});
+
+it("shows the recovery location when browser notifications are blocked", async () => {
+  const requestPermission = vi.fn();
+  vi.stubGlobal("Notification", { permission: "denied", requestPermission });
+  await act(async () => {
+    root.render(
+      <NotificationsSection
+        ids="notifications"
+        notifyOnFinish
+        onNotifyOnFinishChange={() => undefined}
+      />,
+    );
+  });
+  expect(container.textContent).toContain(
+    "Notifications are blocked in your browser's site settings.",
+  );
+  expect(container.textContent).not.toContain("Enable browser notifications");
+  expect(requestPermission).not.toHaveBeenCalled();
+});
 
 describe("BotSettings help", () => {
   it("shows the management subtitle without changing the management switch", async () => {

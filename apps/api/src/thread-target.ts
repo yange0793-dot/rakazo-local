@@ -5,7 +5,7 @@ import type {
   ProductAnalytics,
   SandboxProvider,
 } from "@rakazo/adapter-kit";
-import { runContinueJob } from "@rakazo/adapter-kit";
+import { runContinueJob, runJobKey } from "@rakazo/adapter-kit";
 import { notifyMemberMessage } from "@rakazo/adapters";
 import type { Actor, GroupMember, MessageBlock, ReplyPreview } from "@rakazo/contracts";
 import {
@@ -261,7 +261,7 @@ function sendResult(message: { seq: number }, runs: Array<{ id: string; taskId: 
 export async function cancelSupersededQueuedRuns(
   tx: Prisma.TransactionClient,
   input: { threadId: string; botIds: string[]; keepRunIds: string[] },
-) {
+): Promise<string[]> {
   const superseded = await tx.run.findMany({
     where: {
       threadId: input.threadId,
@@ -272,7 +272,7 @@ export async function cancelSupersededQueuedRuns(
     },
     select: { id: true, taskId: true },
   });
-  if (superseded.length === 0) return;
+  if (superseded.length === 0) return [];
   const now = new Date();
   await tx.run.updateMany({
     where: { id: { in: superseded.map((run) => run.id) } },
@@ -286,6 +286,7 @@ export async function cancelSupersededQueuedRuns(
     where: { id: { in: superseded.map((run) => run.taskId) } },
     data: { status: "cancelled" },
   });
+  return superseded.map((run) => run.id);
 }
 
 export async function lockAndLoadGroupMembers(
@@ -825,7 +826,7 @@ export async function sendThreadMessage(
           },
         });
         await tx.message.update({ where: { id: message.id }, data: { runId: run.id } });
-        await cancelSupersededQueuedRuns(tx, {
+        const supersededRunIds = await cancelSupersededQueuedRuns(tx, {
           threadId: target.threadId,
           botIds: [target.botId],
           keepRunIds: [run.id],
@@ -849,7 +850,7 @@ export async function sendThreadMessage(
             replyPreview,
           },
         });
-        return { message, runs: [run], routineRuns, eventSeq: event.seq };
+        return { message, runs: [run], routineRuns, eventSeq: event.seq, supersededRunIds };
       }
 
       const members = await lockAndLoadGroupMembers(tx, actor, target);
@@ -1008,7 +1009,12 @@ export async function sendThreadMessage(
         userId: string;
         trigger?: string | null;
       }> = [];
+      // New member turns of one send run in the order they were named (else group order),
+      // each reading the replies of the turns before it. A member already working takes this
+      // message as steering and keeps its earlier run.
+      let groupTurn = 0;
       for (const botId of targetBotIds) {
+        const turn = groupTurn++;
         const answered = answeredByBotId.get(botId);
         if (answered) {
           const steered = answered.filter((run) =>
@@ -1064,6 +1070,7 @@ export async function sendThreadMessage(
             status: "queued",
             trigger: "user",
             groupReplyOptional: namesNobody,
+            groupTurn: turn,
             clientNonce: sendRunClientNonce(input.clientNonce, message.id, botId),
             sourceMessageId: message.id,
           },
@@ -1076,6 +1083,7 @@ export async function sendThreadMessage(
       // The event names the bot of the run it carries, so clients pair them correctly.
       const eventBotId = ownRun?.botId ?? firstRun?.botId ?? targetBotIds[0];
       if (!eventBotId) throw new IsolationError("Group send did not resolve a target");
+      let supersededRunIds: string[] = [];
       if (firstRun) {
         if (ownRun) {
           await tx.message.update({ where: { id: message.id }, data: { runId: ownRun.id } });
@@ -1084,7 +1092,7 @@ export async function sendThreadMessage(
           (run) => !activeByBotId.has(run.botId) && !answeredByBotId.has(run.botId),
         );
         if (createdRuns.length) {
-          await cancelSupersededQueuedRuns(tx, {
+          supersededRunIds = await cancelSupersededQueuedRuns(tx, {
             threadId: target.threadId,
             botIds: createdRuns.map((run) => run.botId),
             keepRunIds: createdRuns.map((run) => run.id),
@@ -1111,7 +1119,7 @@ export async function sendThreadMessage(
           replyPreview,
         },
       });
-      return { message, runs, routineRuns, eventSeq: event.seq };
+      return { message, runs, routineRuns, eventSeq: event.seq, supersededRunIds };
     }, THREAD_LOCK_TRANSACTION_OPTIONS);
 
   const committed = await withTransactionRetry(commit).catch(async (error) => {
@@ -1125,6 +1133,18 @@ export async function sendThreadMessage(
     throw error;
   });
   if ("replay" in committed) return committed.replay;
+  const supersededRunIds =
+    "supersededRunIds" in committed ? (committed.supersededRunIds ?? []) : [];
+  if (supersededRunIds.length > 0) {
+    // A superseded run needs no scheduled start; waking it would only find it cancelled.
+    await Promise.all(
+      supersededRunIds.map((runId) =>
+        deps.jobs
+          .cancel(runJobKey(runId))
+          .catch((error) => getLogger().error("superseded run job cancel", error)),
+      ),
+    );
+  }
   deps.analytics?.capture(
     actor.userId,
     { name: "message_sent", trigger: "user" },

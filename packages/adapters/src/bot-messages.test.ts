@@ -31,6 +31,8 @@ function deps(
     uniqueConflictOnCommit?: boolean;
     transactionConflictOnce?: boolean;
     deletingSpace?: boolean;
+    /** Message ids returned by successive creates; the last id repeats. */
+    messageIds?: string[];
   } = {},
 ) {
   const enqueue = vi.fn().mockResolvedValue(undefined);
@@ -42,6 +44,13 @@ function deps(
         ? (options.alreadyDelivered ?? null)
         : { blocks: options.hopBlocks ?? [] },
     );
+  const messageIds = options.messageIds ?? ["message-1"];
+  let messageCreateCount = 0;
+  const messageCreate = vi.fn(async (_args: unknown) => {
+    const id = messageIds[Math.min(messageCreateCount, messageIds.length - 1)]!;
+    messageCreateCount += 1;
+    return { id, seq: messageCreateCount };
+  });
   const tx = {
     $queryRaw: vi.fn().mockResolvedValue([{ id: "thread" }]),
     $executeRaw: vi.fn().mockResolvedValue(0),
@@ -64,7 +73,10 @@ function deps(
     task: { create: vi.fn().mockResolvedValue({ id: "task-1" }) },
     message: {
       findUnique: messageFindUnique,
-      create: vi.fn().mockResolvedValue({ id: "message-1", seq: 1 }),
+      findFirst: vi.fn(async (args: { where?: { id?: string } }) =>
+        args?.where?.id ? { id: args.where.id } : null,
+      ),
+      create: messageCreate,
       update: vi.fn().mockResolvedValue({}),
     },
     event: { create: vi.fn().mockResolvedValue({ seq: 7 }) },
@@ -160,6 +172,59 @@ describe("messaging another bot", () => {
     expect(harness.tx.message.create).toHaveBeenCalledTimes(2);
     expect(harness.unreadMarks()).toHaveLength(0);
     expect(harness.enqueue).toHaveBeenCalledTimes(1);
+  });
+
+  it("names the delivered message and says whether it was delivered", async () => {
+    const harness = deps();
+    const sent = await messageBot(harness.deps, run, sender, {
+      bot_id: "bot-target",
+      message: "chart the q3 numbers",
+    });
+
+    expect(sent).toMatchObject({
+      ok: true,
+      status: "delivered",
+      messageId: "message-1",
+      botId: "bot-target",
+    });
+  });
+
+  it("answers a specific message in the recipient's chat as a reply", async () => {
+    const harness = deps({ messageIds: ["message-outbound", "message-inbound"] });
+    await messageBot(harness.deps, run, sender, {
+      bot_id: "bot-target",
+      message: "the chart is attached",
+      intent: "result",
+      replyToId: "message-in-target",
+    });
+
+    const inbound = harness.tx.message.create.mock.calls.at(-1)?.[0] as {
+      data: { replyToMessageId?: string };
+    };
+    expect(inbound.data.replyToMessageId).toBe("message-in-target");
+    const task = harness.tx.task.create.mock.calls[0]?.[0] as {
+      data: { prompt: string };
+    };
+    expect(task.data.prompt).toContain('reply_to_message_id "message-outbound"');
+    expect(task.data.prompt).not.toContain("message-inbound");
+  });
+
+  it("refuses a reply to a message the recipient cannot see", async () => {
+    const harness = deps();
+    harness.tx.message.findFirst.mockResolvedValueOnce(null);
+    const sent = await messageBot(harness.deps, run, sender, {
+      bot_id: "bot-target",
+      message: "the chart is attached",
+      replyToId: "message-in-another-chat",
+    });
+
+    expect(sent).toEqual({
+      ok: false,
+      error: "reply_to_message_id does not name a message in Analyst's chat",
+    });
+    expect(harness.tx.message.create).not.toHaveBeenCalled();
+    expect(harness.tx.task.create).not.toHaveBeenCalled();
+    expect(harness.tx.run.create).not.toHaveBeenCalled();
   });
 
   it("puts sent files on the recipient's message, and only the text in the sender's echo", async () => {
@@ -624,7 +689,13 @@ describe("hardening", () => {
       deliveryKey: "call-1",
     });
 
-    expect(sent).toMatchObject({ ok: true, replayed: true, botId: "bot-target" });
+    expect(sent).toMatchObject({
+      ok: true,
+      status: "duplicate",
+      replayed: true,
+      botId: "bot-target",
+      messageId: "message-1",
+    });
     expect(harness.tx.run.create).not.toHaveBeenCalled();
     expect(harness.enqueue).not.toHaveBeenCalled();
   });
@@ -677,7 +748,13 @@ describe("hardening", () => {
       deliveryKey: "call-1",
     });
 
-    expect(sent).toMatchObject({ ok: true, replayed: true, botId: "bot-target" });
+    expect(sent).toMatchObject({
+      ok: true,
+      status: "duplicate",
+      replayed: true,
+      botId: "bot-target",
+      messageId: "message-winner",
+    });
     expect(harness.enqueue).not.toHaveBeenCalled();
     expect(harness.notify).not.toHaveBeenCalled();
   });

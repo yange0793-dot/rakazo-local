@@ -14,6 +14,7 @@ import Animated, {
 } from "react-native-reanimated";
 import { rpc } from "../../lib/api";
 import { mobileTokens } from "../../lib/appearance";
+import type { MobileArtifactTarget } from "../../lib/artifact-open";
 import type { MobileBot, MobileSnapshot } from "../../lib/mobile-types";
 import { useResolvedAppearance } from "../../lib/native";
 import type { UserBubble } from "../../lib/user-bubble";
@@ -45,8 +46,8 @@ type SpecialMessageCardProps = {
   onOpenBot: (botId: string, name: string) => void;
   onHelperToggle?: MessageRowActions["helperToggle"];
   userBubble?: UserBubble;
-  /** A background helper's card: the bot chat and card message that Stop names. */
-  stopHelper?: { botId: string; messageId: string };
+  /** A background helper's card: the chat and card message that Stop names. */
+  stopHelper?: MobileArtifactTarget & { messageId: string };
 };
 
 function HelperMessageCard({
@@ -78,7 +79,8 @@ function HelperMessageCard({
   }));
   const [stopping, setStopping] = useState(false);
   const running = special.status === "running";
-  const { stopped, failed, body } = helperCardState(special);
+  const { stopped, failed, waiting, body } = helperCardState(special);
+  const active = running || waiting;
   return (
     <Pressable
       {...actionProps}
@@ -138,7 +140,7 @@ function HelperMessageCard({
               style={{
                 color: failed
                   ? tokens.destructive
-                  : running
+                  : active
                     ? tokens.warning
                     : stopped
                       ? tokens.mutedForeground
@@ -148,13 +150,15 @@ function HelperMessageCard({
             >
               {running
                 ? t`Running`
-                : stopped
-                  ? t`Stopped`
-                  : special.status === "failed"
-                    ? t`Failed`
-                    : special.status === "completed"
-                      ? t`Completed`
-                      : special.status}
+                : waiting
+                  ? t`Waiting`
+                  : stopped
+                    ? t`Stopped`
+                    : special.status === "failed"
+                      ? t`Failed`
+                      : special.status === "completed"
+                        ? t`Completed`
+                        : special.status}
             </Text>
             <Animated.View style={helperChevronStyle}>
               <NativeSymbol
@@ -175,7 +179,7 @@ function HelperMessageCard({
           ) : null}
         </View>
       </Pressable>
-      {running && stopHelper ? (
+      {active && stopHelper ? (
         <NativeActionButton
           label={t`Stop`}
           prominence="secondary"

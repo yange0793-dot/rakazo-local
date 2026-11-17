@@ -19,7 +19,6 @@ import {
   groupBotsForSidebar,
   isActive,
   isRunWorking,
-  newClientId,
   otherAuthor,
   workingRoutineName,
 } from "@rakazo/core";
@@ -64,7 +63,6 @@ import { createSpaceRpc, selectedSpaceId } from "../lib/rpc";
 import { markShellReady, useSpaceEpoch } from "../lib/space-switch";
 import { toolActivityPreference } from "../lib/tool-activity-preference";
 import { useDesktopBadge } from "../lib/use-desktop-badge";
-import { errorText } from "../lib/user-error";
 import { HostComputerPrompt } from "./HostComputerPrompt";
 import { RoutineList } from "./RoutineList";
 import { ArchivedChats } from "./shell/archived-chats";
@@ -74,7 +72,6 @@ import { ChatHeader } from "./shell/chat-header";
 import { FALLBACK_BOT_COLOR } from "./shell/chat-shared";
 import { Composer } from "./shell/composer";
 import { ComputerOverlay } from "./shell/computer-overlay";
-import { ComputerPanel } from "./shell/computer-panel";
 import type { CreateBotDialogInput } from "./shell/create-bot-dialog";
 import type { ImportSetupTarget } from "./shell/import-setup-card";
 import { KeyboardShortcutsDialog } from "./shell/keyboard-shortcuts-dialog";
@@ -305,17 +302,6 @@ function SpaceShell() {
   activeGroupId.current = groupId;
   const computerState = useComputerState({ rpc, panel, activeId: active?.id, activeBotId });
   const { computer, computerOpen, setComputerOpen, booting, commitComputer } = computerState;
-  const [cleaningUpDisk, setCleaningUpDisk] = useState(false);
-  const dismissDiskWarning = (botId: string) => {
-    const current = computerState.computerRef.current;
-    if (current?.botId === botId) commitComputer({ ...current, diskFullPercent: undefined });
-    const cached = computerState.computerCacheRef.current.get(botId)?.computer;
-    if (cached)
-      computerState.cacheComputerFor(botId, {
-        computer: { ...cached, diskFullPercent: undefined },
-      });
-    return rpc.computer.dismissDiskWarning({ botId }).catch(() => undefined);
-  };
   useReportedUiLocale(rpc, bootstrapMe?.locale);
   const cycleBots = useMemo(
     () =>
@@ -1169,7 +1155,7 @@ function SpaceShell() {
                 const failedBotId =
                   inGroup && composer.displayedRunError ? activeSnapshot?.run?.botId : null;
                 if (active && !inGroup) {
-                  setPanel("settings");
+                  setPanel("computer");
                   setModelFocusRequest(Date.now());
                 } else if (failedBotId) {
                   openChatSettings("bot", failedBotId);
@@ -1242,55 +1228,6 @@ function SpaceShell() {
         computer={computer}
         computerOpen={computerOpen}
         booting={booting}
-        computerPanel={
-          active ? (
-            <ComputerPanel
-              bot={active}
-              computer={computer}
-              computerOpen={computerOpen}
-              embeddedScreenUrl={computerControls.embeddedScreenUrl}
-              screenFrameKey={computerState.screenFrameKey}
-              heldScreen={computerState.heldScreen}
-              screenFrameRef={computerState.setScreenFrame}
-              computerScreenError={computerControls.computerScreenError}
-              computerBooting={computerControls.computerBooting}
-              booting={booting}
-              showingRecoveryHint={computerControls.showingRecoveryHint}
-              showComputerRecoveryHint={computerControls.showComputerRecoveryHint}
-              sandboxProvider={bootstrapMe?.sandboxProvider}
-              onRecovered={(sandboxProvider) => {
-                setBootstrapMe((prev) => (prev ? { ...prev, sandboxProvider } : prev));
-                computerControls.holdComputerRecovery();
-              }}
-              onRecoveryDismissed={computerControls.releaseComputerRecovery}
-              onOpenComputerSettings={
-                bootstrapMe?.computerSettingsEnabled === true
-                  ? () => openSettings("computer")
-                  : undefined
-              }
-              onOpen={() => void openComputer()}
-              cleaningUpDisk={cleaningUpDisk}
-              onCleanUpDisk={() => {
-                const botId = active.id;
-                setCleaningUpDisk(true);
-                void rpc.threads
-                  .send({
-                    botId,
-                    clientNonce: newClientId(),
-                    text: t`Your computer's disk is nearly full. Free up space by removing build output and caches you no longer need.`,
-                  })
-                  .then(async () => {
-                    // The refresh must read the dismissal, or it would paint the warning again.
-                    await dismissDiskWarning(botId);
-                    void refreshThread(botId);
-                  })
-                  .catch((error: unknown) => composer.setSendError(errorText(error)))
-                  .finally(() => setCleaningUpDisk(false));
-              }}
-              onDismissDiskWarning={() => void dismissDiskWarning(active.id)}
-            />
-          ) : null
-        }
         routinesPanel={
           <RoutineList
             routines={activeRoutines}

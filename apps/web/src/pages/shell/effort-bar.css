@@ -1,0 +1,192 @@
+.effort-bar {
+  min-width: 0;
+}
+
+.effort-axis {
+  display: flex;
+  justify-content: space-between;
+  margin: 12px 7% 0;
+}
+
+.effort-control {
+  position: relative;
+  height: 28px;
+  border-radius: 4px;
+}
+
+.effort-control:has(input:focus-visible) {
+  outline: 2px solid var(--ring);
+  outline-offset: 2px;
+}
+
+.effort-track {
+  position: absolute;
+  inset: 50% var(--effort-inset) auto;
+  height: 1px;
+  background: color-mix(in oklab, var(--foreground) 36%, transparent);
+}
+
+.effort-cursor {
+  position: absolute;
+  z-index: 1;
+  inset: 0 auto 0 0;
+  width: var(--effort-step);
+  pointer-events: none;
+  transition: transform 220ms cubic-bezier(0.16, 1, 0.3, 1);
+}
+
+.effort-pointer {
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  width: 0;
+  height: 0;
+  border-right: 4px solid transparent;
+  border-bottom: 8px solid var(--foreground);
+  border-left: 4px solid transparent;
+  transform: translate(-50%, -50%);
+  transition: scale 160ms ease-out;
+}
+
+.effort-control input {
+  position: absolute;
+  inset: 0 auto 0 calc(var(--effort-inset) - 8px);
+  width: calc(100% - var(--effort-step) + 16px);
+  height: 100%;
+  margin: 0;
+  appearance: none;
+  opacity: 0;
+  cursor: default;
+  touch-action: none;
+}
+
+.effort-control input::-webkit-slider-thumb {
+  width: 16px;
+  height: 28px;
+  appearance: none;
+}
+
+.effort-control input::-moz-range-thumb {
+  width: 16px;
+  height: 28px;
+  border: 0;
+}
+
+.effort-bar[data-dragging="true"] .effort-cursor {
+  transition-duration: 60ms;
+}
+
+.effort-bar[data-dragging="true"] .effort-pointer {
+  scale: 1.2;
+}
+
+.effort-stops {
+  display: grid;
+  grid-template-columns: repeat(var(--effort-count), minmax(0, 1fr));
+}
+
+.effort-stops button {
+  position: relative;
+  min-width: 0;
+  min-height: 28px;
+  padding: 0 0 6px;
+  overflow-wrap: anywhere;
+  color: var(--muted-foreground);
+  cursor: pointer;
+  transition: color 160ms ease-out;
+}
+
+.effort-stop-hit {
+  position: absolute;
+  top: -28px;
+  left: 50%;
+  display: grid;
+  width: 32px;
+  height: 28px;
+  transform: translateX(-50%);
+  place-items: center;
+}
+
+.effort-stop-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--muted-foreground);
+  transition:
+    background-color 160ms ease-out,
+    scale 160ms ease-out;
+}
+
+.effort-stops button:hover .effort-stop-dot,
+.effort-stops button[aria-pressed="true"] .effort-stop-dot {
+  background: currentColor;
+  scale: 1.2;
+}
+
+.effort-stops button:hover,
+.effort-stops button[aria-pressed="true"] {
+  color: color-mix(in oklab, var(--effort-color, var(--foreground)) 65%, var(--foreground));
+}
+
+.effort-stops button[aria-pressed="true"] {
+  font-weight: 700;
+}
+
+.effort-bar[data-disabled="true"] {
+  opacity: 0.6;
+}
+
+.effort-bar[data-disabled="true"] :is(input, button) {
+  cursor: default;
+}
+
+/* The paint stops at the body; eyes and shape geometry are untouched. */
+.bot-effort-preview[data-active="true"]
+  :is(
+    .rakazo-organic-avatar-body,
+    .bot-avatar-container > svg > g > path,
+    .logo-avatar-art > path
+  ) {
+  fill: var(--effort-body-paint);
+}
+
+.effort-sparkle {
+  top: 3px;
+  left: calc(50% + 33px);
+  opacity: 0.85;
+}
+
+.bot-effort-preview[data-moving="true"] .effort-sparkle {
+  animation: effort-sparkle 3.072s steps(1, end) infinite;
+}
+
+@keyframes effort-sparkle {
+  0%,
+  12.5%,
+  100% {
+    opacity: 0.85;
+  }
+  4.167% {
+    opacity: 1;
+  }
+  20.833%,
+  83.333% {
+    opacity: 0.55;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .effort-cursor,
+  .effort-pointer,
+  .effort-stop-dot {
+    transition: none;
+  }
+
+  .effort-bar[data-dragging="true"] .effort-pointer {
+    scale: 1;
+  }
+
+  .bot-effort-preview[data-moving="true"] .effort-sparkle {
+    animation: none;
+  }
+}

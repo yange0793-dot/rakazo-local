@@ -9,8 +9,11 @@ import type {
   ThinkingLevel,
 } from "@rakazo/contracts";
 import { BOT_NAME_MAX_LENGTH, isBuiltinToolName, resolveBotAvatarSet } from "@rakazo/contracts";
+import type { ChatModelChoice } from "@rakazo/core";
 import {
+  botLookState,
   chatModelChoices,
+  clampCatalogThinkingLevel,
   connectedModelChoices,
   credentialForModel,
   modelOptionKey,
@@ -19,8 +22,8 @@ import {
 } from "@rakazo/core";
 import { Button, Input, Tabs, TabsContent, TabsList, TabsTrigger } from "@rakazo/ui-web";
 import { useQuery } from "@tanstack/react-query";
-import { Mail } from "lucide-react";
-import type { ReactNode } from "react";
+import { Cloud, Mail } from "lucide-react";
+import type { CSSProperties, ReactNode } from "react";
 import { Suspense, useEffect, useId, useRef, useState } from "react";
 import { BotEmailAddressField } from "../../components/BotEmailAddressField";
 import { ErrorBoundary, SectionLoadFailed } from "../../components/ErrorBoundary";
@@ -29,6 +32,7 @@ import { PagesList } from "../../components/pages/PagesList";
 import { botProfilePatch } from "../../lib/bot-profile-patch";
 import { lazyComponent } from "../../lib/preload-recovery";
 import { useSpaceQueries } from "../../lib/query";
+import { useSpaceRpc } from "../../lib/space-rpc";
 import { errorText } from "../../lib/user-error";
 import { AvatarStudioPopover } from "./avatar-studio-popover";
 import {
@@ -42,6 +46,7 @@ import {
   ToolsGroup,
   VoiceGroup,
 } from "./bot-settings-sections";
+import { EffortAvatar } from "./effort-avatar";
 
 const ScratchpadSection = lazyComponent(() =>
   import("../ScratchpadSection").then((module) => module.ScratchpadSection),
@@ -65,12 +70,34 @@ function advancedValues(bot: Bot) {
 
 export type BotPanelTab = "computer" | "routines" | "pages" | "settings";
 
-/** A bot's profile above its Computer, Routines, Pages and Advanced tabs. */
+const BOX_COMPUTER_VIEW_URL = "https://box.simular.ai/box/cb-372272703d21/live";
+
+/** The cloud desktop lives outside this app's window; the card is only a way in. */
+function CloudComputerCard() {
+  return (
+    <section>
+      <div className="flex items-center justify-between gap-3 rounded-xl bg-muted/50 p-4">
+        <span className="flex items-center gap-2 text-body text-foreground">
+          <Cloud className="size-4 text-muted-foreground" aria-hidden />
+          <Trans>Cloud computer</Trans>
+        </span>
+        <Button
+          variant="secondary"
+          size="sm"
+          onClick={() => window.open(BOX_COMPUTER_VIEW_URL, "_blank", "noopener,noreferrer")}
+        >
+          <Trans>Open live desktop</Trans>
+        </Button>
+      </div>
+    </section>
+  );
+}
+
+/** A bot's profile above its Model, Routines, Pages and Advanced tabs. */
 export function BotSettings({
   bot,
   tab = "settings",
   onTabChange,
-  computer,
   routines,
   memoryProviderConfigured,
   onSave,
@@ -82,7 +109,6 @@ export function BotSettings({
   bot: Bot;
   tab?: BotPanelTab;
   onTabChange?: (tab: BotPanelTab) => void;
-  computer?: ReactNode;
   routines?: ReactNode;
   focusModel?: number;
   onOpenConnections?: () => void;
@@ -115,12 +141,6 @@ export function BotSettings({
   const { t } = useLingui();
   const ids = useId();
   const modelRef = useRef<HTMLDivElement>(null);
-  useEffect(() => {
-    if (focusModel && tab === "settings") {
-      modelRef.current?.scrollIntoView?.({ block: "nearest" });
-      modelRef.current?.querySelector<HTMLElement>('[id$="-model"]')?.focus();
-    }
-  }, [tab, focusModel]);
   const [name, setName] = useState(bot.name);
   const savedNameRef = useRef(bot.name);
   const [description, setDescription] = useState(bot.description);
@@ -176,6 +196,7 @@ export function BotSettings({
   }, [bot.disabledBuiltinTools]);
   // Shared with the model and voice settings, so a revisit paints at once and refreshes behind.
   const queries = useSpaceQueries();
+  const spaceRpc = useSpaceRpc();
   const refresh = { refetchOnMount: "always" } as const;
   const voices = useQuery({ ...queries.voice.voices.queryOptions({ input: {} }), ...refresh }).data;
   const credentialsQuery = useQuery({ ...queries.models.credentials.queryOptions(), ...refresh });
@@ -184,11 +205,27 @@ export function BotSettings({
   const credentials = credentialsQuery.data ?? NO_CREDENTIALS;
   const catalog = catalogQuery.data ?? NO_CATALOG;
   const me = meQuery.data ?? null;
+  const mainRoleInput = {
+    role: "main" as const,
+    expectedUserId: me?.userId,
+    scope: "account" as const,
+  };
+  const mainRoleQuery = useQuery({
+    queryKey: queries.models.role.queryKey({ input: mainRoleInput }),
+    queryFn: () => spaceRpc.models.role(mainRoleInput),
+    enabled: Boolean(me),
+  });
   // A failed catalog load must not clear an existing thinkingLevel override on save.
   const modelMetaReady =
     credentialsQuery.data !== undefined &&
     catalogQuery.data !== undefined &&
     meQuery.data !== undefined;
+  useEffect(() => {
+    if (focusModel && tab === "computer" && modelMetaReady) {
+      modelRef.current?.scrollIntoView?.({ block: "nearest" });
+      modelRef.current?.querySelector<HTMLElement>('[id$="-model"]')?.focus();
+    }
+  }, [tab, focusModel, modelMetaReady]);
   const [saving, setSaving] = useState(false);
   const [savedAdvanced, setSavedAdvanced] = useState(() => JSON.stringify(advancedValues(bot)));
   const advancedSnapshot = JSON.stringify([
@@ -228,7 +265,9 @@ export function BotSettings({
   // newer (a roster read from before a save) is ignored.
   const shownBotRef = useRef(bot);
   useEffect(() => {
-    if (bot.updatedAt <= shownBotRef.current.updatedAt) return;
+    const revision = bot.settingsUpdatedAt ?? bot.updatedAt;
+    const previous = shownBotRef.current;
+    if (revision <= (previous.settingsUpdatedAt ?? previous.updatedAt)) return;
     shownBotRef.current = bot;
     if (name.trim() === savedNameRef.current.trim()) setName(bot.name);
     savedNameRef.current = bot.name;
@@ -271,12 +310,103 @@ export function BotSettings({
   const defaultEntry = me?.defaultModel
     ? catalogEntry(catalog, me.defaultProvider, me.defaultModel)
     : undefined;
+  const defaultModelKey =
+    me?.defaultProvider && me?.defaultModel
+      ? modelOptionKey(me.defaultProvider, me.defaultModel)
+      : "";
   const modelChoices = chatModelChoices(
     connectedOptions,
-    selectedModelKey,
+    selectedModelKey || defaultModelKey,
     t`Space default`,
     defaultEntry?.images,
-  );
+  ).filter((choice) => choice.key !== "");
+
+  // The starred model runs every bot that chose none; it is the space's main model.
+  async function setDefaultModel(choice: ChatModelChoice) {
+    if (!me || !choice.provider || !choice.modelId) return;
+    await spaceRpc.models.setRole({
+      role: "main",
+      scope: "account",
+      expectedUserId: me.userId,
+      primary: { provider: choice.provider, modelId: choice.modelId },
+    });
+    await meQuery.refetch();
+  }
+
+  const [pendingEffort, setPendingEffort] = useState<ThinkingLevel | null>(null);
+  const [pendingModel, setPendingModel] = useState(false);
+  const [effortPreview, setEffortPreview] = useState<ThinkingLevel | null>(null);
+  const effortColor = botLookState(color).color;
+
+  async function setModel(key: string) {
+    if (pendingModel || pendingEffort !== null || saving || !modelMetaReady) return;
+    const next = parseModelOptionKey(key);
+    if (!next) return;
+    setPendingModel(true);
+    setError(null);
+    setModelKey(key);
+    setThinkingLevel("");
+    try {
+      await onSave({
+        modelProvider: next.provider,
+        modelId: next.modelId,
+        thinkingLevel: null,
+      });
+      setSavedAdvanced((previous) => {
+        const saved = JSON.parse(previous) as unknown[];
+        saved[0] = key;
+        saved[1] = "";
+        return JSON.stringify(saved);
+      });
+    } catch (cause) {
+      setModelKey(modelKey);
+      setThinkingLevel(thinkingLevel);
+      setError(errorText(cause, t`Could not save`));
+    } finally {
+      setPendingModel(false);
+    }
+  }
+
+  async function setEffort(level: ThinkingLevel) {
+    const primary = mainRoleQuery.data?.primary;
+    if (!me || pendingModel || pendingEffort !== null || !thinkingOptions.includes(level)) return;
+    setPendingEffort(level);
+    setError(null);
+    try {
+      if (selectedModel || thinkingLevel || !primary || !usesMainModel) {
+        await onSave({
+          modelProvider: selectedModel?.provider ?? null,
+          modelId: selectedModel?.modelId ?? null,
+          thinkingLevel: level,
+        });
+        setThinkingLevel(level);
+        setSavedAdvanced((previous) => {
+          const saved = JSON.parse(previous) as unknown[];
+          saved[0] = modelKey;
+          saved[1] = level;
+          return JSON.stringify(saved);
+        });
+      } else {
+        await spaceRpc.models.setRole({
+          role: "main",
+          scope: "account",
+          expectedUserId: me.userId,
+          primary: { ...primary, thinkingLevel: level },
+        });
+      }
+    } catch (cause) {
+      setError(errorText(cause));
+    } finally {
+      await Promise.all([
+        mainRoleQuery.refetch(),
+        credentialsQuery.refetch(),
+        catalogQuery.refetch(),
+        meQuery.refetch(),
+      ]);
+      setPendingEffort(null);
+      setEffortPreview(null);
+    }
+  }
 
   const effectiveProvider = selectedModel?.provider ?? me?.defaultProvider ?? null;
   const effectiveModelId = selectedModel?.modelId ?? me?.defaultModel ?? null;
@@ -288,13 +418,36 @@ export function BotSettings({
             resolveSelectableModelId(catalog, entry.provider, entry.id) === effectiveModelId,
         )
       : undefined;
-  const effectiveCredential = credentialForModel(credentials, effectiveProvider, effectiveModelId);
-  const thinkingOptions = (
-    effectiveCredential?.thinkingLevels ??
+  const effectiveCredential =
+    credentialForModel(credentials, effectiveProvider, effectiveModelId) ??
+    credentials.find(
+      (credential) =>
+        credential.provider === effectiveProvider &&
+        effectiveModelId &&
+        credential.catalogSource?.unavailableModelIds.includes(effectiveModelId),
+    );
+  const modelUnavailable = Boolean(
+    effectiveCredential?.catalogSource &&
+      (!effectiveCredential.catalogSource.available ||
+        (effectiveModelId &&
+          effectiveCredential.catalogSource.unavailableModelIds.includes(effectiveModelId))),
+  );
+  const thinkingOptions: readonly ThinkingLevel[] = (
     effectiveEntry?.thinkingLevels ??
+    effectiveCredential?.thinkingLevels ??
     []
   ).filter((level) => level !== "off");
-  const defaultThinkingLevel = effectiveCredential?.thinkingLevel ?? "medium";
+  const primary = mainRoleQuery.data?.primary;
+  const usesMainModel =
+    primary?.provider === effectiveProvider && primary?.modelId === effectiveModelId;
+  const effortLevel =
+    pendingEffort ??
+    ((thinkingLevel || null) as ThinkingLevel | null) ??
+    (usesMainModel ? primary?.thinkingLevel : null) ??
+    effectiveCredential?.thinkingLevel ??
+    "medium";
+  const effectiveEffort = clampCatalogThinkingLevel(effortLevel, thinkingOptions);
+  const glowLevel = effortPreview ?? (effectiveEffort as ThinkingLevel | null) ?? "off";
 
   async function executeSave(
     patchOverrides?: {
@@ -494,9 +647,9 @@ export function BotSettings({
   }
 
   return (
-    <div data-testid="bot-settings">
+    <div data-testid="bot-settings" style={{ "--effort-color": effortColor } as CSSProperties}>
       <div data-testid="bot-profile-header" className="flex flex-col items-center pb-5 text-center">
-        <div className="flex justify-center pb-4">
+        <EffortAvatar color={effortColor} level={glowLevel} active={tab === "computer"}>
           <AvatarStudioPopover
             value={color}
             identity={bot.id}
@@ -512,7 +665,7 @@ export function BotSettings({
               });
             }}
           />
-        </div>
+        </EffortAvatar>
         <InlineProfileField
           label={t`Name`}
           editLabel={t`Edit name`}
@@ -530,7 +683,7 @@ export function BotSettings({
       <Tabs value={tab} onValueChange={(next) => onTabChange?.(next as BotPanelTab)}>
         <TabsList className="w-full">
           <TabsTrigger value="computer">
-            <Trans>Computer</Trans>
+            <Trans>Model</Trans>
           </TabsTrigger>
           <TabsTrigger value="routines">
             <Trans>Routines</Trans>
@@ -543,7 +696,28 @@ export function BotSettings({
           </TabsTrigger>
         </TabsList>
         <TabsContent value="computer" className="pt-4">
-          {computer}
+          <div className="space-y-4">
+            <ModelSection
+              ids={ids}
+              containerRef={modelRef}
+              onOpenConnections={onOpenConnections}
+              choices={modelChoices}
+              value={selectedModelKey || defaultModelKey}
+              onModelChange={(key) => void setModel(key)}
+              modelDisabled={pendingModel || pendingEffort !== null || saving || !modelMetaReady}
+              modelSaving={pendingModel}
+              modelLoading={!modelMetaReady}
+              effortLevel={effortLevel}
+              effortLevels={thinkingOptions}
+              modelUnavailable={modelUnavailable}
+              onEffortChange={(level) => void setEffort(level)}
+              onEffortPreview={setEffortPreview}
+              effortDisabled={pendingModel || pendingEffort !== null || !me || !modelMetaReady}
+              defaultModelKey={defaultModelKey}
+              onSetDefaultModel={(choice) => void setDefaultModel(choice)}
+            />
+            <CloudComputerCard />
+          </div>
         </TabsContent>
         <TabsContent value="routines" className="pt-4">
           {routines}
@@ -572,21 +746,6 @@ export function BotSettings({
             </Suspense>
           </ErrorBoundary>
           <div className="space-y-6 pt-6">
-            <ModelSection
-              ids={ids}
-              containerRef={modelRef}
-              onOpenConnections={onOpenConnections}
-              choices={modelChoices}
-              value={selectedModelKey}
-              onModelChange={(key) => {
-                setModelKey(key);
-                setThinkingLevel("");
-              }}
-              thinkingOptions={thinkingOptions}
-              thinkingLevel={thinkingLevel}
-              defaultThinkingLevel={defaultThinkingLevel}
-              onThinkingLevelChange={setThinkingLevel}
-            />
             <ComputerGroup
               computerMode={computerMode}
               onComputerModeChange={setComputerMode}
@@ -673,7 +832,11 @@ export function BotSettings({
           ) : null}
         </TabsContent>
       </Tabs>
-      {error ? <p className="mt-2 text-body-sm text-destructive">{error}</p> : null}
+      {error ? (
+        <p className="mt-2 text-body-sm text-destructive" role="alert">
+          {error}
+        </p>
+      ) : null}
     </div>
   );
 }

@@ -20,6 +20,7 @@ import { SETTINGS_CONTENT_WIDTH } from "../components/SettingsRows";
 import { useSpaceRpc } from "../lib/space-rpc";
 import { errorText } from "../lib/user-error";
 import { SpaceMemorySection } from "./KnowledgeSection";
+import { SemanticFactsSection } from "./SemanticFactsSection";
 import type { MemoryProviderConnectionDraft } from "./memory-providers/registry";
 import {
   defaultMemoryProviderSettings,
@@ -85,6 +86,7 @@ export function MemorySettingsOverlay({
   );
   const [pending, setPending] = useState<"connect" | "disconnect" | "scope" | null>(null);
   const [addingProvider, setAddingProvider] = useState(false);
+  const [factsBusy, setFactsBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
@@ -99,15 +101,15 @@ export function MemorySettingsOverlay({
   }, [config, defaultRegistration.id, selectedProvider]);
 
   const registration = memoryProviderSettings(config?.provider ?? selectedProvider);
-  const busy = pending !== null;
+  const busy = pending !== null || factsBusy;
 
   useEffect(() => {
+    onBusyChange?.(busy);
     return () => onBusyChange?.(false);
-  }, [onBusyChange]);
+  }, [busy, onBusyChange]);
 
   function markPending(next: "connect" | "disconnect" | "scope" | null) {
     setPending(next);
-    onBusyChange?.(next !== null);
   }
 
   async function connect(draft: MemoryProviderConnectionDraft) {
@@ -207,6 +209,11 @@ export function MemorySettingsOverlay({
                   onChange={(scope) => void updateDefaultScope(scope)}
                 />
               </div>
+              <SemanticFactsSection
+                key={config.provider}
+                disabled={pending !== null}
+                onBusyChange={setFactsBusy}
+              />
               <Button
                 variant="outline"
                 type="button"
@@ -235,9 +242,6 @@ export function MemorySettingsOverlay({
               <SectionHeading id={providerSelectId} variant="heading">
                 <Trans>Provider</Trans>
               </SectionHeading>
-              <p className="mt-1 text-body-sm text-muted-foreground">
-                <Trans>Lets bots save and recall facts by meaning, alongside MEMORY.md.</Trans>
-              </p>
               {MEMORY_PROVIDER_SETTINGS.length > 1 ? (
                 <div className="mt-3">
                   <NativeSelect

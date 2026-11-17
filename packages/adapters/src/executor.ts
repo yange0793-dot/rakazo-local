@@ -84,17 +84,19 @@ import {
   persistLivePluginConnections,
   selectRunConnections,
 } from "./connection-context.js";
+import { sanitizeConnectorError } from "./connector-safety.js";
 import { formatCurrentTimeInstruction } from "./current-time.js";
 import { resolveDeploymentModel } from "./deployment-model.js";
 import type { ExecutorDeps } from "./executor-deps.js";
 import type { FleetRun } from "./fleet-tools.js";
 import { loadBotGroupDirectory, loadGroupContext } from "./group-handoff.js";
+import { groupTurnBlocked, retryGroupTurnLater } from "./group-turn.js";
 import {
+  buildRecalledMemory,
   formatCompactedSummary,
   formatRecalledMemory,
   historyWindowSize,
   LEGACY_HISTORY_WINDOW_SIZE,
-  MAX_RECALLED_MEMORIES,
   selectCompactedHistory,
 } from "./history-compaction.js";
 import {
@@ -183,7 +185,7 @@ import {
   selectBuiltinToolsForRun,
 } from "./run-tool-selection.js";
 import { applyTool } from "./run-tools.js";
-import { historyMyChatsAllowed } from "./run-tools-memory.js";
+import { historyMyChatsAllowed, semanticRecallForRun } from "./run-tools-memory.js";
 import type { UserComputerState } from "./run-tools-user-computer.js";
 import { USER_COMPUTER_SHELL_TOOL, userComputerOwner } from "./run-tools-user-computer.js";
 import { createRunTrustLoaders } from "./run-trust.js";
@@ -225,6 +227,14 @@ import { appendToolCompletionAudit, toolCompletionOutcome } from "./tool-complet
 import { toolResultFingerprint } from "./tool-loop.js";
 import { restoreTurnCheckpoint } from "./turn-checkpoint.js";
 import { createWebProvider } from "./web-provider-factory.js";
+
+/** A helper asked for the bot's computer while another run held it: a tool error, not a run failure. */
+export class ComputerBusyToolError extends Error {
+  constructor() {
+    super("The bot's computer is busy with another run right now. Please try again in a moment.");
+    this.name = "ComputerBusyToolError";
+  }
+}
 
 /** Same reach as the MCP connector: usable servers assigned to the bot or shared with every bot. */
 async function verbatimMcpServersForRun(
@@ -318,6 +328,11 @@ export function createRunExecutor(executorDeps: ExecutorDeps) {
         if (await cancelDeactivatedAccountRuns(deps.prisma, deps.events, run.userId, runId)) return;
       }
       if (await cancelRunOfFormerMember(deps, run)) return;
+      // Only members of this message wait: their history must include earlier speakers' replies.
+      if (await groupTurnBlocked(deps.prisma, run)) {
+        await retryGroupTurnLater(deps.jobs, run.id);
+        return;
+      }
       let { resumeCheckpoint, heldForTakeover, takeoverResume } = takeoverContinuePlan(run);
 
       const claimed = await claimRun(deps, run, workerId);
@@ -332,10 +347,10 @@ export function createRunExecutor(executorDeps: ExecutorDeps) {
         },
       });
       if (!leaseTarget.computerId) throw new Error("Bot has no computer");
-      // A background helper never uses the computer, so it neither waits for a switch nor holds
-      // the bot's next turn.
-      const backgroundHelper = run.trigger === BACKGROUND_HELPER_TRIGGER;
-      if (leaseTarget.computerSwitching && !backgroundHelper) {
+      const computerId = leaseTarget.computerId;
+      // A helper holds the bot's computer only while it is actually using it: the lease, not
+      // the chat, is what makes simultaneous work wait.
+      if (run.trigger !== BACKGROUND_HELPER_TRIGGER && leaseTarget.computerSwitching) {
         await requeueComputerRun(deps, runId, workerId, fence, resumeCheckpoint, heldForTakeover);
         return;
       }
@@ -360,47 +375,62 @@ export function createRunExecutor(executorDeps: ExecutorDeps) {
         }
       }
       let computerLease: ComputerExecutionLease | null = null;
-      try {
-        computerLease = backgroundHelper
-          ? null
-          : await acquireComputerExecutionLease(deps.prisma, {
-              computerId: leaseTarget.computerId,
-              runId,
-              botId: run.botId,
-              workerId,
-              runFence: fence,
-            });
-        if (!computerLease && !backgroundHelper && leaseTarget.computer?.scope === "dedicated") {
-          computerLease = await acquireDedicatedScreenLeaseFence(deps.prisma, {
+      let deferComputerLease = run.trigger === BACKGROUND_HELPER_TRIGGER;
+      // A helper takes the computer only when a tool first uses it (see getRunComputer); every
+      // other run takes it before its first model call.
+      if (run.trigger !== BACKGROUND_HELPER_TRIGGER) {
+        try {
+          computerLease = await acquireComputerExecutionLease(deps.prisma, {
             computerId: leaseTarget.computerId,
             runId,
             botId: run.botId,
             workerId,
             runFence: fence,
           });
+          if (!computerLease && leaseTarget.computer?.scope === "dedicated") {
+            computerLease = await acquireDedicatedScreenLeaseFence(deps.prisma, {
+              computerId: leaseTarget.computerId,
+              runId,
+              botId: run.botId,
+              workerId,
+              runFence: fence,
+            });
+          }
+        } catch (error) {
+          if (!(error instanceof ComputerBusyError)) throw error;
+          // Maintenance or suspension sends no release, so only a held lease waits for one.
+          const heldByAnotherRun = await deps.prisma.computerExecutionLease.findFirst({
+            where: {
+              computerId: leaseTarget.computerId,
+              botId: run.botId,
+              runId: { not: runId },
+              expiresAt: { gt: new Date() },
+            },
+            select: { id: true, runId: true },
+          });
+          const holder = heldByAnotherRun
+            ? await deps.prisma.run.findUnique({
+                where: { id: heldByAnotherRun.runId },
+                select: { trigger: true },
+              })
+            : null;
+          if (holder?.trigger === BACKGROUND_HELPER_TRIGGER) {
+            // The helper owns the computer, not the conversation. Chat and memory can
+            // proceed; a later computer tool must still acquire the same lease.
+            deferComputerLease = true;
+          } else {
+            await requeueComputerRun(
+              deps,
+              runId,
+              workerId,
+              fence,
+              resumeCheckpoint,
+              heldForTakeover,
+              Boolean(heldByAnotherRun),
+            );
+            return;
+          }
         }
-      } catch (error) {
-        if (!(error instanceof ComputerBusyError)) throw error;
-        // Maintenance or suspension sends no release, so only a held lease waits for one.
-        const heldByAnotherRun = await deps.prisma.computerExecutionLease.findFirst({
-          where: {
-            computerId: leaseTarget.computerId,
-            botId: run.botId,
-            runId: { not: runId },
-            expiresAt: { gt: new Date() },
-          },
-          select: { id: true },
-        });
-        await requeueComputerRun(
-          deps,
-          runId,
-          workerId,
-          fence,
-          resumeCheckpoint,
-          heldForTakeover,
-          Boolean(heldByAnotherRun),
-        );
-        return;
       }
       let attempt: { id: string };
       // Resumed attempts keep the first start, so lateness reflects when the run began.
@@ -554,6 +584,7 @@ export function createRunExecutor(executorDeps: ExecutorDeps) {
           thread,
           messages,
           peerMessage,
+          sourceMessage,
           task,
           storedConnections,
           main,
@@ -581,6 +612,19 @@ export function createRunExecutor(executorDeps: ExecutorDeps) {
           run.trigger === "bot_message"
             ? loadBotMessageContext(deps.prisma, run.sourceMessageId)
             : Promise.resolve(undefined),
+          (run.trigger === "user" || run.trigger === "follow_up") && run.sourceMessageId
+            ? deps.prisma.message.findUnique({
+                where: { id: run.sourceMessageId, threadId: run.threadId },
+                select: {
+                  id: true,
+                  clientNonce: true,
+                  role: true,
+                  authorUserId: true,
+                  blocks: true,
+                  threadId: true,
+                },
+              })
+            : Promise.resolve(null),
           deps.prisma.task.findUniqueOrThrow({ where: { id: run.taskId } }),
           deps.prisma.connection.findMany({
             where: { userId: run.userId, spaceId: run.spaceId },
@@ -829,29 +873,38 @@ export function createRunExecutor(executorDeps: ExecutorDeps) {
             ? `Update from ${peerMessage.fromBotName}: ${peerMessage.text}`
             : DELEGATED_EMPTY_NOTICE
           : undefined;
-        const recallPromise =
-          threadContext.includeSemanticRecall &&
-          semanticMemory &&
-          memoryScope &&
-          thread.historyCompactedUpToSeq != null
-            ? semanticMemory.recall(
-                {
-                  query: task.prompt,
-                  scope: memoryScope,
-                  botId: bot.id,
-                  historyGeneration: thread.historyCompactionGeneration,
-                  limit: MAX_RECALLED_MEMORIES,
-                },
-                context,
-              )
-            : Promise.resolve(null);
+        const sourceHistoryIndex = messages.findIndex(
+          (message) => message.id === run.sourceMessageId,
+        );
+        const recallPromise = semanticRecallForRun(
+          {
+            provider: semanticMemory,
+            scope: memoryScope,
+            botId: bot.id,
+            run,
+            sourceMessage,
+            previousMessages:
+              sourceHistoryIndex < 0
+                ? []
+                : messages
+                    .slice(sourceHistoryIndex + 1)
+                    .filter((message) => message.steeringMessages.length === 0),
+            external: nonOwnerChatRun || Boolean(thread.externalConversationId),
+            includeSemanticRecall: threadContext.includeSemanticRecall,
+            prompt: task.prompt,
+            historyCompactedUpToSeq: thread.historyCompactedUpToSeq,
+            historyGeneration: thread.historyCompactionGeneration,
+            secrets: runSecrets,
+          },
+          context,
+        );
         const [
           discovered,
           currentTurnImages,
           memoryContext,
           scratchpadContext,
           ticketContext,
-          recalled,
+          automaticRecall,
         ] = await Promise.all([
           discoveredPromise,
           loadCurrentTurnImages(deps, turnBlocks, context),
@@ -873,22 +926,23 @@ export function createRunExecutor(executorDeps: ExecutorDeps) {
           recallPromise,
         ]);
         const semanticMemoryEnabled = Boolean(semanticMemory) && !nonOwnerChatRun;
-        let recalledMemory = "";
-        let recallSucceeded = false;
-        if (recalled) {
-          if (recalled.ok && recalled.value.length > 0) {
-            recallSucceeded = true;
-            recalledMemory = formatRecalledMemory(recalled.value);
-          } else if (!recalled.ok) {
-            getLogger().error("semantic memory recall failed", recalled.error);
-          }
+        const recalled = automaticRecall.response;
+        if (recalled && !recalled.ok) {
+          getLogger().error(
+            "semantic memory recall failed",
+            sanitizeConnectorError(recalled.error, runSecrets),
+          );
         }
+        // Early durable recall is not evidence that a legacy thread's missing history is covered.
+        // Only its existing compacted-recall path can select the smaller fallback window.
         if (!compactedHistory.usedLocalSummary) {
           history = history.slice(
             -historyWindowSize({
               semanticMemoryEnabled: semanticMemoryEnabled && !thread.historyCompactionSummary,
               compacted: thread.historyCompactedUpToSeq != null,
-              recallSucceeded,
+              recallSucceeded:
+                automaticRecall.origin === "compacted" &&
+                Boolean(recalled?.ok && formatRecalledMemory(recalled.value, runSecrets)),
             }),
           );
         }
@@ -1041,6 +1095,7 @@ export function createRunExecutor(executorDeps: ExecutorDeps) {
         const pendingTurnFiles: MessageBlock[][] = [turnBlocks ?? []];
         let copyingTurnFiles = Promise.resolve();
         // Serialize copies before each tool, including attachments received while a boot is in flight.
+        let computerLeaseSettled = false;
         const getRunComputer = async (reason: "tool" | "takeover" | "script", tool?: string) => {
           if (computerUse.reason === "none") {
             computerUse.reason = reason;
@@ -1055,6 +1110,35 @@ export function createRunExecutor(executorDeps: ExecutorDeps) {
               "computer.id": storedComputer.id,
             },
             async () => {
+              // Deferred runs acquire the computer only when a tool actually uses it.
+              if (deferComputerLease && !computerLeaseSettled) {
+                if (leaseTarget.computerSwitching) throw new ComputerBusyToolError();
+                try {
+                  computerLease = await acquireComputerExecutionLease(deps.prisma, {
+                    computerId,
+                    runId,
+                    botId: run.botId,
+                    workerId,
+                    runFence: fence,
+                  });
+                  if (!computerLease && leaseTarget.computer?.scope === "dedicated") {
+                    computerLease = await acquireDedicatedScreenLeaseFence(deps.prisma, {
+                      computerId,
+                      runId,
+                      botId: run.botId,
+                      workerId,
+                      runFence: fence,
+                    });
+                  }
+                } catch (error) {
+                  if (!(error instanceof ComputerBusyError)) throw error;
+                  throw new ComputerBusyToolError();
+                }
+                computerLeaseSettled = true;
+                if (computerLease) {
+                  context.screenLeaseId = screenLeaseIdForRun(computerLease, runId, fence);
+                }
+              }
               const computer = await runComputer.get();
               copyingTurnFiles = copyingTurnFiles
                 .catch(() => undefined)
@@ -1196,13 +1280,6 @@ export function createRunExecutor(executorDeps: ExecutorDeps) {
                 { userId: run.userId, spaceId: run.spaceId },
                 mainRunModel,
               ));
-        const sourceMessage =
-          (run.trigger === "user" || run.trigger === "follow_up") && run.sourceMessageId
-            ? await deps.prisma.message.findUnique({
-                where: { id: run.sourceMessageId },
-                select: { clientNonce: true, role: true, blocks: true, threadId: true },
-              })
-            : null;
         // Calls carry no schema flag: the sending client encodes them in the clientNonce.
         const sourceClientNonce = sourceMessage?.clientNonce ?? null;
         // A follow-up can be queued by a bot (group handoffs); only the user's own counts.
@@ -1216,8 +1293,11 @@ export function createRunExecutor(executorDeps: ExecutorDeps) {
           modelSeesImages ||
           Boolean(computerModel || checkpointModelResolver);
         const graphicalToolsAllowed = graphical && acceptsImages && !heldForTakeover;
+        const browserCapabilities = browser.describe().capabilities;
         const pageBrowserAllowed =
-          graphical && browser.describe().capabilities.page && !heldForTakeover;
+          browserCapabilities.page &&
+          (graphical || browserCapabilities.requiresGraphicalComputer === false) &&
+          !heldForTakeover;
         const disabledBuiltinTools = disabledBuiltinToolSet(bot.disabledBuiltinTools);
         const replyMode = runReplyMode(run.trigger, bot.replyMode, disabledBuiltinTools);
         const emailName = deps.inboundEmailDomain
@@ -1383,6 +1463,18 @@ export function createRunExecutor(executorDeps: ExecutorDeps) {
           : computerKind === "wuying"
             ? `Commands run on a Windows cloud computer. ${hostShell} Files outside the bot workspace can be accessed through commands. The screen shows the Windows desktop; use the graphical tools for apps without a command line.`
             : `Commands run on the user's ${hostEnvironment.platform} computer with their account permissions. ${hostShell} Local files outside the bot workspace can be accessed through commands. App launching is available through OS commands; graphical screen control is unavailable.`;
+        const hostBrowserInstruction =
+          computerKind === "desktop" &&
+          pageBrowserAllowed &&
+          browserCapabilities.requiresGraphicalComputer === false
+            ? "The page browser is available through browser_navigate, browser_snapshot, and browser_act, even though pixel-based desktop control is unavailable. Use those tools for webpage actions. Keep the task page open for the user; stop when they take control. Download results identify files saved in this bot's Downloads folder or report a save error; do not repeat a click just because navigation was interrupted by a download. Set waitForDownload only for an intended download. When a snapshot returns pages, select the desired pageId in browser_snapshot before acting there. Use protected-fill tools only with their saved credential and observed page binding; if the browser refuses the field, ask the user to complete it."
+            : computerKind === "desktop" && hostEnvironment?.platform === "darwin"
+              ? "Use the user's configured browser to open web pages. This run has no page-control tools; do not claim you can click or fill a page."
+              : undefined;
+        const browserApprovalInstruction =
+          pageBrowserAllowed && browserCapabilities.requiresActionApproval
+            ? "Page actions follow the user's Ask/Auto/Never approval policy. Purchases keep their explicit confirmation requirement. A rejected action stays rejected; do not switch to the shell or another tool to bypass it."
+            : undefined;
         const computerInstruction = [
           "Use the computer only when the task needs files, commands, a browser, or an installed application. Answer directly from the conversation when sufficient; use connected tools for app data. A website with no connected app is still yours to use in the computer's browser, now and in scheduled routines, so a missing connection alone is never a reason to decline. Do not inspect the computer just to prepare for an unrelated task. If what you are about to buy, send or submit differs from what the user confirmed, such as a changed item or total, show the difference and confirm again first.",
           hostInstruction
@@ -1390,6 +1482,8 @@ export function createRunExecutor(executorDeps: ExecutorDeps) {
             : dockerToolInstruction
               ? `${baseComputerInstruction} ${dockerToolInstruction}`
               : baseComputerInstruction,
+          hostBrowserInstruction,
+          browserApprovalInstruction,
           diskNoteInstruction(storedComputer),
         ]
           .filter(Boolean)
@@ -1440,6 +1534,11 @@ export function createRunExecutor(executorDeps: ExecutorDeps) {
         };
 
         const ctx: RunContext = {
+          model: {
+            provider: runModelProvider,
+            id: runModelId,
+            thinkingLevel: mainRunModel.thinkingLevel ?? null,
+          },
           deps,
           providers: { web, mediaGeneration, paidServices, browser, cloudAgent },
           run,
@@ -1480,7 +1579,9 @@ export function createRunExecutor(executorDeps: ExecutorDeps) {
             stored: storedComputer,
             kind: computerKind,
             mode: computerMode,
-            lease: computerLease,
+            get lease() {
+              return computerLease;
+            },
             lazy: runComputer,
             get: getRunComputer,
             copyEarlierFiles: earlierFiles.add,
@@ -1630,10 +1731,22 @@ export function createRunExecutor(executorDeps: ExecutorDeps) {
             ),
           });
         }
+        // Model/browser setup can add protected values after recall; charge redaction at injection.
+        const recallBlock = recalled?.ok ? buildRecalledMemory(recalled.value, runSecrets) : null;
+        if (recallBlock) {
+          getLogger().info("semantic memory context selected", {
+            "run.id": runId,
+            "memory.origin": automaticRecall.origin,
+            "memory.shown": recallBlock.shown,
+            "memory.omitted": recallBlock.omitted,
+            "memory.bytes": recallBlock.bytes,
+          });
+        }
+        const recalledMemory = recallBlock?.text ?? "";
         if (recalledMemory) {
           historicalContext.push({
             role: "user",
-            content: redactSecrets(recalledMemory, runSecrets),
+            content: recalledMemory,
           });
         }
         const modelImageBudget =
@@ -1802,6 +1915,7 @@ export function createRunExecutor(executorDeps: ExecutorDeps) {
                 historyRetrievalEnabled:
                   contextStrategy !== "current" &&
                   tools.some((tool) => tool.name === "search_history"),
+                semanticMemoryEnabled: tools.some((tool) => tool.name === "save_memory"),
                 computerInstruction,
                 pageBrowserAllowed,
                 taskCatalogInstruction,

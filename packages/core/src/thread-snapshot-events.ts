@@ -316,6 +316,10 @@ function reduce(prev: LiveThreadSnapshot, event: ThreadSnapshotEvent): LiveThrea
     const blocks = (payload.blocks as ThreadMessage["blocks"] | undefined) ?? [];
     const id = String(payload.messageId ?? event.id ?? `msg:${cursor ?? 0}`);
     const known = prev.messages.find((message) => message.id === id);
+    // A helper's approval card lands in the chat that started it while its run keeps working
+    // on the helper's own thread. The card's run joins activeRuns only so the existing answer
+    // path reaches it; the main run and the group's member status stay as they were.
+    const helperRuns = helperApprovalActiveRuns(prev, event, id, blocks);
     // The message's own seq, which a pending send matches to recognize its echo.
     const seq = typeof payload.seq === "number" ? payload.seq : known?.seq;
     const next: LiveThreadMessage = {
@@ -342,9 +346,90 @@ function reduce(prev: LiveThreadSnapshot, event: ThreadSnapshotEvent): LiveThrea
     const without = remaining.filter(
       (message) => message.id === id || !replacedSubagent(message, replacedSubagentIds),
     );
-    return { ...prev, cursor, messages: upsertMessageById(without, next) };
+    return {
+      ...prev,
+      cursor,
+      messages: upsertMessageById(without, next),
+      ...(helperRuns ? { activeRuns: helperRuns } : {}),
+    };
   }
   return prev;
+}
+
+/** The source subagent card an ask block belongs to; the server stamps it on helper approvals. */
+function helperAskCard(
+  runId: string | undefined,
+  blocks: readonly ThreadMessage["blocks"][number][],
+): string | undefined {
+  if (!runId) return undefined;
+  for (const block of blocks) {
+    if (block.kind !== "ask" || block.status === "answered") continue;
+    if (block.helper?.messageId) return block.helper.messageId;
+  }
+  return undefined;
+}
+
+/**
+ * The chat's answerable view of helper runs waiting for approval, or undefined when this message
+ * changes none. The ask message carries the helper's run id and names the card it belongs to; an
+ * answered ask drops that entry, and so does a card that settled without it (a stopped helper never
+ * returns an answer).
+ */
+function helperApprovalActiveRuns(
+  prev: LiveThreadSnapshot,
+  event: ThreadSnapshotEvent,
+  messageId: string,
+  blocks: readonly ThreadMessage["blocks"][number][],
+): LiveThreadRun[] | undefined {
+  const runs = activeThreadRuns(prev);
+  const pending = helperAskCard(event.runId, blocks);
+  if (pending && event.runId) {
+    if (runs.some((run) => run.id === event.runId && run.trigger === "helper")) return undefined;
+    const botId = event.botId ?? prev.botId;
+    const waiting: LiveThreadRun = {
+      id: event.runId,
+      ...(botId ? { botId } : {}),
+      // The chat that answers it, not the helper's own thread: the answer names this thread.
+      threadId: prev.threadId,
+      taskId: event.runId,
+      status: "waiting_input",
+      trigger: "helper",
+      routineId: null,
+      modelProvider: null,
+      modelId: null,
+      error: null,
+      startedAt: event.createdAt,
+      completedAt: null,
+      createdAt: event.createdAt,
+    };
+    return [...runs, waiting];
+  }
+  const answered = new Set<string>();
+  const previous = prev.messages.find((message) => message.id === messageId);
+  // The update itself may answer it; an update about something else keeps the entry.
+  if (
+    previous?.runId &&
+    helperAskCard(previous.runId, previous.blocks) &&
+    !helperAskCard(previous.runId, blocks)
+  ) {
+    answered.add(previous.runId);
+  }
+  const settledCard = blocks.some(
+    (block) =>
+      block.kind === "subagent" && (block.status === "completed" || block.status === "failed"),
+  )
+    ? messageId
+    : undefined;
+  if (settledCard) {
+    for (const message of prev.messages) {
+      if (message.runId && helperAskCard(message.runId, message.blocks) === settledCard) {
+        answered.add(message.runId);
+      }
+    }
+  }
+  if (answered.size === 0) return undefined;
+  const next = runs.filter((run) => !(run.trigger === "helper" && answered.has(run.id)));
+  return next.length === runs.length ? undefined : next;
 }
 
 function runFromStartedEvent(

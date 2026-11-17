@@ -31,9 +31,9 @@ async function runGroupBudgetTrial(fixture: {
 }) {
   const { memberTools } = fixture;
   const totalCalls = subjectTools + memberTools + 2; // Each member ends with one text turn.
-  // Members decide at about the same time, so the fixture cannot pin run order: every
-  // step serves either member, and Mika's first call waits for the subject's finished
-  // run, so the trial's per-step watch has ended before Mika's work counts up.
+  // Members take their turns in order, and the subject is first, so Mika's first call can
+  // still wait for the subject's finished run; every step serves either member by content,
+  // so the trial's per-step watch has ended before Mika's work counts up.
   let subjectCalls = 0;
   let memberCalls = 0;
   const isMember = (request: ModelEmulatorRequest) =>

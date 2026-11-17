@@ -44,13 +44,18 @@ export function ArtifactFileCard(props: ArtifactFileCardProps) {
   const closeButton = useRef<HTMLButtonElement>(null);
   const [previewOpen, setPreviewOpen] = useState(false);
   const [downloadError, setDownloadError] = useState<string | null>(null);
+  const [downloading, setDownloading] = useState(false);
 
   async function startDownload() {
+    if (downloading) return;
+    setDownloading(true);
     setDownloadError(null);
     try {
       await downloadArtifact(props.target, props.artifactId, props.name, props.mimeType);
     } catch {
       setDownloadError(t`Could not download ${props.name}. Try again.`);
+    } finally {
+      setDownloading(false);
     }
   }
 
@@ -61,6 +66,7 @@ export function ArtifactFileCard(props: ArtifactFileCardProps) {
           key={JSON.stringify([props.target, props.artifactId, props.mimeType])}
           {...props}
           onDownload={startDownload}
+          downloading={downloading}
         />
         {downloadError ? <DownloadError message={downloadError} /> : null}
       </BuiCard>
@@ -73,9 +79,14 @@ export function ArtifactFileCard(props: ArtifactFileCardProps) {
         <button
           type="button"
           onClick={() => void startDownload()}
+          disabled={downloading}
+          aria-busy={downloading}
           className="rounded-2xl bg-card px-4 py-3 text-left text-body text-foreground hover:bg-accent"
         >
-          <div className="font-medium">{props.name}</div>
+          <div className="flex items-center gap-2 font-medium">
+            {downloading ? <Spinner aria-label={t`Downloading…`} /> : null}
+            {props.name}
+          </div>
           <div className="mt-1 flex gap-2 text-muted-foreground">
             <span>{props.mimeType}</span>
             <span>{formatSize(props.size)}</span>
@@ -115,10 +126,16 @@ export function ArtifactFileCard(props: ArtifactFileCardProps) {
             <button
               type="button"
               aria-label={t`Download ${props.name}`}
+              disabled={downloading}
+              aria-busy={downloading}
               onClick={() => void startDownload()}
               className="grid w-14 shrink-0 place-items-center border-l border-border text-muted-foreground hover:bg-accent hover:text-foreground"
             >
-              <Download size={19} strokeWidth={1.8} />
+              {downloading ? (
+                <Spinner aria-label={t`Downloading…`} />
+              ) : (
+                <Download size={19} strokeWidth={1.8} />
+              )}
             </button>
           </IconTooltip>
         </BuiCard>
@@ -147,6 +164,7 @@ function FilePreview({
 }: ArtifactFileCardProps & { closeButtonRef: RefObject<HTMLButtonElement | null> }) {
   const { t } = useLingui();
   const [downloadError, setDownloadError] = useState<string | null>(null);
+  const [downloading, setDownloading] = useState(false);
   const [state, setState] = useState<
     | { status: "loading" }
     | { status: "ready"; bytes: Uint8Array; text?: string }
@@ -198,19 +216,25 @@ function FilePreview({
             size="icon-lg"
             className="rounded-full text-muted-foreground"
             aria-label={t`Download ${name}`}
+            disabled={downloading}
+            aria-busy={downloading}
             onClick={() =>
               void (async () => {
+                if (downloading) return;
+                setDownloading(true);
                 setDownloadError(null);
                 try {
                   if (state.status === "ready") downloadArtifactBytes(name, mimeType, state.bytes);
                   else await downloadArtifact(target, artifactId, name, mimeType);
                 } catch {
                   setDownloadError(t`Could not download ${name}. Try again.`);
+                } finally {
+                  setDownloading(false);
                 }
               })()
             }
           >
-            <Download />
+            {downloading ? <Spinner aria-label={t`Downloading…`} /> : <Download />}
           </Button>
         </IconTooltip>
         <DialogClose
@@ -263,7 +287,8 @@ function AudioArtifactPreview({
   name,
   mimeType,
   onDownload,
-}: ArtifactFileCardProps & { onDownload: () => Promise<void> }) {
+  downloading,
+}: ArtifactFileCardProps & { onDownload: () => Promise<void>; downloading: boolean }) {
   const { t } = useLingui();
   const [state, setState] = useState<
     { status: "idle" | "loading" } | { status: "ready"; src: string } | { status: "error" }
@@ -321,10 +346,16 @@ function AudioArtifactPreview({
           variant="ghost"
           size="icon-lg"
           aria-label={t`Download ${name}`}
+          disabled={downloading}
+          aria-busy={downloading}
           onClick={() => void onDownload()}
           className="text-muted-foreground"
         >
-          <Download strokeWidth={1.8} className="size-[19px]" />
+          {downloading ? (
+            <Spinner aria-label={t`Downloading…`} />
+          ) : (
+            <Download strokeWidth={1.8} className="size-[19px]" />
+          )}
         </Button>
       </div>
       {state.status === "loading" ? (

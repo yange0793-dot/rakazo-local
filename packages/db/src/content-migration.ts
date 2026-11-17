@@ -18,6 +18,8 @@ interface TableSpec {
     | "event"
     | "memoryDocument"
     | "memoryRevision"
+    | "semanticFact"
+    | "semanticFactRevision"
     | "thread"
     | "botEmailMessage";
   /** Scans return them in this order as `values`. */
@@ -85,6 +87,29 @@ const TABLES: TableSpec[] = [
       WHERE r.id > ${cursor} ORDER BY r.id LIMIT ${limit}`,
     writePlaintext: (id, row) =>
       Prisma.sql`UPDATE memory_revisions SET content = ${row.content as string} WHERE id = ${id}`,
+  },
+  {
+    model: "SemanticFact",
+    delegate: "semanticFact",
+    columns: ["content", "provenance"],
+    json: false,
+    updatedAt: true,
+    scan: (cursor, limit) => Prisma.sql`
+      SELECT id, jsonb_build_array(content, provenance) AS values, "spaceId", "userId" AS owner
+      FROM semantic_facts WHERE id > ${cursor} ORDER BY id LIMIT ${limit}`,
+    writePlaintext: (id, row) =>
+      Prisma.sql`UPDATE semantic_facts SET content = ${row.content as string}, provenance = ${row.provenance as string} WHERE id = ${id}`,
+  },
+  {
+    model: "SemanticFactRevision",
+    delegate: "semanticFactRevision",
+    columns: ["content", "provenance"],
+    json: false,
+    scan: (cursor, limit) => Prisma.sql`
+      SELECT id, jsonb_build_array(content, provenance) AS values, "spaceId", "factId" AS owner
+      FROM semantic_fact_revisions WHERE id > ${cursor} ORDER BY id LIMIT ${limit}`,
+    writePlaintext: (id, row) =>
+      Prisma.sql`UPDATE semantic_fact_revisions SET content = ${row.content as string}, provenance = ${row.provenance as string} WHERE id = ${id}`,
   },
   {
     model: "Thread",

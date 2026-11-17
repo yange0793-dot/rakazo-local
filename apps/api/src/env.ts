@@ -176,6 +176,10 @@ export interface AppEnv {
   mcpStdio: ReturnType<typeof mcpStdioOptionsFromEnv>;
   /** Deployment-owner escape for remote MCP on RFC1918 / Docker-network hosts. */
   mcpAllowPrivateEndpoint: boolean;
+  /** Exact loopback origins authorized for the optional local memory service. */
+  localMemoryAllowedUrls?: string;
+  memoryExtractorPython?: string;
+  memoryExtractorScript?: string;
   port: number;
   gitSha: string | undefined;
   /** Oldest client build per kind the API still serves (RAKAZO_MIN_CLIENT_BUILD). */
@@ -363,6 +367,9 @@ export function loadEnv(source: NodeJS.ProcessEnv = process.env): AppEnv {
       .filter(Boolean),
     mcpStdio: mcpStdioOptionsFromEnv(source),
     mcpAllowPrivateEndpoint: source.MCP_ALLOW_PRIVATE_ENDPOINT === "true",
+    localMemoryAllowedUrls: source.RAKAZO_LOCAL_MEMORY_ALLOWED_URLS,
+    memoryExtractorPython: optional(source.RAKAZO_MEMORY_EXTRACTOR_PYTHON),
+    memoryExtractorScript: optional(source.RAKAZO_MEMORY_EXTRACTOR_SCRIPT),
     port: Number(source.API_PORT ?? 3100),
     gitSha: optional(source.GIT_SHA) ?? optional(source.RAKAZO_GIT_SHA),
     minimumClientBuilds: parseMinimumClientBuilds(source.RAKAZO_MIN_CLIENT_BUILD),

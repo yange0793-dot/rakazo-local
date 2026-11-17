@@ -3,13 +3,16 @@ import { Id, ThinkingLevelSchema } from "./ids.js";
 import { ModelHeadersSchema } from "./model-headers.js";
 import { SettingsScopeSchema } from "./settings-scope.js";
 
-/** Default maximum number of completion tokens for an OpenAI-compatible connection. */
-export const DEFAULT_MODEL_MAX_TOKENS = 4_096;
+export const MAX_MODEL_CONTEXT_WINDOW = 2_147_483_647;
+
+/**
+ * No app-imposed output cap: a connection that sets no limit of its own runs up to the model's
+ * own ceiling. Only the context window still reserves room for input.
+ */
+export const DEFAULT_MODEL_MAX_TOKENS = MAX_MODEL_CONTEXT_WINDOW;
 
 /** Fallback context window for OpenAI-compatible connections that do not report a size (e.g. Ollama, LM Studio, vLLM). */
 export const DEFAULT_MODEL_CONTEXT_WINDOW = 262_144;
-
-export const MAX_MODEL_CONTEXT_WINDOW = 2_147_483_647;
 
 /**
  * Output limits follow the model; the only fixed bound is the context ceiling, and a connection's
@@ -84,6 +87,49 @@ export const ModelApiProtocolSchema = z.enum([
 ]);
 export type ModelApiProtocol = z.infer<typeof ModelApiProtocolSchema>;
 
+export const ModelReasoningCapabilitiesSchema = z.object({
+  mode: z.enum(["budget", "adaptive"]).optional(),
+  levels: z.array(ThinkingLevelSchema).optional(),
+});
+export type ModelReasoningCapabilities = z.infer<typeof ModelReasoningCapabilitiesSchema>;
+
+export const ModelCatalogSourceStatusSchema = z.object({
+  id: z.string(),
+  label: z.string(),
+  group: z.string(),
+  apiProtocol: ModelApiProtocolSchema,
+  lastSyncedAt: z.string().nullable(),
+  lastAttemptAt: z.string().nullable(),
+  error: z.string().nullable(),
+  connectionCount: z.number().int().nonnegative(),
+  unavailableCount: z.number().int().nonnegative(),
+});
+export type ModelCatalogSourceStatus = z.infer<typeof ModelCatalogSourceStatusSchema>;
+
+export const ManagedModelCapabilitiesSchema = z.object({
+  contextWindow: z.number().int().positive().max(MAX_MODEL_CONTEXT_WINDOW).optional(),
+  supportsImages: z.boolean().optional(),
+  thinkingLevels: z.array(ThinkingLevelSchema).optional(),
+  reasoningMode: z.enum(["budget", "adaptive"]).optional(),
+  source: z.enum(["declared", "verified", "unknown"]),
+});
+export type ManagedModelCapabilities = z.infer<typeof ManagedModelCapabilitiesSchema>;
+
+export const ManagedModelCatalogSchema = z.object({
+  sourceId: z.string(),
+  sourceLabel: z.string(),
+  group: z.string(),
+  providerId: z.string(),
+  providerLabel: z.string(),
+  availableModelIds: z.array(z.string()),
+  unavailableModelIds: z.array(z.string()),
+  disabledModelIds: z.array(z.string()).optional(),
+  /** Former display-name routes remain resolvable after a channel is renamed. */
+  aliases: z.record(z.string(), z.string()),
+  capabilities: z.record(z.string(), ManagedModelCapabilitiesSchema),
+});
+export type ManagedModelCatalog = z.infer<typeof ManagedModelCatalogSchema>;
+
 export const ModelCredentialSchema = z.object({
   /** Computed space preference order; credentials themselves remain newest first. */
   preferenceRank: z.number().int().nonnegative().optional(),
@@ -102,6 +148,7 @@ export const ModelCredentialSchema = z.object({
   gatewayId: z.string().optional(),
   modelId: z.string().optional(),
   reasoning: z.boolean().optional(),
+  reasoningCapabilities: ModelReasoningCapabilitiesSchema.optional(),
   thinkingLevel: ThinkingLevelSchema.nullable().optional(),
   maxTokens: z.number().int().min(1).max(MAX_MODEL_MAX_TOKENS).optional(),
   supportsImages: z.boolean().optional(),
@@ -118,6 +165,16 @@ export const ModelCredentialSchema = z.object({
    * owner has to sign in again. Model choices on this connection are kept.
    */
   reconnectRequired: z.boolean().optional(),
+  catalogSource: z
+    .object({
+      id: z.string(),
+      label: z.string(),
+      group: z.string(),
+      providerId: z.string(),
+      available: z.boolean(),
+      unavailableModelIds: z.array(z.string()),
+    })
+    .optional(),
 });
 export type ModelCredential = z.infer<typeof ModelCredentialSchema>;
 
@@ -213,6 +270,7 @@ export const ModelConnectInputSchema = z
     credentialId: ModelConnectionTargetSchema,
     modelId: z.string().optional(),
     reasoning: z.boolean().optional(),
+    reasoningCapabilities: ModelReasoningCapabilitiesSchema.optional(),
     thinkingLevel: ThinkingLevelSchema.nullable().optional(),
     /** False keeps the current main model; omitted means true. */
     makeDefault: z.boolean().optional(),

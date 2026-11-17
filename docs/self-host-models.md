@@ -140,6 +140,25 @@ screenshot computer tools stay available. Existing connections default to disabl
 managed endpoints, the deployment-wide fallback remains
 `RAKAZO_OPENAI_COMPATIBLE_VISION_MODELS=gpt4o-vision,llava`.
 
+## Managed catalogs
+
+An operator can configure `MODEL_CATALOG_SOURCES` on the API as a JSON array.
+Each source supplies a stable `id`, a display `label`, its adapter identifier,
+`controlUrl`, inference `baseUrl`, `group`, and `apiProtocol`. Adapter configuration
+stays on the server. An account is enrolled only when it already has a connection
+to that inference endpoint and protocol.
+
+The API synchronizes on startup, every five minutes, and when model settings open.
+The refresh control in model settings requests an immediate synchronization.
+Channels keep their connection identity through renames. Removed channels and
+models are marked unavailable; defaults remain visible for repair instead of
+silently selecting another channel. A failed source read preserves the last
+successful catalog and its timestamp. Upstream keys stay with the source.
+
+Connection-specific output limits, image overrides, reasoning declarations and
+disabled model choices survive refreshes. Unknown source capabilities remain
+unknown; model names do not establish image or reasoning support.
+
 ## Thinking
 
 For servers that accept standard `reasoning_effort`, enable **Supports thinking** under
@@ -153,6 +172,14 @@ advanced settings; mobile inherits the same backend policy. Rakazo sends standar
 `reasoning_effort` (`minimal`, `low`, `medium`, `high`, or `none` when off); the server owns
 model-specific translation. Leave **Supports thinking** off when the server lacks standard effort
 support. Existing token limits still apply; effort is not a separate reasoning-token budget.
+
+Compatible connections can declare `reasoningCapabilities` through the connection
+API: `mode` is `budget` or `adaptive`, and `levels` narrows the offered efforts.
+Messages connections use token budgets unless adaptive mode is explicitly declared.
+The selector offers only distinct levels the selected serializer can emit.
+Runtime diagnostics retain the requested and effective efforts when they differ.
+These are local request settings; they do not establish what an upstream service
+ultimately applied. Leaving the output limit blank adds no connection-specific cap.
 
 ## Prompt cache capabilities
 

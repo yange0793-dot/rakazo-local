@@ -197,6 +197,7 @@ function RoutineShot() {
         onEnsureWebhook={async () => undefined}
         onRevealWebhook={async () => undefined}
         onHideWebhook={() => undefined}
+        onScheduleUpdate={() => undefined}
       />
     </main>
   );

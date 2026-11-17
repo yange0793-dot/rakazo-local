@@ -113,6 +113,15 @@ it("lists the space's shared notes and opens one in the editor", async () => {
   expect(mocks.push).toHaveBeenCalledWith({ pathname: "/memory-note", params: { id: "team-1" } });
 });
 
+it("opens managed facts from the existing Memory settings screen", async () => {
+  mocks.rpc.mockResolvedValue([]);
+  await render();
+  await act(async () =>
+    container.querySelector<HTMLButtonElement>('[aria-label="Saved facts"]')?.click(),
+  );
+  expect(mocks.push).toHaveBeenCalledWith("/semantic-memory");
+});
+
 it("says when nothing is remembered, and retries a failed load", async () => {
   mocks.rpc.mockRejectedValueOnce(new Error("offline")).mockResolvedValueOnce([]);
   await render();

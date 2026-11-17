@@ -67,6 +67,111 @@ describeWithDatabase("structured @ mention targets", () => {
     const run = await prisma.run.findUniqueOrThrow({ where: { id: tested.runId } });
     expect(run.botId).toBe(bot.id);
     expect(run.trigger).toBe("routine");
+    // A routine without its own conversation keeps the established bot-chat fallback.
+    const botThread = await prisma.thread.findUniqueOrThrow({
+      where: { botId: bot.id },
+      select: { id: true },
+    });
+    expect(run.threadId).toBe(botThread.id);
+  });
+
+  it("runs a group-bound routine test in its group conversation", async () => {
+    const cookie = await signup(app, `mention-routine-group-${stamp}@rakazo.test`, "Group Routine");
+    const botA = await rpc<{ id: string }>(app, cookie, "bots/create", {
+      name: "RoutineA",
+      title: "",
+      description: "",
+      instructions: "",
+      notifyOnFinish: true,
+    });
+    const botB = await rpc<{ id: string }>(app, cookie, "bots/create", {
+      name: "RoutineB",
+      title: "",
+      description: "",
+      instructions: "",
+      notifyOnFinish: true,
+    });
+    const group = await rpc<{ id: string; threadId: string }>(app, cookie, "groups/create", {
+      name: "Routine Group",
+      botIds: [botA.id, botB.id],
+    });
+    const routine = await rpc<{ id: string }>(app, cookie, "routines/create", {
+      botId: botA.id,
+      name: "Group digest",
+      prompt: "Summarize the group.",
+      crons: ["0 9 * * 1"],
+      timezone: "UTC",
+      notify: false,
+      active: false,
+    });
+    // Routines created from chat carry the conversation they were created in.
+    await prisma.routine.update({
+      where: { id: routine.id },
+      data: { threadId: group.threadId },
+    });
+
+    const tested = await rpc<{ runId: string }>(app, cookie, "routines/testRun", {
+      routineId: routine.id,
+    });
+    const run = await prisma.run.findUniqueOrThrow({
+      where: { id: tested.runId },
+      include: { task: true },
+    });
+    expect(run.botId).toBe(botA.id);
+    expect(run.threadId).toBe(group.threadId);
+    expect(run.task.threadId).toBe(group.threadId);
+  });
+
+  it("falls back to the bot chat when the bound group no longer has the bot", async () => {
+    const cookie = await signup(app, `mention-routine-stale-${stamp}@rakazo.test`, "Stale Routine");
+    const botA = await rpc<{ id: string }>(app, cookie, "bots/create", {
+      name: "StaleA",
+      title: "",
+      description: "",
+      instructions: "",
+      notifyOnFinish: true,
+    });
+    const botB = await rpc<{ id: string }>(app, cookie, "bots/create", {
+      name: "StaleB",
+      title: "",
+      description: "",
+      instructions: "",
+      notifyOnFinish: true,
+    });
+    const botC = await rpc<{ id: string }>(app, cookie, "bots/create", {
+      name: "StaleC",
+      title: "",
+      description: "",
+      instructions: "",
+      notifyOnFinish: true,
+    });
+    const group = await rpc<{ id: string; threadId: string }>(app, cookie, "groups/create", {
+      name: "Other Group",
+      botIds: [botB.id, botC.id],
+    });
+    const routine = await rpc<{ id: string }>(app, cookie, "routines/create", {
+      botId: botA.id,
+      name: "Stale digest",
+      prompt: "Summarize the inbox.",
+      crons: ["0 9 * * 1"],
+      timezone: "UTC",
+      notify: false,
+      active: false,
+    });
+    await prisma.routine.update({
+      where: { id: routine.id },
+      data: { threadId: group.threadId },
+    });
+
+    const tested = await rpc<{ runId: string }>(app, cookie, "routines/testRun", {
+      routineId: routine.id,
+    });
+    const run = await prisma.run.findUniqueOrThrow({ where: { id: tested.runId } });
+    const botThread = await prisma.thread.findUniqueOrThrow({
+      where: { botId: botA.id },
+      select: { id: true },
+    });
+    expect(run.threadId).toBe(botThread.id);
   });
 
   it("replays routine testRun with the same clientNonce", async () => {

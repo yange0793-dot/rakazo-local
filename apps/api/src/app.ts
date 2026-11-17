@@ -35,6 +35,7 @@ import {
   createArtifactStore,
   createCloudAgentConnection,
   createConnectorRuntime,
+  createManagedMemoryProvider,
   createMediaGenerationProvider,
   createPaymentWalletProvider,
   createProductAnalytics,
@@ -52,6 +53,7 @@ import {
   installedMessaging,
   isMessagingSurfaceEnabled,
   messagingPlatformsFromEnv,
+  modelCatalogSourcesFromEnv,
   ObjectAgentHomeStore,
   PiAgentRuntime,
   PiOAuthLogins,
@@ -108,6 +110,7 @@ import {
   requireMembership,
   rowSecurityWarning,
   runAsSystem,
+  SemanticFactStore,
   verifyContentKeys,
 } from "@rakazo/db";
 import type { Logger } from "@rakazo/logging";
@@ -152,6 +155,7 @@ import { mountLocalComputerHost } from "./local-settings.js";
 import { marketingEmailRoutes, sendWelcomeEmail } from "./marketing-email.js";
 import { moveMcpArgsIntoSecrets } from "./mcp-args-migration.js";
 import { startMessagingRuntime } from "./messaging-runtime.js";
+import { ModelCatalogSync } from "./model-catalog-sync.js";
 import { monitoringRoutes } from "./monitoring.js";
 import { pluginSubmissionRoutes } from "./plugin-submissions.js";
 import { sendReferralEmails } from "./referral-email.js";
@@ -346,6 +350,23 @@ async function buildApp(overrides: CreateAppOverrides): Promise<AppHandles> {
   }
   const jobPool = created.pool ?? ownedJobPool;
   const shutdown = new AbortController();
+  const catalogAdapters = await modelCatalogSourcesFromEnv();
+  const modelCatalogSync = catalogAdapters.length
+    ? new ModelCatalogSync(prisma, secrets, catalogAdapters)
+    : undefined;
+  const catalogSyncs = new Set<Promise<void>>();
+  const synchronizeCatalogs = () => {
+    if (!modelCatalogSync || shutdown.signal.aborted) return;
+    const task = modelCatalogSync.syncAll(shutdown.signal).catch((error: unknown) => {
+      if (!shutdown.signal.aborted)
+        getLogger().error("model catalog synchronization failed", error);
+    });
+    catalogSyncs.add(task);
+    void task.finally(() => catalogSyncs.delete(task));
+  };
+  const catalogTimer = modelCatalogSync ? setInterval(synchronizeCatalogs, 5 * 60_000) : undefined;
+  catalogTimer?.unref();
+  synchronizeCatalogs();
   // Chat starts in the process that receives it; the worker only takes what this one can't.
   const runs = inMemoryJobs ? undefined : new RunStarter(realtime, { signal: shutdown.signal });
   const jobs =
@@ -386,7 +407,10 @@ async function buildApp(overrides: CreateAppOverrides): Promise<AppHandles> {
       prisma,
       secrets,
     }));
-  const memoryProviders = new SpaceMemoryProviderResolver(prisma, secrets);
+  const semanticFacts = new SemanticFactStore(prisma);
+  const memoryProviders = new SpaceMemoryProviderResolver(prisma, secrets, {
+    createManagedMemoryProvider: (index) => createManagedMemoryProvider({ prisma, index, jobs }),
+  });
   const oauthLogins = new PiOAuthLogins(undefined, { prisma, secrets });
   const home = createAgentHomeStore(env.dataDir, prisma);
   void home.removeStaleStaging().catch((error) => getLogger().error("home staging cleanup", error));
@@ -547,6 +571,8 @@ async function buildApp(overrides: CreateAppOverrides): Promise<AppHandles> {
           secrets,
           events,
           billing,
+          memoryProviders,
+          semanticFacts,
         },
         userId,
       );
@@ -608,39 +634,43 @@ async function buildApp(overrides: CreateAppOverrides): Promise<AppHandles> {
   const codexCatalog = new CodexCatalogCache();
   // One instance: chat runs submit videos and, in single-process mode, background polls finish them.
   const mediaGeneration = createMediaGenerationProvider();
-  const { executor, jobHandlers } = createRunRuntime(runtimeEnv, connectors, {
-    billingEnabled: modelCreditsEnabled,
-    mediaGeneration,
-    contextStrategy,
-    prisma,
-    runtime,
-    codexCatalog,
-    sandbox,
-    memory,
-    memoryProviders,
-    home,
-    artifacts,
-    secretStore: secrets,
-    secretHttp: remoteConnectors,
-    notifications,
-    jobs,
-    events,
-    onTicketChange: ticketChanges,
-    email,
-    messaging,
-    cloudAgent,
-    userDevices:
-      userDevicesOverride ??
-      withHostComputerScreen(userDevices, {
-        prisma,
-        sandboxKind: env.sandboxProvider,
-        url: hostComputer.hostComputerUrl,
-        token: hostComputer.hostComputerToken,
-      }),
-    paymentWallet,
-    shutdownSignal: shutdown.signal,
-    now,
-  });
+  const { executor, jobHandlers, archiveConversationMemory } = createRunRuntime(
+    runtimeEnv,
+    connectors,
+    {
+      billingEnabled: modelCreditsEnabled,
+      mediaGeneration,
+      contextStrategy,
+      prisma,
+      runtime,
+      codexCatalog,
+      sandbox,
+      memory,
+      memoryProviders,
+      home,
+      artifacts,
+      secretStore: secrets,
+      secretHttp: remoteConnectors,
+      notifications,
+      jobs,
+      events,
+      onTicketChange: ticketChanges,
+      email,
+      messaging,
+      cloudAgent,
+      userDevices:
+        userDevicesOverride ??
+        withHostComputerScreen(userDevices, {
+          prisma,
+          sandboxKind: env.sandboxProvider,
+          url: hostComputer.hostComputerUrl,
+          token: hostComputer.hostComputerToken,
+        }),
+      paymentWallet,
+      shutdownSignal: shutdown.signal,
+      now,
+    },
+  );
 
   if (inMemoryJobs) {
     await inMemoryJobs.start(jobHandlers);
@@ -699,11 +729,14 @@ async function buildApp(overrides: CreateAppOverrides): Promise<AppHandles> {
       messagingInstallations,
       secrets,
       billing,
+      memoryProviders,
+      semanticFacts,
     }),
     (error) => getLogger().error("stalled organization deletion failed", error),
   );
 
   const router = createRouter({
+    modelCatalogSync,
     speechSummary:
       env.voiceSummaryMinChars === undefined
         ? undefined
@@ -733,6 +766,8 @@ async function buildApp(overrides: CreateAppOverrides): Promise<AppHandles> {
     sandbox,
     memory,
     memoryProviders,
+    semanticFacts,
+    archiveConversationMemory,
     home,
     secrets,
     oauthLogins,
@@ -784,6 +819,7 @@ async function buildApp(overrides: CreateAppOverrides): Promise<AppHandles> {
       gitSha: env.gitSha,
       integrationsCatalogUrl: env.integrationsCatalogUrl,
       mcpAllowPrivateEndpoint: env.mcpAllowPrivateEndpoint,
+      localMemoryAllowedUrls: env.localMemoryAllowedUrls,
       desktopHostChoiceEnabled: Boolean(env.desktopStackToken),
       computerSettingsEnabled: env.computerSettingsEnabled,
       mcpStdioEnabled: env.mcpStdioEnabled,
@@ -1119,6 +1155,8 @@ async function buildApp(overrides: CreateAppOverrides): Promise<AppHandles> {
       // on waitForComputerReady for the full boot-wait window during shared Postgres journeys.
       auth.disposeOidcDiscovery();
       shutdown.abort();
+      if (catalogTimer) clearInterval(catalogTimer);
+      await Promise.allSettled(catalogSyncs);
       // Aborted runs hand themselves back while realtime is still open to announce them.
       const runsStopped = runs?.stop();
       await userDeviceHub?.close();

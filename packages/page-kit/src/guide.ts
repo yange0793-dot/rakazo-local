@@ -9,7 +9,7 @@ A page is JSX source whose default export is a React component. It renders in an
 - Do not name your own component after a kit component (Page, Status, Table, Rows...): it replaces the kit's in the whole file, so using that kit component inside it renders itself forever, and the check refuses it. Call it StatusPage, BotTable and so on.
 - Gather data first and keep it in one object at the top. Write figures already formatted ("$12,400", "4.8%") and write plain characters, not HTML escapes ("<800ms", not "&lt;800ms").
 - Plain HTML and SVG elements (div, span, svg, path, rect, circle, text, linearGradient, animate...) with style={{...}} are allowed for custom visuals; take colours from useTheme() so they match both themes. script, style, iframe, object, embed and foreignObject are not allowed, and handlers are functions, never strings. Images are data: URIs only.
-- Save with save_page {title, source}. To change it later, pass the pageId you got back with edits [{find, replace}] (all apply or none do) or the whole new source; pass only pageId to read the current source.
+- Save with save_page {title, source}. To change it later, pass the pageId you got back with edits [{find, replace}] (all apply or none do) or the whole new source; pass only pageId to read the current source. To rename, also pass title in that same save: changing <Page title> alone does not rename the saved page.
 
 ## Design rules
 - Show, don't narrate: pick the richest component that fits the data. Numbers become Metrics, trends a LineChart, comparisons Bars, shares a Pie, flows a Diagram, sequences Steps, options ProsCons, statuses toned Status pills. A paragraph is for the one thing a visual cannot say.
@@ -20,6 +20,7 @@ A page is JSX source whose default export is a React component. It renders in an
 - Every chart sits in a Section with a heading and, when useful, a caption naming the unit, the period and the source. Omit a section rather than show empty data or placeholder text.
 - A LineChart axis starts at 0 unless floor is set: for a narrow range (3.05% to 3.41%) set floor and ceiling just around the data. Chart series take palette colours in order, never tones; to make a part mean "failed", put that colour first with Page palette (from useTheme).
 - Custom SVG with text gets a fixed width and height plus style={{maxWidth: "100%"}}; a small viewBox at width "100%" scales its text with the page.
+- Prefer the kit's controls and sortable Table. For custom interactions, use native buttons with visible focus so Enter and Space work. A sortable table header contains a button and exposes aria-sort on the th; an onClick on the th alone is not keyboard accessible.
 - End research with LinkCards of the sources (site and date), after a Divider.
 
 ## Recipes
@@ -57,7 +58,7 @@ Text props and list items accept **bold**, *italic* or _italic_, \`code\` and ba
 - Status {tone?}: a short status word in a tinted pill, e.g. <Status tone="success">Shipped</Status>; tone "neutral" or none is grey.
 - Rows {rows: [{title, lead?, detail?, meta?, status?: {label, tone}}]}: a list; lead sits in a narrow column before the title, the status follows the title in its tone, meta sits at the right.
 - Steps {steps: [{title, detail?}]}: a numbered sequence. Checklist {items: [{text, done, meta?}]}: read-only progress.
-- Table {columns: string[], rows: cell[][], align?: ("auto" | "start" | "end" | "center")[], emphasis?: column, sortable?: boolean}: a cell is text, a number, {text, tone?} or a Status. Figures and single short words align to the end. Wide tables scroll sideways; long ones get a filter box and a sticky header; sortable makes headers sort.
+- Table {columns: string[], rows: cell[][], align?: ("auto" | "start" | "end" | "center")[], emphasis?: column, sortable?: boolean}: a cell is text, a number, {text, tone?} or a Status. Example: columns={["Item", "Amount"]} rows={[["Refund", {text: "-9.90", tone: "danger"}]]}. Column descriptors {label, align?} and cells {value, tone?} are also accepted. For record rows, every column needs its property key: columns={[{key: "amount", label: "Amount"}]} rows={[{amount: "9.90"}]}. Figures and single short words align to the end. Wide tables scroll sideways; long ones get a filter box and a sticky header; sortable makes headers sort.
 
 ### Charts
 - LineChart {points: [{label, value}], floor?, ceiling?, unit?, format?: (n) => string, labels?: [seriesName], lines?: [{label, values}], secondary?: {label, values}, annotations?: [{at: index | "zero", label}], legend?}: a trend; one series gets an area fill, lines add series, secondary adds a grey dashed comparison. A missing value leaves a gap.
@@ -105,7 +106,7 @@ Dates are "YYYY-MM-DD"; times are hours as numbers (13.5 is 1:30 PM). Mark an ev
 - Avatar {name, size?, neutral?} and AvatarStack {people: [name or {name}], max?, label?}: initials in a circle; extra people fold into "+N".
 
 ### Helpers
-- useTheme(): the current theme as values for custom elements: {kind, bg {base, subtle, elevated}, text {primary, secondary, tertiary, accent, success, warning, danger, ...Deep}, fill, border, font, weight, radius, motion, dataviz {categorical, sequential, diverging, other, negative}}. It follows the reader's light or dark mode.
+- useTheme(): the current theme as values for custom elements: {kind, bg {base, subtle, elevated}, text {primary, secondary, tertiary, accent, success, warning, danger, ...Deep}, fill {primary, primaryHover, secondary, hover, pressed, accent, accentSubtle, successSubtle, warningSubtle, dangerSubtle}, border {subtle, weak, default, strong, focus}, font, weight, radius, motion, dataviz {categorical, sequential, diverging, other, negative}}. It follows the reader's light or dark mode. Border and fill are objects: use border.default for a border colour and fill.dangerSubtle for a refund background, not border itself or fill.subtle.
 - computeDAGLayout(nodes, edges, {direction?}): the Diagram's layout, for drawing your own flow.
 - useSource(id): reads a snapshot declared in a comment that opens the file: "/* page-sources" on the first line, then a JSON object such as {"sales": {"snapshot": {...}, "asOf": "2026-10-30"}}, then "*/". useSource returns {value, asOf, fresh, updating}; nothing refreshes live yet, so fresh is always false. SourceStamp also takes a hand-written {asOf}.
 

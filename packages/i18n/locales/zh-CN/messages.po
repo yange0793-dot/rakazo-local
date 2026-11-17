@@ -11411,3 +11411,159 @@ msgstr "你的语音提供商拒绝了该密钥。"
 #: apps/web/src/components/vault/VaultItemEditor.tsx
 msgid "ZIP or postal code"
 msgstr "邮政编码"
+
+#: apps/web/src/pages/shell/bot-panel.tsx
+msgid "Cloud computer"
+msgstr "云电脑"
+
+#: apps/web/src/pages/shell/bot-panel.tsx
+msgid "Open live desktop"
+msgstr "打开实时桌面"
+
+#: apps/web/src/pages/shell/chat-model-picker.tsx
+msgid "Default model for all bots"
+msgstr "所有 Bot 的默认模型"
+
+#: apps/web/src/pages/shell/bot-settings-sections.tsx
+msgid "Effort"
+msgstr "思考强度"
+
+#: apps/web/src/pages/shell/bot-settings-sections.tsx
+msgid "Faster"
+msgstr "更快"
+
+#: apps/web/src/pages/shell/bot-settings-sections.tsx
+msgid "Smarter"
+msgstr "更深入"
+
+#: apps/web/src/pages/shell/bot-settings-sections.tsx
+msgid "Loading"
+msgstr "加载中"
+
+#: apps/web/src/pages/shell/bot-settings-sections.tsx
+msgid "Effort unavailable for this model"
+msgstr "此模型不支持思考强度"
+
+#: apps/web/src/pages/shell/bot-settings-sections.tsx
+msgid "Enable browser notifications"
+msgstr "启用浏览器通知"
+
+#: apps/web/src/pages/shell/bot-settings-sections.tsx
+msgid "Notifications are blocked in your browser's site settings."
+msgstr "浏览器已阻止通知，可在网站设置中启用。"
+
+#: apps/web/src/pages/memory-providers/LocalMemorySettingsForm.tsx
+msgid "Local memory"
+msgstr "本地记忆"
+
+#: apps/web/src/pages/SemanticFactsSection.tsx
+msgid "Saved facts"
+msgstr "已保存的记忆"
+
+#: apps/web/src/pages/SemanticFactsSection.tsx
+msgid "Choose bot"
+msgstr "选择 Bot"
+
+#: apps/web/src/pages/SemanticFactsSection.tsx
+msgid "Scope"
+msgstr "范围"
+
+#: apps/web/src/pages/SemanticFactsSection.tsx
+msgid "Memory actions"
+msgstr "记忆操作"
+
+#: apps/web/src/pages/SemanticFactsSection.tsx
+msgid "Correct"
+msgstr "更正"
+
+#: apps/web/src/pages/SemanticFactsSection.tsx
+msgid "Correction"
+msgstr "更正内容"
+
+#: apps/web/src/pages/SemanticFactsSection.tsx
+msgid "Save correction"
+msgstr "保存更正"
+
+#: apps/web/src/pages/SemanticFactsSection.tsx
+msgid "Forget"
+msgstr "遗忘"
+
+#: apps/web/src/pages/SemanticFactsSection.tsx
+msgid "Forget this record?"
+msgstr "遗忘这条记忆？"
+
+#: apps/web/src/pages/SemanticFactsSection.tsx
+msgid "It will no longer be recalled."
+msgstr "之后不会再召回这条记忆。"
+
+#: apps/web/src/pages/SemanticFactsSection.tsx
+msgid "Source"
+msgstr "来源"
+
+#: apps/web/src/pages/SemanticFactsSection.tsx
+msgid "Source ID"
+msgstr "来源编号"
+
+#: apps/web/src/pages/SemanticFactsSection.tsx
+msgid "Run"
+msgstr "运行记录"
+
+#: apps/web/src/pages/SemanticFactsSection.tsx
+msgid "Updated"
+msgstr "更新时间"
+
+#: apps/web/src/pages/SemanticFactsSection.tsx
+msgid "Observed"
+msgstr "记录时间"
+
+#: apps/web/src/pages/SemanticFactsSection.tsx
+msgid "Manual correction"
+msgstr "手动更正"
+
+#: apps/web/src/pages/SemanticFactsSection.tsx
+msgid "History"
+msgstr "历史"
+
+#: apps/web/src/pages/SemanticFactsSection.tsx
+msgid "Forgotten"
+msgstr "已遗忘"
+
+#: apps/web/src/pages/SemanticFactsSection.tsx
+msgid "Show history"
+msgstr "显示历史"
+
+#: apps/web/src/pages/SemanticFactsSection.tsx
+msgid "Hide history"
+msgstr "隐藏历史"
+
+#: apps/web/src/pages/SemanticFactsSection.tsx
+msgid "No matching records"
+msgstr "没有匹配的记忆"
+
+#: apps/web/src/pages/model-settings/providers-section.tsx
+msgid "Synced <0>{0}</0>"
+msgstr "已同步 <0>{0}</0>"
+
+#: apps/web/src/pages/model-settings/providers-section.tsx
+msgid "Not synced"
+msgstr "尚未同步"
+
+#: apps/web/src/pages/model-settings/providers-section.tsx
+msgid "Refresh {0}"
+msgstr "刷新 {0}"
+
+#: apps/web/src/pages/model-settings/providers-section.tsx
+msgid "Retry sync"
+msgstr "重新同步"
+
+#: apps/web/src/pages/model-settings/providers-section.tsx
+msgid "Unavailable"
+msgstr "不可用"
+
+#: apps/web/src/pages/model-settings/providers-section.tsx
+msgid "Some models unavailable"
+msgstr "部分模型不可用"
+
+#: apps/web/src/pages/model-settings/use-model-settings.ts
+msgid "Could not sync model sources"
+msgstr "无法同步模型来源"

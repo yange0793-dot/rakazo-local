@@ -10,7 +10,7 @@ import {
   MODEL_REQUIRED_SEND_ERROR,
   QUEUE_HOLDING_RUN_STATUSES,
 } from "@rakazo/core";
-import type { Prisma } from "@rakazo/db";
+import type { ClearThreadInput, Prisma } from "@rakazo/db";
 import {
   AnswerTooLongError,
   appendEventInTransaction,
@@ -20,7 +20,9 @@ import {
   isUniqueViolation,
   loadMessageAuthor,
   lockSpaceGroup,
+  MemoryArchiveStore,
   THREAD_LOCK_TRANSACTION_OPTIONS,
+  ThreadClearConflictError,
   touchGroupUpdatedAt,
   withTransactionRetry,
 } from "@rakazo/db";
@@ -318,12 +320,76 @@ export function threadsRoutes(ctx: RouterContext) {
         const target = await resolveThreadTarget(deps.prisma, context.actor, input);
         const contextBotId = target.kind === "bot" ? target.botId : target.memberBotIds[0];
         if (!contextBotId) throw new IsolationError();
-        const { cancelledRunIds, historyCompactionGeneration } = await deps.events.clearThread({
-          spaceId: context.actor.spaceId,
-          threadId: target.threadId,
-          botId: contextBotId,
-          ...(target.kind === "group" ? { groupId: target.groupId } : {}),
-        });
+        let clearFence: Pick<ClearThreadInput, "expectedGeneration" | "expectedNextMessageSeq"> =
+          {};
+        if (
+          target.kind === "bot" &&
+          target.bot.userId === context.actor.userId &&
+          target.bot.thread?.userId === context.actor.userId
+        ) {
+          const archiveInput = {
+            threadId: target.threadId,
+            botId: target.botId,
+            userId: context.actor.userId,
+          };
+          const archiveContext = {
+            ...computerContext(context.actor, target.botId, `thread-archive:${target.threadId}`),
+            signal: AbortSignal.any([
+              ...(context.signal ? [context.signal] : []),
+              AbortSignal.timeout(8 * 60_000),
+            ]),
+          };
+          const archive = new MemoryArchiveStore(deps.prisma);
+          if (deps.archiveConversationMemory) {
+            await stopThreadRuns(deps, context.actor, target);
+            const prepared = await archive.prepareClear(archiveInput, archiveContext);
+            try {
+              await deps.archiveConversationMemory(archiveInput, archiveContext, { force: true });
+            } catch (error) {
+              throw new ORPCError("SERVICE_UNAVAILABLE", {
+                message:
+                  "Memory archiving failed. No messages were deleted. Try clearing again later.",
+                cause: error,
+              });
+            }
+            clearFence = {
+              expectedGeneration: prepared.generation,
+              expectedNextMessageSeq: prepared.nextMessageSeq,
+            };
+          } else if (await archive.hasPending(archiveInput, archiveContext)) {
+            throw new ORPCError("SERVICE_UNAVAILABLE", {
+              message: "Memory archiving is unavailable. No messages were deleted.",
+            });
+          }
+        }
+        const { cancelledRunIds, historyCompactionGeneration } = await deps.events
+          .clearThread({
+            spaceId: context.actor.spaceId,
+            threadId: target.threadId,
+            botId: contextBotId,
+            ...(target.kind === "group" ? { groupId: target.groupId } : {}),
+            ...clearFence,
+          })
+          .catch((error) => {
+            if (error instanceof ThreadClearConflictError) {
+              throw new ORPCError("CONFLICT", { message: error.message, cause: error });
+            }
+            throw error;
+          });
+        // clearThread returns the retired generation. The store validates each
+        // history save against the thread row, so no late write can revive it.
+        const semanticFacts = deps.semanticFacts;
+        if (semanticFacts) {
+          const botIds = target.kind === "bot" ? [target.botId] : target.memberBotIds;
+          await Promise.all(
+            botIds.map((botId) =>
+              semanticFacts.purgeHistory(
+                { botId, threadId: target.threadId, generations: [historyCompactionGeneration] },
+                computerContext(context.actor, botId, `thread-clear:${target.threadId}`),
+              ),
+            ),
+          );
+        }
         const [configuredMemory] = await Promise.all([
           target.kind === "bot"
             ? deps.memoryProviders.resolve(context.actor.spaceId).catch((error) => {
@@ -337,16 +403,18 @@ export function threadsRoutes(ctx: RouterContext) {
             ),
           ),
         ]);
-        // Durable memories remain in their Space-private containers. Clear only removes
-        // conversation-derived summaries from the previous generation; including the new
-        // generation also covers a compaction job that began just after the clear committed.
-        if (configuredMemory && target.kind === "bot") {
-          // Best effort: the conversation rows are already deleted, so failing the clear here
-          // would help nothing — a failed purge only leaves stale summaries recallable.
+        // Managed facts were fenced above. Legacy providers keep their best-effort
+        // purge of the cleared and preceding summary generations; never purge the new one.
+        if (
+          configuredMemory &&
+          target.kind === "bot" &&
+          !configuredMemory.provider.describe().capabilities.managedFacts
+        ) {
           try {
             const purged = await configuredMemory.provider.purgeHistory(
               {
                 botId: target.botId,
+                threadId: target.threadId,
                 generations: [
                   Math.max(0, historyCompactionGeneration - 1),
                   historyCompactionGeneration,

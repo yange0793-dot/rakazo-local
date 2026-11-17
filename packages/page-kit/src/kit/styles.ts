@@ -210,6 +210,11 @@ html{font-size:14px}
 .rk-page{max-width:none;padding:0}
 .rk-section[data-card],.rk-properties[data-card],.rk-table tr,.rk-chart,.rk-pie,.rk-diagram,.rk-callout{break-inside:avoid}
 .rk-heading{break-after:avoid}
+.rk-table-box,.rk-table-scroll[data-long]{max-height:none;overflow:visible}
+.rk-table-scroll{overflow:visible;mask-image:none;-webkit-mask-image:none}
+.rk-table-scroll[data-long] thead th{position:static;box-shadow:none}
+.rk-table-filter,.rk-table-more{display:none}
+.rk-table th,.rk-table td{white-space:normal;overflow-wrap:anywhere}
 }
 `;
 

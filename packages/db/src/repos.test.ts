@@ -423,7 +423,10 @@ describe("createRepos.listBots", () => {
     };
 
     await expect(createRepos(prisma as unknown as PrismaClient).listBots(actor)).resolves.toEqual([
-      expect.objectContaining({ updatedAt: "2026-08-20T10:30:00.000Z" }),
+      expect.objectContaining({
+        updatedAt: "2026-08-20T10:30:00.000Z",
+        settingsUpdatedAt: "2026-08-21T09:00:00.000Z",
+      }),
     ]);
   });
 

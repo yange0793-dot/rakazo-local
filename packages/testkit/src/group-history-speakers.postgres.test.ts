@@ -76,6 +76,23 @@ describe.skipIf(!databaseAvailable)("group history keeps roles and speakers", ()
           },
           response: { type: "text", text: "Anya did: Blue Heron." },
         },
+        // One send naming both: Anya speaks first, then Boris reads her reply in the same round.
+        {
+          expect(request) {
+            const text = JSON.stringify(request.messages);
+            expect(text).toContain("@Anya @Boris Compare notes on the name.");
+            expect(text).not.toContain("Grey Fox");
+          },
+          response: { type: "text", text: "Second code name: Grey Fox." },
+        },
+        {
+          expect(request) {
+            expect(JSON.stringify(request.messages)).toContain(
+              "[Anya]: Second code name: Grey Fox.",
+            );
+          },
+          response: { type: "text", text: "Grey Fox works for me too." },
+        },
       ],
     });
     const dataDir = await mkdtemp(path.join(tmpdir(), "rakazo-group-history-"));
@@ -165,6 +182,29 @@ describe.skipIf(!databaseAvailable)("group history keeps roles and speakers", ()
       await say("@Anya Invent a two-word code name for our project.", anya);
       await say("@Boris Say hello.", boris);
       await say("@Boris Who came up with the project code name?", boris);
+      // One message naming both members: the later member must see the earlier reply.
+      await rpc(handles.app, cookie, "threads/send", {
+        groupId: group.id,
+        text: "@Anya @Boris Compare notes on the name.",
+        mentions: [
+          { kind: "bot", id: anya.id },
+          { kind: "bot", id: boris.id },
+        ],
+      });
+      completed += 2;
+      await expect
+        .poll(
+          async () => {
+            const runs = await db.run.findMany({
+              where: { threadId: group.threadId, trigger: "user" },
+              select: { status: true },
+            });
+            if (runs.some((run) => run.status === "failed")) model.assertComplete();
+            return runs.filter((run) => run.status === "completed").length;
+          },
+          { timeout: 20_000, interval: 100 },
+        )
+        .toBe(completed);
       model.assertComplete();
       // The labels exist only in the request: stored messages are untouched.
       const stored = await db.message.findMany({ where: { threadId: group.threadId } });

@@ -64,13 +64,24 @@ export const FLEET_WRITE_TOOL_NAMES_SET: ReadonlySet<string> = new Set(FLEET_WRI
 const CREATED_RUN_TOOL_NAMES = new Set(["ask_user", "update_bot"]);
 
 /**
- * A background helper works while the bot keeps talking, so it only reads and looks things up:
- * no computer (the bot's own turns keep it), no questions to the user, and no changes to
- * memory, skills or routines, which the bot makes itself when the result comes back.
+ * A helper works while the bot keeps talking, so it does real work with the tools its task
+ * needs — looking things up, reading and writing files, running commands, and browsing pages
+ * on the bot's computer — but never talks to the user, asks them anything, or changes memory,
+ * skills or routines, which the bot makes itself when the result comes back. A tool that needs
+ * the owner runs only through the same rules, once approvals or Never ask as its own turn: its
+ * card goes to the chat that started it. The computer (and its screen) is shared, and its
+ * lease decides whose work uses it; only that work waits.
  */
 export const BACKGROUND_HELPER_TOOL_NAMES: ReadonlySet<string> = new Set([
   "web_search",
   "web_fetch",
+  "list_files",
+  "read_file",
+  "write_file",
+  "shell",
+  "browser_navigate",
+  "browser_snapshot",
+  "browser_act",
   "recall_memory",
   "skill_read",
   "task_catalog",
@@ -100,7 +111,7 @@ export function selectBuiltinToolsForRun(options: {
   phoneCallsEnabled?: boolean;
   historyRetrievalEnabled?: boolean;
   graphicalToolsAllowed: boolean;
-  /** Page browser tools need a graphical computer (Chrome), not model vision. */
+  /** Page browser capability is independent of model vision and native screen control. */
   pageBrowserAllowed?: boolean;
   groupId: string | null;
   trigger: string;

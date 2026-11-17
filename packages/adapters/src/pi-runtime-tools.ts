@@ -36,7 +36,6 @@ import {
   TOOL_RESULT_TEXT_LIMIT,
 } from "./pi-runtime-limits.js";
 import type { RuntimeModelTarget } from "./pi-runtime-models.js";
-import { executeSubagent } from "./pi-runtime-subagent.js";
 import { parametersFor, prepareFleetArguments } from "./pi-runtime-tool-parameters.js";
 import { recordPiTelemetryContent, withPiTelemetrySpan } from "./pi-telemetry.js";
 import { VERBATIM_TOOL_RESULTS } from "./runtime-context.js";
@@ -459,7 +458,6 @@ function toAgentTool(
           instructions: raw.instructions ? String(raw.instructions) : "",
           model_provider: raw.model_provider ? String(raw.model_provider) : "",
           model_id: raw.model_id ? String(raw.model_id) : "",
-          ...(raw.background === true ? { background: true } : {}),
         };
       }
       if (tool.name === "spawn_bot") {
@@ -620,14 +618,8 @@ function toAgentTool(
                   details: found,
                 };
               }
-              // A background helper is its own run, which the executor starts like any tool effect.
-              if (tool.name === "run_subagent" && args.background !== true) {
-                const result = await executeSubagent(host, executionId, args);
-                return {
-                  content: [{ type: "text", text: result }],
-                  details: { result },
-                };
-              }
+              // run_subagent is a helper run of its own, started like any other tool effect:
+              // the parent turn never waits for it.
               if (host.request.executeTool) {
                 const result = await host.request.executeTool(
                   tool.name,

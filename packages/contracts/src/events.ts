@@ -131,6 +131,8 @@ export const MessageBlock = z.discriminatedUnion("kind", [
     kind: z.literal("ask"),
     text: z.string(),
     approvalEffectId: Id.optional(),
+    /** Server-verified originating helper card, when an approval is shown in its parent chat. */
+    helper: z.object({ messageId: Id, name: z.string() }).optional(),
     instructionUpdate: z
       .object({
         botId: Id,
@@ -275,7 +277,7 @@ export const MessageBlock = z.discriminatedUnion("kind", [
     agentId: z.string(),
     name: z.string(),
     task: z.string(),
-    status: z.enum(["running", "completed", "failed"]),
+    status: z.enum(["running", "waiting", "completed", "failed"]),
     progress: z.string().optional(),
     result: z.string().optional(),
   }),

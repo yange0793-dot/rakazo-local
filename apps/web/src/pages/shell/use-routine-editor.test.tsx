@@ -38,18 +38,20 @@ let root: Root;
 let editor: ReturnType<typeof useRoutineEditor>;
 let finishUpdate: (saved: Routine) => void;
 const update = vi.fn();
+const create = vi.fn();
 const rotateWebhookSecret = vi.fn();
 let activeBot: Bot;
+let timezone: string;
 const activeBotId = { current: "" };
 
 function Harness() {
   editor = useRoutineEditor({
-    rpc: { routines: { update }, bots: { rotateWebhookSecret } } as unknown as ReturnType<
+    rpc: { routines: { update, create }, bots: { rotateWebhookSecret } } as unknown as ReturnType<
       typeof createSpaceRpc
     >,
     active: activeBot,
     activeBotId,
-    timezone: "UTC",
+    timezone,
     messageProviders: [],
     setBots: () => {},
     refreshThread: async () => ({}) as never,
@@ -62,9 +64,126 @@ beforeEach(() => {
   vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
   activeBot = { id: "bot-1", webhookConfigured: false } as Bot;
   activeBotId.current = activeBot.id;
+  timezone = "UTC";
   update.mockImplementation(() => new Promise<Routine>((resolve) => (finishUpdate = resolve)));
   root = createRoot(document.createElement("div"));
   act(() => root.render(<Harness />));
+});
+
+it("creates a one-time routine in the displayed timezone", async () => {
+  timezone = "Asia/Tokyo";
+  act(() => root.render(<Harness />));
+  create.mockResolvedValue({ ...routine, crons: ["@once"], nextRunAt: "2099-01-01T00:30:00Z" });
+  act(() =>
+    editor.editorProps!.onChange({
+      ...editor.editorProps!.draft,
+      name: "Reminder",
+      prompt: "Check",
+      active: true,
+      schedules: [{ freq: "Advanced", cron: "@once", time: "9:00 AM", n: 3, unit: "minutes" }],
+      runAtLocal: "2099-01-01T09:30",
+    }),
+  );
+  await act(async () => {
+    await editor.editorProps!.onSave();
+  });
+  expect(create).toHaveBeenCalledWith(
+    expect.objectContaining({
+      crons: ["@once"],
+      timezone: "Asia/Tokyo",
+      runAt: "2099-01-01T00:30:00.000Z",
+      active: true,
+    }),
+  );
+});
+
+it("keeps an edited paused one-time routine paused", async () => {
+  const paused = { ...routine, active: false, crons: ["@once"] };
+  update.mockResolvedValue(paused);
+  act(() => editor.editRoutine(paused));
+  act(() => editor.editorProps!.onChange({ ...editor.editorProps!.draft, name: "Renamed" }));
+  await act(async () => {
+    await editor.editorProps!.onSave();
+  });
+  expect(update.mock.lastCall?.[0]).not.toHaveProperty("active");
+  expect(update.mock.lastCall?.[0]).not.toHaveProperty("runAt");
+});
+
+it("requires an explicit new time when re-enabling a paused one-time routine", async () => {
+  const paused = { ...routine, active: false, crons: ["@once"], nextRunAt: null, lastRunAt: null };
+  act(() => editor.editRoutine(paused));
+  expect(editor.editorProps!.draft.runAtLocal).toBe("");
+  act(() => editor.editorProps!.onChange({ ...editor.editorProps!.draft, active: true }));
+  await act(async () => {
+    await editor.editorProps!.onSave();
+  });
+  expect(editor.editorProps!.error).toBe("Add a run time for this one-shot.");
+  expect(update).not.toHaveBeenCalled();
+});
+
+it("reflects a completed one-time schedule while preserving unsaved instructions", async () => {
+  const armed = { ...routine, crons: ["@once"], nextRunAt: "2099-01-01T09:00:00Z" };
+  act(() => editor.editRoutine(armed));
+  act(() => editor.editorProps!.onChange({ ...editor.editorProps!.draft, prompt: "New draft" }));
+  const finished = {
+    ...armed,
+    active: false,
+    nextRunAt: null,
+    lastRunAt: "2099-01-01T09:00:00Z",
+  };
+  act(() => editor.editorProps!.onScheduleUpdate(finished));
+  expect(editor.editorProps!.draft.active).toBe(false);
+  expect(editor.editorProps!.draft.prompt).toBe("New draft");
+  expect(editor.editingRoutine?.lastRunAt).toBe(finished.lastRunAt);
+  update.mockResolvedValue({ ...finished, prompt: "New draft" });
+  await act(async () => {
+    await editor.editorProps!.onSave();
+  });
+  expect(update.mock.lastCall?.[0]).not.toHaveProperty("active");
+  expect(update.mock.lastCall?.[0]).not.toHaveProperty("runAt");
+});
+
+it("keeps an unsaved pause when the server advances a recurring schedule", () => {
+  act(() => editor.editRoutine(routine));
+  act(() => editor.editorProps!.onChange({ ...editor.editorProps!.draft, active: false }));
+  act(() =>
+    editor.editorProps!.onScheduleUpdate({ ...routine, nextRunAt: "2099-01-01T09:00:00Z" }),
+  );
+  expect(editor.editorProps!.draft.active).toBe(false);
+});
+
+it("asks for a new time when changing a recurring routine to one-time", async () => {
+  act(() => editor.editRoutine({ ...routine, nextRunAt: "2099-01-01T09:00:00Z" }));
+  act(() =>
+    editor.editorProps!.onChange({
+      ...editor.editorProps!.draft,
+      schedules: [{ freq: "Advanced", cron: "@once", time: "9:00 AM", n: 3, unit: "minutes" }],
+      runAtLocal: "",
+    }),
+  );
+  await act(async () => {
+    await editor.editorProps!.onSave();
+  });
+  expect(editor.editorProps!.error).toContain("run time");
+  expect(update).not.toHaveBeenCalled();
+});
+
+it("requires a future run time before creating an active one-time routine", async () => {
+  for (const runAtLocal of ["", "2000-01-01T09:00"]) {
+    act(() =>
+      editor.editorProps!.onChange({
+        ...editor.editorProps!.draft,
+        active: true,
+        schedules: [{ freq: "Advanced", cron: "@once", time: "9:00 AM", n: 3, unit: "minutes" }],
+        runAtLocal,
+      }),
+    );
+    await act(async () => {
+      await editor.editorProps!.onSave();
+    });
+    expect(editor.editorProps!.error).toBeTruthy();
+    expect(create).not.toHaveBeenCalled();
+  }
 });
 
 afterEach(() => {

@@ -1551,6 +1551,144 @@ describe("thread event reduction", () => {
   });
 });
 
+describe("helper approval projection", () => {
+  const card = {
+    kind: "subagent" as const,
+    agentId: "helper-call-1",
+    name: "scout",
+    task: "write the note",
+    status: "running" as const,
+  };
+
+  function helperAsk(status: "pending" | "answered" = "pending", withMetadata = true) {
+    return {
+      kind: "ask" as const,
+      text: "scout needs approval to write",
+      status,
+      ...(status === "answered" ? { answer: "allow" } : {}),
+      approvalEffectId: "effect-1",
+      actions: [
+        { id: "allow", label: "Allow once" },
+        { id: "deny", label: "Deny" },
+      ],
+      ...(withMetadata ? { helper: { messageId: "card", name: "scout" } } : {}),
+    } satisfies ThreadMessage["blocks"][number];
+  }
+
+  const askMessage = {
+    ...message("ask-1", [helperAsk()]),
+    runId: "helper-1",
+  };
+
+  it("adds the waiting helper run behind the chat's card without touching the main run", () => {
+    const initial = { ...snapshot([message("card", [card])]), run: null };
+
+    const next = reduceThreadSnapshot(
+      initial,
+      event({
+        type: "thread.message.created",
+        runId: "helper-1",
+        payload: { messageId: "ask-1", role: "bot", blocks: [helperAsk()] },
+      }),
+    );
+
+    expect(next?.run).toBeNull();
+    expect(next?.activeRuns).toEqual([
+      expect.objectContaining({
+        id: "helper-1",
+        status: "waiting_input",
+        trigger: "helper",
+        threadId: "thread-1",
+      }),
+    ]);
+    expect(answerableAskMessageIds(next)).toEqual(new Set(["ask-1"]));
+  });
+
+  it("keeps a waiting main run answerable while the helper waits beside it", () => {
+    const paused = { ...threadRun("paused"), status: "waiting_input" as const };
+    const initial: ThreadSnapshot = {
+      ...snapshot([askMessage]),
+      run: paused,
+      activeRuns: undefined,
+    };
+
+    const next = reduceThreadSnapshot(
+      initial,
+      event({
+        type: "thread.message.created",
+        runId: "helper-1",
+        payload: { messageId: "ask-1", role: "bot", blocks: [helperAsk()] },
+      }),
+    );
+
+    expect(next?.activeRuns?.map((run) => run.id)).toEqual(["paused", "helper-1"]);
+    expect(next?.run?.id).toBe("paused");
+  });
+
+  it("drops the helper run once its card is answered, leaving the main run as it was", () => {
+    const initial = {
+      ...snapshot([message("card", [card]), askMessage]),
+      activeRuns: [
+        { ...threadRun("helper-1"), status: "waiting_input", trigger: "helper" as const },
+      ],
+    };
+
+    const next = reduceThreadSnapshot(
+      initial,
+      event({
+        type: "thread.message.updated",
+        runId: "helper-1",
+        payload: { messageId: "ask-1", role: "bot", blocks: [helperAsk("answered")] },
+      }),
+    );
+
+    expect(next?.activeRuns).toEqual([]);
+    expect(next?.run).toBeNull();
+    expect(answerableAskMessageIds(next)).toEqual(new Set());
+  });
+
+  it("drops the helper run when the card it belongs to settles, as a stopped helper does", () => {
+    const initial = {
+      ...snapshot([message("card", [card]), askMessage]),
+      activeRuns: [
+        { ...threadRun("helper-1"), status: "waiting_input", trigger: "helper" as const },
+      ],
+    };
+
+    const next = reduceThreadSnapshot(
+      initial,
+      event({
+        type: "thread.message.updated",
+        payload: {
+          messageId: "card",
+          role: "bot",
+          blocks: [{ ...card, status: "failed", result: "stopped" }],
+        },
+      }),
+    );
+
+    expect(next?.activeRuns).toEqual([]);
+    expect(next?.run).toBeNull();
+    expect(answerableAskMessageIds(next)).toEqual(new Set());
+  });
+
+  it("leaves an ordinary ask alone", () => {
+    const initial = snapshot([message("card", [card])]);
+
+    const next = reduceThreadSnapshot(
+      initial,
+      event({
+        type: "thread.message.created",
+        runId: "run-paused",
+        payload: { messageId: "ask-2", role: "bot", blocks: [helperAsk("pending", false)] },
+      }),
+    );
+
+    expect(next?.activeRuns).toBeUndefined();
+    expect(answerableAskMessageIds(next)).toEqual(new Set());
+  });
+});
+
 describe("stale helper projection", () => {
   it.each([
     "run.waiting_input",

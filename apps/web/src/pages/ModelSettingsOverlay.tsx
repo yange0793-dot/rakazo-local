@@ -6,7 +6,6 @@ import {
   OPENAI_COMPATIBLE_PROVIDER_ID,
   savedCompatibleEndpointMatches,
 } from "@rakazo/contracts";
-import { popularModelProvidersFirst } from "@rakazo/core";
 import {
   Button,
   Dialog,
@@ -24,6 +23,7 @@ import { useEffect, useRef, useState } from "react";
 import { ConfirmDialog } from "../components/ConfirmDialog";
 import type { ModelCredential } from "../lib/model-auth";
 import { useSpaceQueries } from "../lib/query";
+import { errorText } from "../lib/user-error";
 import type { ModelRoleConnectIntent } from "./ModelRoleSettings";
 import { ModelRoleSettings, useModelRole } from "./ModelRoleSettings";
 import { CompatibleModelFields } from "./model-settings/compatible-model-fields";
@@ -61,7 +61,6 @@ export function ModelSettingsOverlay({
     credentials,
     disconnectCredential,
     disconnectName,
-    endpointPresets,
     error,
     groups,
     handleClose,
@@ -82,6 +81,10 @@ export function ModelSettingsOverlay({
     setMaxTokens,
     setNotice,
     settingsDirty,
+    sources,
+    sourceError,
+    syncingSources,
+    syncSources,
   } = model;
   // Where the connection form opens: under a role's list, under a provider row, or at the
   // end of Providers when adding one. The rest of the page stays where it was.
@@ -91,21 +94,16 @@ export function ModelSettingsOverlay({
     panelRef.current?.scrollIntoView?.({ block: "nearest" });
   }, [connectionAt]);
 
-  // Adding another account is open to every provider, connected or not.
-  const allProviders = popularModelProvidersFirst<ConnectableProvider>(
-    [
-      ...groups.map((group) => ({ id: group.id, name: group.name })),
-      ...(groups.some((group) => group.id === OPENAI_COMPATIBLE_PROVIDER_ID)
-        ? endpointPresets.map((preset) => ({
-            id: OPENAI_COMPATIBLE_PROVIDER_ID,
-            name: preset.name,
-            baseUrl: preset.baseUrl,
-          }))
-        : []),
-    ],
-    (entry) => entry.id,
-    (entry) => entry.name,
-  );
+  // This deployment reaches models through one custom endpoint, so the built-in
+  // provider list stays out of the pickers and only the custom connection is offered.
+  const allProviders: ConnectableProvider[] = [
+    {
+      id: OPENAI_COMPATIBLE_PROVIDER_ID,
+      name:
+        groups.find((group) => group.id === OPENAI_COMPATIBLE_PROVIDER_ID)?.name ??
+        t`Custom server`,
+    },
+  ];
   const providers = allProviders.filter((entry) =>
     entry.baseUrl
       ? !savedCompatibleEndpointMatches(
@@ -115,6 +113,7 @@ export function ModelSettingsOverlay({
       : !credentialByProvider.has(entry.id),
   );
   const connectionName = (entry: ModelCredential) => {
+    if (entry.catalogSource) return entry.label;
     const group = groups.find((item) => item.id === entry.provider);
     return connectionDisplayName(
       entry,
@@ -380,6 +379,14 @@ export function ModelSettingsOverlay({
           ) : null}
           {scope === "space" ? null : (
             <ProvidersSection
+              sources={sources}
+              sourceError={sourceError}
+              syncingSources={syncingSources}
+              onSync={(sourceId) =>
+                void syncSources(sourceId).catch((err: unknown) =>
+                  model.setError(errorText(err, t`Could not load model settings`)),
+                )
+              }
               credentials={credentials}
               providers={allProviders}
               name={connectionName}

@@ -20,7 +20,7 @@ import {
   GROUP_MEMBER_MIN,
 } from "@rakazo/contracts";
 import { ACTIVE_RUN_STATUSES } from "@rakazo/core";
-import type { Prisma, PrismaClient } from "@rakazo/db";
+import type { Prisma, PrismaClient, SemanticFactStore } from "@rakazo/db";
 import {
   cancelRunsInTransaction,
   clearEndedRunState,
@@ -225,6 +225,8 @@ type BotLifecycleDeps = {
   messagingInstallations?: {
     removeForBot(bot: { id: string; spaceId: string; userId: string }): Promise<void>;
   };
+  /** Retires a deleted bot's isolated scope; shared facts stay owned by the space. */
+  semanticFacts?: Pick<SemanticFactStore, "retireScope">;
 };
 
 type LifecycleBot = {
@@ -391,6 +393,15 @@ export async function destroyBot(
     strictTeardown?: boolean;
   },
 ) {
+  // The lifecycle caller already authorized deletion. Retirement acts for the
+  // bot's owner so an authorized space owner can also remove another member's
+  // bot. Shared facts belong to the surviving space, not this isolated scope.
+  // Markdown's preserve/delete choice stays separate; the delete outbox outlives
+  // the bot's cascading rows and late isolated writes must remain fenced out.
+  await deps.semanticFacts?.retireScope(
+    { spaceId: bot.spaceId, botId: bot.id },
+    { ...context, spaceId: bot.spaceId, userId: bot.userId, botId: bot.id },
+  );
   await deps.messagingInstallations?.removeForBot(bot);
   const [dedicated, activeRuns, routines] = await Promise.all([
     deps.prisma.computer.findUnique({

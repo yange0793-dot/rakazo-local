@@ -37,6 +37,8 @@ export interface ExecutorDeps {
   sandbox: SandboxProvider;
   memory: MemoryStore;
   memoryProviders: MemoryProviderResolver;
+  /** Enables pointer-only post-turn scheduling; the optional worker owns extraction. */
+  automaticMemory?: { enabled: true };
   home: AgentHomeStore;
   artifacts?: ArtifactStore;
   connector?: ConnectorProvider;

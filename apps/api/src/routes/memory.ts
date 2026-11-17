@@ -1,4 +1,5 @@
 import { ORPCError } from "@orpc/server";
+import type { AdapterContext, SemanticMemoryResponse } from "@rakazo/adapter-kit";
 import { MEMORY_REVISION_CONFLICT_ERROR } from "@rakazo/adapter-kit";
 import {
   buildAgentMemoryPrompt,
@@ -7,6 +8,7 @@ import {
   mapScratchpadItem,
   readAgentMemory,
 } from "@rakazo/adapters";
+import type { Actor, SemanticFact } from "@rakazo/contracts";
 import { isDeletableMemoryDocument } from "@rakazo/contracts";
 import { findSpaceMemoryConfig, IsolationError } from "@rakazo/db";
 import {
@@ -17,10 +19,107 @@ import {
 } from "../memory-provider-config.js";
 import type { RouterContext } from "./context.js";
 
+function semanticValue<T>(response: SemanticMemoryResponse<T>): T {
+  if (response.ok) return response.value;
+  if (response.error === MEMORY_REVISION_CONFLICT_ERROR) {
+    throw new ORPCError("CONFLICT", { message: response.error });
+  }
+  throw new ORPCError(response.code ?? "SERVICE_UNAVAILABLE", { message: response.error });
+}
+
+function factManagementUnsupported(): never {
+  throw new ORPCError("NOT_IMPLEMENTED", {
+    message: "This memory provider does not support fact management.",
+  });
+}
+
+function factContext(actor: Actor, botId: string, operationId: string, signal?: AbortSignal) {
+  return {
+    operationId,
+    traceId: operationId,
+    spaceId: actor.spaceId,
+    userId: actor.userId,
+    botId,
+    signal: signal ?? new AbortController().signal,
+  } satisfies AdapterContext;
+}
+
 export function memoryRoutes(ctx: RouterContext) {
   const { deps, repos, taughtSkills, agentSkills, authed } = ctx;
+  const managedProvider = async (actor: Actor, botId: string) => {
+    // Even an unsupported provider must not let a foreign or invented bot through.
+    await repos.getBot(actor, botId, { includeArchived: true });
+    const configured = await deps.memoryProviders.resolve(actor.spaceId);
+    return configured?.provider.describe().capabilities.managedFacts === true
+      ? configured.provider
+      : null;
+  };
   return {
     memory: {
+      facts: authed.memory.facts.handler(async ({ context, input }) => {
+        const provider = await managedProvider(context.actor, input.botId);
+        if (!provider?.listFacts) {
+          return { supported: false, items: [], nextCursor: null };
+        }
+        return semanticValue(
+          await provider.listFacts(
+            input,
+            factContext(context.actor, input.botId, "memory.facts", context.signal),
+          ),
+        );
+      }),
+      correctFact: authed.memory.correctFact.handler(async ({ context, input }) => {
+        const provider = await managedProvider(context.actor, input.botId);
+        if (!provider?.correctFact) factManagementUnsupported();
+        // The provider authors manual provenance from this authenticated context;
+        // clients cannot supply a run, source quote, or a user-confirmed label.
+        return semanticValue(
+          await provider.correctFact(
+            input,
+            factContext(context.actor, input.botId, "memory.correctFact", context.signal),
+          ),
+        );
+      }),
+      forgetFact: authed.memory.forgetFact.handler(async ({ context, input }) => {
+        const provider = await managedProvider(context.actor, input.botId);
+        if (!provider?.forget) factManagementUnsupported();
+        const forgotten = semanticValue(
+          await provider.forget(
+            input,
+            factContext(context.actor, input.botId, "memory.forgetFact", context.signal),
+          ),
+        );
+        if (!forgotten.expired) {
+          throw new ORPCError("CONFLICT", {
+            message: forgotten.reason ?? "The memory fact was not forgotten.",
+          });
+        }
+        return { ok: true as const };
+      }),
+      exportFacts: authed.memory.exportFacts.handler(async ({ context, input }) => {
+        const provider = await managedProvider(context.actor, input.botId);
+        if (!provider?.listFacts) factManagementUnsupported();
+        const facts: SemanticFact[] = [];
+        const adapterContext = factContext(
+          context.actor,
+          input.botId,
+          "memory.exportFacts",
+          context.signal,
+        );
+        let cursor: string | undefined;
+        do {
+          const page = semanticValue(
+            await provider.listFacts(
+              { ...input, includeHistory: true, limit: 100, ...(cursor ? { cursor } : {}) },
+              adapterContext,
+            ),
+          );
+          if (!page.supported) factManagementUnsupported();
+          facts.push(...page.items);
+          cursor = page.nextCursor ?? undefined;
+        } while (cursor);
+        return { format: "rakazo-semantic-memory-v1" as const, facts };
+      }),
       list: authed.memory.list.handler(async ({ context, input }) => {
         const docs = await deps.prisma.memoryDocument.findMany({
           where: {

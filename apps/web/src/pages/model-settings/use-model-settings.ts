@@ -1,5 +1,5 @@
 import { useLingui } from "@lingui/react/macro";
-import type { Me, SettingsScope, ThinkingLevel } from "@rakazo/contracts";
+import type { Me, ModelCatalogSourceStatus, SettingsScope, ThinkingLevel } from "@rakazo/contracts";
 import {
   compatibleEndpointPresets,
   connectionDisplayName,
@@ -19,8 +19,8 @@ import {
   popularModelProvidersFirst,
   savedCompatibleModelIds,
 } from "@rakazo/core";
-import { fetchFresh } from "@rakazo/core/query";
-import { useQuery, useQueryClient } from "@tanstack/react-query";
+import { fetchFresh, writeSaved } from "@rakazo/core/query";
+import { isCancelledError, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useLayoutEffect, useMemo, useRef, useState } from "react";
 import { useCopyText } from "../../lib/copy-text";
 import { providerDisplayName } from "../../lib/localized-provider-hint";
@@ -37,6 +37,7 @@ import { useModelConnectionForm } from "./use-model-connection-form";
 
 const NO_CATALOG: ModelCatalogEntry[] = [];
 const NO_CREDENTIALS: never[] = [];
+const NO_SOURCES: ModelCatalogSourceStatus[] = [];
 
 export type ModelConnectIntent = {
   /** False keeps the current main model; the connection is for a fallback or another role. */
@@ -69,9 +70,14 @@ export function useModelSettings(onClose: () => void, scope: SettingsScope) {
     queryKey: queries.models.credentials.queryKey(),
     queryFn: () => rpc.models.credentials(),
   };
+  const sourcesQuery = {
+    queryKey: queries.models.sources.queryKey(),
+    queryFn: () => rpc.models.sources(),
+  };
   const meQuery = { queryKey: queries.me.queryKey(), queryFn: () => rpc.me() };
   const catalog = useQuery(catalogQuery).data ?? NO_CATALOG;
   const credentials = useQuery(credentialsQuery).data ?? NO_CREDENTIALS;
+  const sources = useQuery(sourcesQuery).data ?? NO_SOURCES;
   const me: Me | null = useQuery(meQuery).data ?? null;
   // The connection the dialog edits; null connects a new one.
   const [credentialId, setCredentialIdState] = useState<string | null>(null);
@@ -128,6 +134,8 @@ export function useModelSettings(onClose: () => void, scope: SettingsScope) {
   );
   const [pending, setPending] = useState<"connect" | "settings" | "disconnect" | null>(null);
   const [confirmDisconnect, setConfirmDisconnect] = useState(false);
+  const [syncingSources, setSyncingSources] = useState(false);
+  const [sourceError, setSourceError] = useState<string | null>(null);
   const refreshRevisionRef = useRef(0);
   const selectionRevisionRef = useRef(0);
   const formRevisionRef = useRef(0);
@@ -176,6 +184,25 @@ export function useModelSettings(onClose: () => void, scope: SettingsScope) {
     if (refreshRevision !== refreshRevisionRef.current) return undefined;
     applyLoaded(nextCatalog, nextCredentials, nextMe, selectionRevision);
     return nextCredentials;
+  }
+
+  async function syncSources(sourceId?: string, keepForm = true) {
+    setSyncingSources(true);
+    setSourceError(null);
+    try {
+      const nextSources = await rpc.models.syncSources(sourceId ? { sourceId } : {});
+      await writeSaved(queryClient, sourcesQuery.queryKey, () => nextSources);
+    } catch (err) {
+      setSourceError(errorText(err, t`Could not sync model sources`));
+    }
+    try {
+      // Sync may finish after a connection has been opened or edited.
+      await refresh({ keepForm: keepForm || selectionRevisionRef.current !== 0 });
+    } catch (err) {
+      if (!isCancelledError(err)) setError(errorText(err, t`Could not load model settings`));
+    } finally {
+      setSyncingSources(false);
+    }
   }
 
   /** Points the form at the saved choice, unless the user picked something since the load began. */
@@ -227,8 +254,13 @@ export function useModelSettings(onClose: () => void, scope: SettingsScope) {
       applyLoaded(cachedCatalog, cachedCredentials, cachedMe, selectionRevisionRef.current);
     }
     void refresh({ reuse: true })
-      .catch((err: unknown) => setError(errorText(err, t`Could not load model settings`)))
+      .catch((err: unknown) => {
+        if (!isCancelledError(err)) setError(errorText(err, t`Could not load model settings`));
+      })
       .finally(() => setLoading(false));
+    void syncSources(undefined, false).catch((err: unknown) =>
+      setError(errorText(err, t`Could not load model settings`)),
+    );
     return () => {
       refreshRevisionRef.current += 1;
       modelProbe.invalidate();
@@ -267,11 +299,13 @@ export function useModelSettings(onClose: () => void, scope: SettingsScope) {
   const selectedProviderName =
     endpointPreset?.name ?? groups.find((group) => group.id === provider)?.name ?? provider;
   const selectedConnectionName = credential
-    ? connectionDisplayName(
-        credential,
-        groups.find((group) => group.id === provider)?.name ?? provider,
-        modelsForProvider[0]?.providerName ? [modelsForProvider[0].providerName] : [],
-      )
+    ? credential.catalogSource
+      ? credential.label
+      : connectionDisplayName(
+          credential,
+          groups.find((group) => group.id === provider)?.name ?? provider,
+          modelsForProvider[0]?.providerName ? [modelsForProvider[0].providerName] : [],
+        )
     : selectedProviderName;
   const disconnectName = selectedConnectionName;
   const hostCredentialSource = me?.hostCredentialSource ?? "";
@@ -309,7 +343,7 @@ export function useModelSettings(onClose: () => void, scope: SettingsScope) {
   const settingsDirty =
     !isOpenAiCompatible &&
     Boolean(credential) &&
-    (maxTokens.trim() !== connectionMaxTokensField(provider, credential?.maxTokens) ||
+    (maxTokens.trim() !== connectionMaxTokensField(credential?.maxTokens) ||
       (needsRouting &&
         (accountId.trim() !== (credential?.accountId ?? "") ||
           gatewayId.trim() !== (credential?.gatewayId ?? ""))));
@@ -531,6 +565,10 @@ export function useModelSettings(onClose: () => void, scope: SettingsScope) {
     setConfirmDisconnect,
     setPasteCode,
     settingsDirty,
+    sources,
+    sourceError,
+    syncingSources,
+    syncSources,
     submitOAuthCode,
     subscriptionSignIn,
     testOAuthConnection,

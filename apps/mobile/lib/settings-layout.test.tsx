@@ -25,16 +25,20 @@ type ScreenOptions = (props: {
 };
 
 const { stack, sheet } = vi.hoisted(() => ({
-  stack: { screenOptions: undefined as ScreenOptions | undefined },
+  stack: { screenOptions: undefined as ScreenOptions | undefined, screens: [] as string[] },
   sheet: { canGoBack: vi.fn(), goBack: vi.fn(), dispatch: vi.fn() },
 }));
 
 vi.mock("expo-router", () => {
   function Stack(props: { screenOptions: ScreenOptions; children?: ReactNode }) {
     stack.screenOptions = props.screenOptions;
-    return null;
+    stack.screens = [];
+    return <>{props.children}</>;
   }
-  Stack.Screen = () => null;
+  Stack.Screen = ({ name }: { name: string }) => {
+    stack.screens.push(name);
+    return null;
+  };
   return { Stack, useNavigation: () => sheet };
 });
 vi.mock("react-native", () => ({ Platform: { OS: "ios" } }));
@@ -66,6 +70,10 @@ describe("settings sheet header", () => {
     act(() => root.unmount());
   });
   afterEach(() => vi.unstubAllGlobals());
+
+  it("registers the managed memory screen in the settings stack", () => {
+    expect(stack.screens).toContain("semantic-memory");
+  });
 
   it("closes the sheet from its first page back to the screen under it", () => {
     sheet.canGoBack.mockReturnValue(true);

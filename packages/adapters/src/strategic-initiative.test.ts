@@ -212,7 +212,7 @@ describe("reconcileStrategicInitiatives", () => {
     );
   });
 
-  it("treats a bot whose only active run is a background helper as free", async () => {
+  it("treats a bot with any active run, including a helper, as busy", async () => {
     const { prisma } = strategicPrisma({ bots: [] });
     await reconcileStrategicInitiatives({
       prisma,
@@ -230,7 +230,6 @@ describe("reconcileStrategicInitiatives", () => {
                   status: {
                     in: ["queued", "leased", "running", "waiting_input", "waiting_takeover"],
                   },
-                  trigger: { not: "helper" },
                 },
               ]),
             },

@@ -184,7 +184,10 @@ function MessageBubbleBody(props: ComponentProps<typeof MessageBubbleContent>) {
         // A saved running card is a background helper's; a live one belongs to this turn.
         stopHelper={
           first.kind === "subagent" && message.botId && !message.id.startsWith("subagent:")
-            ? { botId: message.botId, messageId: message.id }
+            ? {
+                ...(props.groupId ? { groupId: props.groupId } : { botId: message.botId }),
+                messageId: message.id,
+              }
             : undefined
         }
       />

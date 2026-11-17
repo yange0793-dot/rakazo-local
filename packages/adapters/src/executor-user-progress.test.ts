@@ -150,7 +150,7 @@ async function runTurn(
     if (finalText) yield { type: "text" as const, text: finalText };
     yield { type: "done" as const, text: options.doneText ?? narrations.join("") + finalText };
   });
-  const messages: { blocks: MessageBlock[] }[] = [];
+  const messages: { role?: string; blocks: MessageBlock[] }[] = [];
   const savedEvents: AppendEventInput[] = [];
   let failMessage = options.failMessageOnce;
   const prisma = {
@@ -2011,7 +2011,12 @@ describe("a group member the message named nobody for", () => {
     expect(result.finalizeRun).toHaveBeenCalledExactlyOnceWith(
       expect.objectContaining({ outcome: "completed", blocks: [], markUnread: false }),
     );
-    expect(result.messages).toEqual([]);
+    expect(result.messages).toEqual([
+      expect.objectContaining({
+        role: "system",
+        blocks: [{ kind: "meta", text: "Assistant passed." }],
+      }),
+    ]);
   });
 
   it("keeps a possible silent ending out of the chat when a follow-up steers it", async () => {
@@ -2021,7 +2026,7 @@ describe("a group member the message named nobody for", () => {
       text("NO_RESPONSE"),
       done,
     ]);
-    expect(result.messages).toEqual([]);
+    expect(result.messages.filter((message) => message.role !== "system")).toEqual([]);
   });
 
   it("cannot hand off a message every member already received", async () => {
@@ -2063,7 +2068,7 @@ describe("a group member the message named nobody for", () => {
       expect(result.finalizeRun).toHaveBeenCalledExactlyOnceWith(
         expect.objectContaining({ blocks: [], markUnread: false }),
       );
-      expect(result.messages).toEqual([]);
+      expect(result.messages.filter((message) => message.role !== "system")).toEqual([]);
       expect(result.savedEvents.filter((event) => event.type === "thread.progress")).toEqual([]);
     },
   );

@@ -1,5 +1,6 @@
 // @vitest-environment jsdom
 
+import type { ModelCredential } from "@rakazo/contracts";
 import { notifyManager } from "@tanstack/react-query";
 import type { CSSProperties, ReactNode, Ref } from "react";
 import { act, createElement, useEffect, useImperativeHandle } from "react";
@@ -37,6 +38,7 @@ const mocks = vi.hoisted(() => ({
   vendorLabels: false,
   subscriptionSignIn: false,
   secondConnection: false,
+  catalogSource: undefined as ModelCredential["catalogSource"],
   alert: vi.fn(),
   prompt: vi.fn(),
   completeOAuth: vi.fn(),
@@ -232,6 +234,7 @@ vi.mock("./api", () => ({
               modelId: "vendor/model-1",
               isDefault: true,
               thinkingLevel: "high",
+              catalogSource: mocks.catalogSource,
             },
             ...(mocks.secondConnection
               ? [
@@ -597,6 +600,7 @@ beforeEach(() => {
   mocks.vendorLabels = false;
   mocks.subscriptionSignIn = false;
   mocks.secondConnection = false;
+  mocks.catalogSource = undefined;
   mocks.backups = [];
   mocks.primary = null;
   mocks.rpc.mockReset();
@@ -1055,6 +1059,26 @@ describe("model role lists", () => {
     [...section(title).querySelectorAll<HTMLButtonElement>("button")].find((button) =>
       button.textContent?.includes(name),
     )!;
+
+  it("marks a retired main model without offering it again in the picker", async () => {
+    mocks.primary = model(1);
+    mocks.catalogSource = {
+      id: "source-fixture",
+      label: "Model gateway",
+      group: "messages",
+      providerId: "provider-fixture",
+      available: true,
+      unavailableModelIds: ["vendor/model-1"],
+    };
+    await renderModels();
+    expect(rowButton("Main model", "Model 1").textContent).toContain("Unavailable");
+    act(() => rowButton("Main model", "Model 1").click());
+    const route = mocks.push.mock.lastCall![0] as { params: { requestId: string } };
+    const choices = modelPickerRequest(route.params.requestId)!.choices;
+    expect(choices.some((choice) => choice.modelId === "vendor/model-1")).toBe(false);
+    expect(choices.some((choice) => choice.modelId === "vendor/model-2")).toBe(true);
+    expect(roleSaves()).toEqual([]);
+  });
 
   it("opens Android model options from accessibility activation", async () => {
     mocks.platform = "android";

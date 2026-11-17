@@ -1,6 +1,6 @@
 import { MemoryProviderPrivateEndpointRequiredError } from "@rakazo/adapters";
 import type { PrismaClient } from "@rakazo/db";
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   disconnectMemoryProvider,
   persistMemoryProviderConfig,
@@ -437,6 +437,158 @@ describe("persistMemoryProviderConfig", () => {
     expect(prepareConnection).toHaveBeenCalledWith(
       expect.objectContaining({ allowPrivateEndpoint: false }),
     );
+    expect(transaction).not.toHaveBeenCalled();
+  });
+});
+
+describe("managed local memory endpoint policy", () => {
+  const baseUrl = "http://127.0.0.1:18493";
+  const input = {
+    provider: "local",
+    settings: { baseUrl },
+    credentials: { token: "synthetic-memory-token" },
+    defaultMemoryScope: "isolated" as const,
+  };
+
+  afterEach(() => {
+    vi.unstubAllEnvs();
+  });
+
+  it("allows only an exact operator-authorized origin while private MCP remains disabled", async () => {
+    vi.stubEnv("RAKAZO_LOCAL_MEMORY_ALLOWED_URLS", baseUrl);
+    vi.stubEnv("MCP_ALLOW_PRIVATE_ENDPOINT", "false");
+    const { deps, upsert } = makeDeps({
+      upsertResult: {
+        provider: "local",
+        settings: input.settings,
+        defaultMemoryScope: "isolated",
+        updatedAt: new Date("2026-11-16T00:00:00.000Z"),
+      },
+    });
+    const prepareConnection = vi.fn(async () => ({
+      provider: "local",
+      settings: input.settings,
+      credentials: input.credentials,
+    }));
+    const result = await persistMemoryProviderConfig(
+      { ...deps, env: { mcpAllowPrivateEndpoint: false }, prepareConnection },
+      actor,
+      input,
+    );
+    expect(prepareConnection).toHaveBeenCalledExactlyOnceWith({
+      ...input,
+      allowPrivateEndpoint: false,
+      localAllowedUrls: baseUrl,
+    });
+    expect(upsert).toHaveBeenCalledWith(
+      expect.objectContaining({
+        create: expect.objectContaining({ provider: "local", settings: { baseUrl } }),
+      }),
+    );
+    expect(result.provider).toBe("local");
+    expect(JSON.stringify(result)).not.toContain("synthetic-memory-token");
+    expect(deps.secrets.put).toHaveBeenCalledWith(
+      JSON.stringify(input.credentials),
+      expect.any(Object),
+    );
+    expect(process.env.MCP_ALLOW_PRIVATE_ENDPOINT).toBe("false");
+  });
+
+  it.each(["", "http://127.0.0.1:18494", "http://[::1]:18493"])(
+    "refuses a different origin before preparation despite global private-network permission: %s",
+    async (allowed) => {
+      vi.stubEnv("RAKAZO_LOCAL_MEMORY_ALLOWED_URLS", allowed);
+      const { deps, transaction } = makeDeps();
+      const prepareConnection = vi.fn();
+      await expect(
+        persistMemoryProviderConfig(
+          { ...deps, env: { mcpAllowPrivateEndpoint: true }, prepareConnection },
+          actor,
+          input,
+        ),
+      ).rejects.toMatchObject({ code: "FORBIDDEN" });
+      expect(prepareConnection).not.toHaveBeenCalled();
+      expect(deps.secrets.put).not.toHaveBeenCalled();
+      expect(transaction).not.toHaveBeenCalled();
+    },
+  );
+
+  it("does not accept a client-supplied allowlist as deployment authorization", async () => {
+    vi.stubEnv("RAKAZO_LOCAL_MEMORY_ALLOWED_URLS", "");
+    const { deps, transaction } = makeDeps();
+    const prepareConnection = vi.fn();
+    await expect(
+      persistMemoryProviderConfig({ ...deps, prepareConnection }, deploymentOwner, {
+        ...input,
+        settings: { baseUrl, localAllowedUrls: baseUrl, endpointTrust: "local" },
+      }),
+    ).rejects.toMatchObject({ code: "FORBIDDEN" });
+    expect(prepareConnection).not.toHaveBeenCalled();
+    expect(transaction).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    "http://localhost:18493",
+    "http://10.0.0.8:18493",
+    "http://169.254.169.254:18493",
+    "http://127.0.0.1:18493/internal",
+    "http://127.0.0.1:18493?",
+    "http://token@127.0.0.1:18493",
+  ])("rejects invalid local index origins before a credentialed probe: %s", async (invalidUrl) => {
+    vi.stubEnv("RAKAZO_LOCAL_MEMORY_ALLOWED_URLS", baseUrl);
+    const { deps, transaction } = makeDeps();
+    const prepareConnection = vi.fn();
+    await expect(
+      persistMemoryProviderConfig(
+        { ...deps, env: { mcpAllowPrivateEndpoint: true }, prepareConnection },
+        actor,
+        { ...input, settings: { baseUrl: invalidUrl } },
+      ),
+    ).rejects.toMatchObject({ code: "BAD_REQUEST" });
+    expect(prepareConnection).not.toHaveBeenCalled();
+    expect(deps.secrets.put).not.toHaveBeenCalled();
+    expect(transaction).not.toHaveBeenCalled();
+  });
+
+  it("requires real space ownership even for an authorized deployment endpoint", async () => {
+    vi.stubEnv("RAKAZO_LOCAL_MEMORY_ALLOWED_URLS", baseUrl);
+    const { deps, transaction } = makeDeps({ spaceOwner: false });
+    const prepareConnection = vi.fn();
+    await expect(
+      persistMemoryProviderConfig({ ...deps, prepareConnection }, deploymentOwner, input),
+    ).rejects.toThrow();
+    expect(prepareConnection).not.toHaveBeenCalled();
+    expect(transaction).not.toHaveBeenCalled();
+  });
+
+  it("checks the operator policy again before credentials are persisted", async () => {
+    vi.stubEnv("RAKAZO_LOCAL_MEMORY_ALLOWED_URLS", baseUrl);
+    const { deps, transaction } = makeDeps();
+    const prepareConnection = vi.fn(async () => {
+      vi.stubEnv("RAKAZO_LOCAL_MEMORY_ALLOWED_URLS", "");
+      return { provider: "local", settings: input.settings, credentials: input.credentials };
+    });
+    await expect(
+      persistMemoryProviderConfig({ ...deps, prepareConnection }, actor, input),
+    ).rejects.toMatchObject({ code: "FORBIDDEN" });
+    expect(prepareConnection).toHaveBeenCalledOnce();
+    expect(deps.secrets.put).not.toHaveBeenCalled();
+    expect(transaction).not.toHaveBeenCalled();
+  });
+
+  it("does not turn a failed health probe into a stored configuration", async () => {
+    vi.stubEnv("RAKAZO_LOCAL_MEMORY_ALLOWED_URLS", baseUrl);
+    const { deps, transaction } = makeDeps();
+    const prepareConnection = vi.fn(async () => {
+      throw new Error("Synthetic local memory health failure");
+    });
+    await expect(
+      persistMemoryProviderConfig({ ...deps, prepareConnection }, actor, input),
+    ).rejects.toMatchObject({
+      code: "BAD_REQUEST",
+      message: "Synthetic local memory health failure",
+    });
+    expect(deps.secrets.put).not.toHaveBeenCalled();
     expect(transaction).not.toHaveBeenCalled();
   });
 });

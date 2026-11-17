@@ -1,4 +1,5 @@
-import type { SandboxProvider } from "@rakazo/adapter-kit";
+import type { JobPublisher, SandboxProvider } from "@rakazo/adapter-kit";
+import { runJobKey } from "@rakazo/adapter-kit";
 import {
   cancelComputerRunWork,
   returnHelperOutcome,
@@ -39,6 +40,7 @@ export async function stopThreadRuns(
     prisma: PrismaClient;
     sandbox: SandboxProvider;
     events: ThreadEvents;
+    jobs?: Pick<JobPublisher, "enqueue"> & Partial<Pick<JobPublisher, "cancel">>;
   },
   actor: Actor,
   target: ThreadTarget,
@@ -207,7 +209,12 @@ export function cancelThreadRuns(
 
 /** Stop's after-commit half: wakes subscribers, settles stopped helpers' cards, and tears down the cancelled runs' computer work. */
 export async function finishThreadStop(
-  deps: { prisma: PrismaClient; sandbox: SandboxProvider; events: Pick<ThreadEvents, "notify"> },
+  deps: {
+    prisma: PrismaClient;
+    sandbox: SandboxProvider;
+    events: Pick<ThreadEvents, "notify">;
+    jobs?: Pick<JobPublisher, "enqueue"> & Partial<Pick<JobPublisher, "cancel">>;
+  },
   actor: Pick<Actor, "spaceId" | "userId">,
   target: { threadId: string },
   {
@@ -218,6 +225,10 @@ export async function finishThreadStop(
     stoppedHelpers,
   }: Awaited<ReturnType<ReturnType<typeof cancelThreadRuns>>>,
 ) {
+  // A stopped run needs no scheduled start; waking it would only find it terminal.
+  await Promise.all(
+    runIds.map((runId) => deps.jobs?.cancel?.(runJobKey(runId)).catch(() => undefined)),
+  );
   if (eventSeq !== null) {
     // The events are durable; subscribers refetch from their persisted cursor.
     await deps.events.notify(target.threadId, eventSeq).catch((error) => {

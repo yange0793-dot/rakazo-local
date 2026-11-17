@@ -4,16 +4,18 @@ import type { MessageBlock } from "@rakazo/contracts";
 import { createLogger, createTestSink, installLogger } from "@rakazo/logging";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type * as ComputerLifecycleModule from "./computer-lifecycle.js";
+import { ComputerBusyError } from "./computer-lifecycle.js";
 import { createRunExecutor } from "./executor.js";
 import * as runMessages from "./run-messages.js";
 
 const sink = createTestSink();
 
 const provisionComputer = vi.hoisted(() => vi.fn());
+const acquireExecutionLease = vi.hoisted(() => vi.fn(async () => null));
 
 vi.mock("./computer-lifecycle.js", async (importOriginal) => ({
   ...(await importOriginal<typeof ComputerLifecycleModule>()),
-  acquireComputerExecutionLease: async () => null,
+  acquireComputerExecutionLease: acquireExecutionLease,
   acquireDedicatedScreenLeaseFence: async () => null,
   provisionComputer,
 }));
@@ -46,6 +48,7 @@ async function runRoutine(
     /** User stop already flipped the run to cancelled before the turn ends. */
     cancelRun?: boolean;
     onRunStarted?: () => void;
+    busyHelper?: boolean;
   } = {},
 ) {
   const attachment: Extract<MessageBlock, { kind: "file" | "image" }> = {
@@ -114,7 +117,9 @@ async function runRoutine(
     space: { findUnique: vi.fn(async () => null) },
     spaceMember: { findUnique: vi.fn(async () => ({ id: "member-1" })) },
     run: {
-      findUnique: vi.fn(async () => run),
+      findUnique: vi.fn(async (args?: { where?: { id?: string } }) =>
+        args?.where?.id === "helper-run" ? { trigger: "helper" } : run,
+      ),
       findUniqueOrThrow: vi.fn(async () => run),
       // No other run of this bot waits for the computer.
       findFirst: vi.fn(async (args?: { where?: { status?: unknown } }) =>
@@ -139,6 +144,11 @@ async function runRoutine(
           Object.assign(run, data);
           return { count: 1 };
         },
+      ),
+    },
+    computerExecutionLease: {
+      findFirst: vi.fn(async () =>
+        options.busyHelper ? { id: "helper-lease", runId: "helper-run" } : null,
       ),
     },
     routine: { findUnique: vi.fn(async () => ({ notify: false, nextRunAt: null })) },
@@ -347,6 +357,8 @@ beforeEach(() => {
   installLogger(createLogger({ service: "test", sinks: [sink] }));
   provisionComputer.mockReset();
   provisionComputer.mockResolvedValue(COMPUTER);
+  acquireExecutionLease.mockReset();
+  acquireExecutionLease.mockResolvedValue(null);
 });
 
 afterEach(() => {
@@ -355,6 +367,27 @@ afterEach(() => {
 });
 
 describe("run computer provisioning", () => {
+  it("answers without a computer while a background helper holds its lease", async () => {
+    acquireExecutionLease.mockRejectedValue(new ComputerBusyError());
+    const result = await runRoutine([], { busyHelper: true });
+    expect(result.runtimeRun).toHaveBeenCalledOnce();
+    expect(result.finalizeRun).toHaveBeenCalledWith(
+      expect.objectContaining({ outcome: "completed" }),
+    );
+    expect(provisionComputer).not.toHaveBeenCalled();
+  });
+
+  it("still refuses computer tools while that helper holds the lease", async () => {
+    acquireExecutionLease.mockRejectedValue(new ComputerBusyError());
+    const result = await runRoutine([{ name: "list_files", args: { path: "" } }], {
+      busyHelper: true,
+      toolFailure: "recover",
+    });
+    expect(result.runtimeRun).toHaveBeenCalledOnce();
+    expect(acquireExecutionLease).toHaveBeenCalledTimes(2);
+    expect(provisionComputer).not.toHaveBeenCalled();
+  });
+
   it("retries handed-off setup failures with durable attempt accounting and backoff", async () => {
     const onRunStarted = vi.fn();
     const { run, enqueue, runtimeRun, prisma } = await runRoutine([], {

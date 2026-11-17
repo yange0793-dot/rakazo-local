@@ -275,6 +275,53 @@ describe("page kit", () => {
     expect(phrases).toContain('<th scope="col">Rebate</th>');
   });
 
+  it("renders generated column descriptors and toned value cells without dropping amounts", () => {
+    const markup = html(
+      <Table
+        columns={[{ label: "Item" }, { label: "Amount", align: "right" }]}
+        rows={[
+          ["Notebook", { value: "59.70" }],
+          ["Refund", { value: "-9.90", tone: "danger" }],
+        ]}
+      />,
+    );
+    expect(markup).toContain('<th scope="col">Item</th>');
+    expect(markup).toContain('<th scope="col" class="rk-align-end">Amount</th>');
+    expect(markup).toContain('<td class="rk-align-end">59.70</td>');
+    expect(markup).toContain('<span class="rk-tone-danger">-9.90</span>');
+    expect(
+      html(
+        <Table
+          columns={[{ label: "Amount", align: "right" }]}
+          align={["start"]}
+          rows={[[{ value: 5 }]]}
+        />,
+      ),
+    ).toContain("<td>5</td>");
+  });
+
+  it("reads record rows in keyed column order and keeps all long-table rows", () => {
+    const markup = html(
+      <Table
+        columns={[
+          { key: "number", label: "Row" },
+          { key: "amount", label: "Amount", align: "right" },
+          { key: "description", label: "Description" },
+        ]}
+        rows={Array.from({ length: 40 }, (_, index) => ({
+          description: `Record ${index + 1}`,
+          amount: { value: "1.00", tone: "success" as const },
+          number: index + 1,
+        }))}
+      />,
+    );
+    expect(markup.match(/<tr>/g)).toHaveLength(41);
+    expect(markup).toContain('class="rk-table-filter"');
+    expect(markup).toContain("Record 40");
+    expect(markup).toContain('<span class="rk-tone-success">1.00</span>');
+    expect(markup.indexOf(">1</td>")).toBeLessThan(markup.indexOf(">Record 1</td>"));
+  });
+
   it("marks a line chart's floor, middle and ceiling and thins x labels to fit", () => {
     const days = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"];
     const markup = html(

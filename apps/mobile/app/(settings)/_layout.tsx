@@ -149,6 +149,13 @@ export default function SettingsLayout() {
           contentStyle: { backgroundColor: native.groupedPage },
         }}
       />
+      <Stack.Screen
+        name="semantic-memory"
+        options={{
+          ...glassHeaderOptions(t`Saved facts`),
+          contentStyle: { backgroundColor: native.groupedPage },
+        }}
+      />
       {/* Titled by the screen once the note loads. */}
       <Stack.Screen name="memory-note" options={glassHeaderOptions("")} />
       <Stack.Screen

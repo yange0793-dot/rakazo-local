@@ -147,6 +147,41 @@ it("downloads independently before playback", async () => {
   expect(container.querySelector("audio")).toBeNull();
 });
 
+it.each(["text/plain", "audio/mpeg", "application/zip"])(
+  "shows pending download and prevents repeat clicks for %s",
+  async (mimeType) => {
+    let finish!: () => void;
+    mocks.download.mockReturnValue(
+      new Promise<void>((resolve) => {
+        finish = resolve;
+      }),
+    );
+    await act(async () =>
+      root?.render(
+        <ArtifactFileCard
+          target={{ botId: "bot-1" }}
+          artifactId="file-1"
+          name="result"
+          mimeType={mimeType}
+          size={3}
+        />,
+      ),
+    );
+    const download =
+      container.querySelector<HTMLButtonElement>('button[aria-label="Download result"]') ??
+      container.querySelector<HTMLButtonElement>("button")!;
+    await act(async () => download.click());
+    expect(download.disabled).toBe(true);
+    expect(download.getAttribute("aria-busy")).toBe("true");
+    expect(container.querySelector('[aria-label="Downloading…"]')).not.toBeNull();
+    await act(async () => download.click());
+    expect(mocks.download).toHaveBeenCalledOnce();
+    await act(async () => finish());
+    expect(download.disabled).toBe(false);
+    expect(download.getAttribute("aria-busy")).toBe("false");
+  },
+);
+
 it.each(["unmount", "change"])(
   "ignores pending bytes after %s and suppresses duplicate play",
   async (cleanup) => {

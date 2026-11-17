@@ -142,6 +142,39 @@ describe("ToolActivityDisclosure", () => {
 });
 
 describe("ToolSteps", () => {
+  it("shows reported failures and stops, and does not invent success for old rows", () => {
+    const html = renderToStaticMarkup(
+      <ToolSteps
+        steps={[
+          { label: "Saved", count: 1, outcomes: { succeeded: 1 } },
+          { label: "Mixed batch", count: 3, outcomes: { succeeded: 2, failed: 1 } },
+          { label: "Cancelled", count: 1, outcomes: { stopped: 1 } },
+          { label: "Old record", count: 1 },
+        ]}
+      />,
+    );
+    const node = document.createElement("div");
+    node.innerHTML = html;
+    expect(
+      [...node.querySelectorAll("[data-outcome]")].map((item) => item.getAttribute("data-outcome")),
+    ).toEqual(["succeeded", "failed", "stopped", "unknown"]);
+  });
+
+  it("keeps only unfinished calls live even while the parent run is still working", () => {
+    const settled = renderToStaticMarkup(
+      <ToolSteps steps={[{ label: "Save", count: 1, outcomes: { failed: 1 } }]} currentIndex={0} />,
+    );
+    expect(settled).toContain('data-outcome="failed"');
+    expect(settled).not.toContain("rkPulse");
+    const running = renderToStaticMarkup(
+      <ToolSteps
+        steps={[{ label: "Save", count: 2, outcomes: { succeeded: 1 } }]}
+        currentIndex={0}
+      />,
+    );
+    expect(running).toContain('data-outcome="running"');
+  });
+
   it("lists only the last steps and counts the earlier ones when limited", () => {
     const steps = stepsOf(LIVE_TOOL_STEP_WINDOW + 3);
     const html = renderToStaticMarkup(
@@ -151,8 +184,11 @@ describe("ToolSteps", () => {
     for (const hidden of ["step-0<", "step-1<", "step-2<"]) expect(html).not.toContain(hidden);
     for (let i = 3; i < steps.length; i++) expect(html).toContain(`step-${i}<`);
     // The pulsing marker stays on the latest step after the window shifts the indexes.
-    expect(html).toMatch(/◷<\/span><span[^>]*>step-8</);
-    expect(html.match(/◷/g)).toHaveLength(1);
+    const node = document.createElement("div");
+    node.innerHTML = html;
+    const active = node.querySelector("[data-outcome=running]");
+    expect(active?.parentElement?.textContent).toBe("step-8");
+    expect(node.querySelectorAll("[data-outcome=running]")).toHaveLength(1);
   });
 
   it("uses the singular for one hidden step", () => {
@@ -187,7 +223,7 @@ describe("ToolSteps", () => {
         ]}
       />,
     );
-    expect(visibleText(html)).toBe("✓ Read calendar The meeting is with Anna . ✓ Save event");
+    expect(visibleText(html)).toBe("Read calendar The meeting is with Anna . Save event");
     expect(html).toContain("<strong>Anna</strong>");
   });
 });

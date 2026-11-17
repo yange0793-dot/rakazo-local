@@ -13,6 +13,7 @@ import { ErrorBoundary, ErrorPanel, ErrorTitle } from "./kit/boundary.js";
 import { helpers, kit } from "./kit/index.js";
 import { PageLanguage } from "./kit/labels.js";
 import { PAGE_STYLES } from "./kit/styles.js";
+import { installPrintPreparation } from "./print.js";
 
 /** What the host's boot script passes to `RakazoPage.mount`; `code` comes from `pageViewerCode`. */
 type PageBoot = { code: string; theme: "light" | "dark"; errorTitle: string; lang?: string };
@@ -120,4 +121,5 @@ const style = document.createElement("style");
 style.textContent = PAGE_STYLES;
 document.head.append(style);
 
+installPrintPreparation();
 window.RakazoPage = { mount };

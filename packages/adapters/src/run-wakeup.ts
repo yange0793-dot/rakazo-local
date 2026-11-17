@@ -69,6 +69,15 @@ export class RunStarter {
     void this.begin(runId, false);
   }
 
+  /** A terminal run needs no scheduled start; the row, not this timer, is authoritative. */
+  cancel(runId: string): void {
+    const timer = this.timers.get(runId);
+    if (!timer) return;
+    clearTimeout(timer);
+    this.timers.delete(runId);
+    this.dueAgain.delete(runId);
+  }
+
   async stop(): Promise<void> {
     this.stopping = true;
     for (const timer of this.timers.values()) clearTimeout(timer);
@@ -157,7 +166,9 @@ export class RunJobPublisher implements JobPublisher {
   async cancel(key: string): Promise<void> {
     // The durable status is already cancelled. Legacy Graphile deliveries can
     // safely drain as no-ops; chat cancellation needs no scheduler connection.
-    if (!key.startsWith("run:")) await this.background.cancel(key);
+    // A run key only ever has this process's scheduled start to clear.
+    if (key.startsWith("run:")) this.starter.cancel(key.slice("run:".length));
+    else await this.background.cancel(key);
   }
 
   async close(): Promise<void> {
@@ -254,7 +265,8 @@ export class RunWorkerHost implements JobWorkerHost {
   /**
    * Runs waiting for their own bot's earlier run on its computer are expected to wait, including
    * in the handoff after that run releases the computer (release expires the lease and touches
-   * `updatedAt`) until the next one takes it.
+   * `updatedAt`) until the next one takes it. A later member of a group send waits for the
+   * members before it in the same send, which is also expected.
    * Any other run still unstarted thirty seconds after it was due means starting failed,
    * which is an error reported with this process's database pool and event-loop health. A run
    * is due from its last write, so one resumed after an approval or reply is not counted late.
@@ -284,6 +296,14 @@ export class RunWorkerHost implements JobWorkerHost {
             WHERE lease."botId" = runs."botId" AND lease."computerId" = bot."computerId"
               AND lease."runId" <> runs.id
               AND (lease."expiresAt" > ${new Date(now)} OR lease."updatedAt" > ${cutoff})
+          )
+          AND NOT EXISTS (
+            SELECT 1 FROM runs earlier
+            WHERE earlier."threadId" = runs."threadId"
+              AND earlier."sourceMessageId" = runs."sourceMessageId"
+              AND earlier.trigger = 'user'
+              AND earlier."groupTurn" < runs."groupTurn"
+              AND earlier.status IN ('queued', 'leased', 'running')
           )
       `;
       if (this.stopping) return;

@@ -14,6 +14,8 @@ type UiWebModule = typeof UiWeb;
 const optionName = (entry: Element) => entry.textContent?.replace(/Connect$/, "");
 const models = vi.hoisted(() => ({
   list: vi.fn(),
+  sources: vi.fn(),
+  syncSources: vi.fn(),
   role: vi.fn(),
   forRole: vi.fn(),
   setRole: vi.fn(),
@@ -355,7 +357,9 @@ beforeEach(() => {
   Element.prototype.scrollIntoView = () => undefined;
   i18n.loadAndActivate({ locale: "en", messages: {} });
   vi.mocked(rpc.me).mockResolvedValue(account("deepseek", "deepseek-chat"));
-  models.list.mockResolvedValue([deepseekEntry]);
+  models.list.mockResolvedValue([deepseekEntry, compatibleEntry]);
+  models.sources.mockResolvedValue([]);
+  models.syncSources.mockResolvedValue([]);
   models.credentials.mockResolvedValue([]);
   autoReview.get.mockResolvedValue({
     mode: "ask",
@@ -463,10 +467,14 @@ it("shows a stored BYOK key when provider settings reopen", async () => {
     });
     expect(view.container.querySelector("#model-api-key")).toBeNull();
 
-    await pick("Change Main model", "DeepSeek");
-    expect(titles(view.container)).toEqual(["Connect DeepSeek"]);
-    expect(keyField(view.container).value).toBe("");
-    expect(keyField(view.container).placeholder).toBe("sk-…");
+    await openPicker("Change Main model");
+    expect(pickerOptions()).toEqual(["OpenAI-compatible"]);
+    await choose("OpenAI-compatible");
+    await click(
+      buttons(view.container, "API key").find((entry) => entry.textContent === "API key"),
+    );
+    expect(compatibleKeyField(view.container).value).toBe("");
+    expect(compatibleKeyField(view.container).placeholder).toBe("Optional");
   } finally {
     await view.unmount();
   }
@@ -538,10 +546,14 @@ it("renaming a connection keeps unsaved form fields", async () => {
 it("leaves the key field empty until a key is saved", async () => {
   const view = await renderSettings();
   try {
-    await pick("Change Main model", "DeepSeek");
-    const input = keyField(view.container);
+    await pick("Change Main model", "OpenAI-compatible");
+    await click(
+      buttons(view.container, "API key").find((entry) => entry.textContent === "API key"),
+    );
+    const input = compatibleKeyField(view.container);
     expect(input.value).toBe("");
-    expect(input.placeholder).toBe("sk-…");
+    expect(input.placeholder).toBe("Optional");
+    expect(input.required).toBe(false);
     expect(view.container.textContent).not.toContain(STORED_PLACEHOLDER);
   } finally {
     await view.unmount();
@@ -662,48 +674,56 @@ it("shows the computer-use model when the main model cannot read images", async 
   }
 });
 
-it("connects a provider from Add fallback without replacing the main model, then picks its model", async () => {
-  models.list.mockResolvedValue([deepseekEntry, openrouterEntry]);
+it("connects a custom server from Add fallback without replacing the main model, then picks its model", async () => {
+  models.list.mockResolvedValue([deepseekEntry, openrouterEntry, compatibleEntry]);
   models.credentials.mockResolvedValue([deepseekCredential]);
   const view = await renderSettings();
   try {
     await openPicker("Add fallback");
-    expect(pickerOptions()).toContain("OpenRouter");
-    await choose("OpenRouter");
-    expect(titles(view.container)).toEqual(["Connect OpenRouter"]);
-    await typeInto(keyField(view.container), "sk-fixture-router");
-    models.credentials.mockResolvedValue([
-      deepseekCredential,
-      {
-        id: "cred-openrouter",
-        provider: "openrouter",
-        label: "OpenRouter",
-        hasKey: true,
-        isDefault: false,
-        modelId: openrouterEntry.id,
-      },
-    ]);
-    await click(buttons(view.container, "Connect API key")[0]);
+    expect(pickerOptions()).toEqual(["DeepSeek Chat", "OpenAI-compatible"]);
+    await choose("OpenAI-compatible");
+    expect(titles(view.container)).toEqual(["Connect OpenAI-compatible"]);
+    await typeInto(baseUrlField(view.container), "https://fallback.example.test/v1");
+    await typeInto(
+      view.container.querySelector<HTMLInputElement>('input[aria-label="Model id"]')!,
+      "fallback-model",
+    );
+    const savedConnection = {
+      id: "cred-fallback",
+      provider: "openai-compatible",
+      label: "Fallback server",
+      hasKey: false,
+      isDefault: false,
+      baseUrl: "https://fallback.example.test/v1",
+      modelId: "fallback-model",
+    };
+    models.connect.mockResolvedValueOnce(savedConnection);
+    models.credentials.mockResolvedValue([deepseekCredential, savedConnection]);
+    await click(buttons(view.container, "Save")[0]);
     expect(models.connect).toHaveBeenCalledWith(
       expect.objectContaining({
-        provider: "openrouter",
-        apiKey: "sk-fixture-router",
-        modelId: openrouterEntry.id,
+        provider: "openai-compatible",
+        baseUrl: savedConnection.baseUrl,
+        modelId: savedConnection.modelId,
         makeDefault: false,
       }),
     );
-    // The key belongs to the provider; its models are then chosen in the reopened picker.
+    // Saving the connection leaves model selection to the reopened picker.
     expect(titles(view.container)).toEqual([]);
     expect(models.setRole).not.toHaveBeenCalled();
-    expect(pickerOptions()).toEqual([openrouterEntry.label]);
-    await choose(openrouterEntry.label);
+    expect(pickerOptions()).toEqual(["fallback-model"]);
+    await choose("fallback-model");
     expect(models.setRole).toHaveBeenCalledTimes(1);
     // The unchanged main model is left out, so the save cannot rewrite it.
     const [saved] = vi.mocked(models.setRole).mock.calls[0]!;
     expect(saved).toMatchObject({
       role: "main",
       backups: [
-        { provider: "openrouter", modelId: openrouterEntry.id, credentialId: "cred-openrouter" },
+        {
+          provider: "openai-compatible",
+          modelId: "fallback-model",
+          credentialId: "cred-fallback",
+        },
       ],
     });
     expect(saved).not.toHaveProperty("primary");
@@ -719,15 +739,20 @@ it("connects the main model from the empty default row as the space default", as
   });
   const view = await renderSettings();
   try {
-    await pick("Change Main model", "DeepSeek");
-    expect(titles(view.container)).toEqual(["Connect DeepSeek"]);
-    await typeInto(keyField(view.container), "sk-fixture-deepseek");
+    await pick("Change Main model", "OpenAI-compatible");
+    expect(titles(view.container)).toEqual(["Connect OpenAI-compatible"]);
+    await typeInto(baseUrlField(view.container), "https://models.example.test/v1");
+    await typeInto(
+      view.container.querySelector<HTMLInputElement>('input[aria-label="Model id"]')!,
+      "main-model",
+    );
     const loads = models.role.mock.calls.length;
-    await click(buttons(view.container, "Connect API key")[0]);
+    await click(buttons(view.container, "Save")[0]);
     expect(models.connect).toHaveBeenCalledWith(
       expect.objectContaining({
-        provider: "deepseek",
-        apiKey: "sk-fixture-deepseek",
+        provider: "openai-compatible",
+        baseUrl: "https://models.example.test/v1",
+        modelId: "main-model",
         makeDefault: true,
         scope: "account",
       }),
@@ -755,18 +780,27 @@ it("shows a Space only its own role lists and makes a new connection its main mo
       expect.objectContaining({ role: "main", scope: "space" }),
       expect.anything(),
     );
-    await pick("Change Main model", "DeepSeek");
-    await typeInto(keyField(view.container), "sk-fixture-deepseek");
-    await click(buttons(view.container, "Connect API key")[0]);
+    await pick("Change Main model", "OpenAI-compatible");
+    await typeInto(baseUrlField(view.container), "https://space.example.test/v1");
+    await typeInto(
+      view.container.querySelector<HTMLInputElement>('input[aria-label="Model id"]')!,
+      "space-model",
+    );
+    await click(buttons(view.container, "Save")[0]);
     expect(models.connect).toHaveBeenCalledWith(
-      expect.objectContaining({ provider: "deepseek", makeDefault: true, scope: "space" }),
+      expect.objectContaining({
+        provider: "openai-compatible",
+        modelId: "space-model",
+        makeDefault: true,
+        scope: "space",
+      }),
     );
   } finally {
     await view.unmount();
   }
 });
 
-it("shows Cloudflare account and gateway fields for a new and a saved connection", async () => {
+it("keeps saved gateway routing fields editable without offering a built-in connection preset", async () => {
   const entry = {
     provider: "cloudflare-ai-gateway",
     providerName: "Cloudflare AI Gateway",
@@ -783,15 +817,10 @@ it("shows Cloudflare account and gateway fields for a new and a saved connection
 
   const fresh = await renderSettings();
   try {
-    await pick("Change Main model", "Cloudflare AI Gateway");
-    const accountId = fresh.container.querySelector("#model-account-id");
-    const gatewayId = fresh.container.querySelector("#model-gateway-id");
-    expect(accountId).toBeInstanceOf(HTMLInputElement);
-    expect(gatewayId).toBeInstanceOf(HTMLInputElement);
-    expect((accountId as HTMLInputElement).value).toBe("");
-    expect((gatewayId as HTMLInputElement).value).toBe("");
-    expect(fresh.container.textContent).toContain("Account ID");
-    expect(fresh.container.textContent).toContain("Gateway ID");
+    await openPicker("Change Main model");
+    expect(pickerOptions()).toEqual(["Custom server"]);
+    expect(fresh.container.querySelector("#model-account-id")).toBeNull();
+    expect(fresh.container.querySelector("#model-gateway-id")).toBeNull();
   } finally {
     await fresh.unmount();
   }
@@ -817,6 +846,24 @@ it("shows Cloudflare account and gateway fields for a new and a saved connection
     expect((saved.container.querySelector("#model-gateway-id") as HTMLInputElement).value).toBe(
       "gateway-1",
     );
+    await typeInto(
+      saved.container.querySelector<HTMLInputElement>("#model-account-id")!,
+      "acct5678",
+    );
+    await typeInto(
+      saved.container.querySelector<HTMLInputElement>("#model-gateway-id")!,
+      "gateway-2",
+    );
+    await click(buttons(saved.container, "Save").find((entry) => entry.textContent === "Save"));
+    expect(models.connect).toHaveBeenCalledWith(
+      expect.objectContaining({
+        provider: entry.provider,
+        credentialId: "cred-cf",
+        accountId: "acct5678",
+        gatewayId: "gateway-2",
+      }),
+    );
+    expect(models.connect.mock.calls[0]?.[0]).not.toHaveProperty("apiKey");
   } finally {
     await saved.unmount();
   }
@@ -1050,12 +1097,12 @@ it("names each model checkbox by its id alone", async () => {
   }
 });
 
-it("lists not-connected providers by name alone", async () => {
+it("offers only the custom server when built-in providers and endpoint presets are not connected", async () => {
   models.list.mockResolvedValue([deepseekEntry, compatibleEntry]);
   const view = await renderSettings();
   try {
     await openPicker("Change Main model");
-    expect(pickerOptions()).toEqual(["DeepSeek", "Ollama Cloud", "OpenAI-compatible"]);
+    expect(pickerOptions()).toEqual(["OpenAI-compatible"]);
     expect(document.querySelectorAll("[cmdk-group-heading]")).toHaveLength(0);
   } finally {
     await view.unmount();
@@ -1101,9 +1148,10 @@ it("drops the saved ticks and rows when the server URL changes, and restores the
     expect(modelCheckbox(view.container, "model-b").checked).toBe(true);
     await typeInto(baseUrlField(view.container), "http://other.test/v1");
     await click(buttons(view.container, "Save")[0]);
-    expect(models.connect).toHaveBeenCalledWith(
-      expect.objectContaining({ baseUrl: "http://other.test/v1", enabledModelIds: [] }),
-    );
+    expect(models.connect).not.toHaveBeenCalled();
+    expect(
+      view.container.querySelector<HTMLInputElement>('input[aria-label="Model id"]')?.value,
+    ).toBe("");
   } finally {
     await view.unmount();
   }
@@ -1220,6 +1268,27 @@ it("clamps a staged effort when the protocol switch drops the level", async () =
   }
 });
 
+it("uses declared adaptive effort levels in the connection form", async () => {
+  const view = await renderCompatible({
+    ...compatibleCredential,
+    apiProtocol: "anthropic-messages",
+    reasoning: true,
+    reasoningCapabilities: { mode: "adaptive", levels: ["low", "high", "max"] },
+    thinkingLevel: "max",
+  });
+  try {
+    const effort = effortField(view.container);
+    expect(effort.value).toBe("max");
+    expect([...effort.options].map((option) => option.value)).toEqual(["low", "high", "max"]);
+    await click(buttons(view.container, "Save")[0]);
+    expect(models.connect).toHaveBeenLastCalledWith(
+      expect.objectContaining({ apiProtocol: "anthropic-messages", thinkingLevel: "max" }),
+    );
+  } finally {
+    await view.unmount();
+  }
+});
+
 it("shows saved header names only, preserves untouched headers and explicitly clears removed headers", async () => {
   const view = await renderCompatible({ ...compatibleCredential, headerNames: ["x-session"] });
   try {
@@ -1319,14 +1388,16 @@ it("disables Save for invalid custom header names", async () => {
   }
 });
 
-it("opens the Ollama preset with a required key and saves a compatible connection", async () => {
+it("recognizes a hosted endpoint entered in the custom form and requires its key", async () => {
   HTMLElement.prototype.scrollTo = vi.fn();
   models.list.mockResolvedValue([compatibleEntry]);
   models.credentials.mockResolvedValue([]);
   models.probeOpenAiCompatible.mockResolvedValue({ models: ["fixture-model"] });
   const view = await renderSettings(false);
   try {
-    await pick("Change Main model", "Ollama Cloud");
+    await pick("Change Main model", "OpenAI-compatible");
+    expect(baseUrlField(view.container).value).toBe("");
+    await typeInto(baseUrlField(view.container), "https://ollama.com/v1");
     expect(titles(view.container)).toContain("Connect Ollama Cloud");
     expect(baseUrlField(view.container).value).toBe("https://ollama.com/v1");
     expect(
@@ -1381,7 +1452,7 @@ it("offers a saved Ollama connection's models without the Ollama preset", async 
   }
 });
 
-it("keeps the Ollama preset to connect beside a saved local connection", async () => {
+it("offers saved local models and adds another server through Providers without hosted presets", async () => {
   models.list.mockResolvedValue([compatibleEntry]);
   models.credentials.mockResolvedValue([
     {
@@ -1396,9 +1467,15 @@ it("keeps the Ollama preset to connect beside a saved local connection", async (
   const view = await renderSettings(false);
   try {
     await openPicker("Add fallback");
-    expect(pickerOptions()).toEqual(["fixture-model", "Ollama Cloud"]);
-    await choose("Ollama Cloud");
-    expect(baseUrlField(view.container).value).toBe("https://ollama.com/v1");
+    expect(pickerOptions()).toEqual(["fixture-model"]);
+    await choose("fixture-model");
+    await click(buttons(providersSection(), "Add provider")[0]);
+    expect(pickerOptions()).toEqual(["OpenAI-compatible"]);
+    await choose("OpenAI-compatible");
+    expect(baseUrlField(view.container).value).toBe("");
+    expect(
+      view.container.querySelector<HTMLInputElement>('input[aria-label="Model id"]')?.value,
+    ).toBe("");
   } finally {
     await view.unmount();
   }
@@ -1484,8 +1561,13 @@ it.each([undefined, "api_key", "oauth"])(
     );
     const view = await renderSettings();
     try {
-      if (authKind) await manage();
-      else await pick("Change Main model", "ChatGPT");
+      if (!authKind) {
+        await openPicker("Change Main model");
+        expect(pickerOptions()).toEqual(["Custom server"]);
+        expect(titles(view.container)).toEqual([]);
+        return;
+      }
+      await manage();
       expect(buttons(view.container, "Test connection")[0]?.disabled).toBe(authKind !== "oauth");
       expect(view.container.textContent).not.toContain("Test sign-in");
     } finally {
@@ -1594,7 +1676,7 @@ const workCredential = {
   isDefault: false,
 };
 
-it("lists every connection under Providers and adds another for a connected provider", async () => {
+it("lists existing provider connections and adds an independent custom server", async () => {
   models.credentials.mockResolvedValue([deepseekCredential, workCredential]);
   const view = await renderSettings();
   try {
@@ -1604,15 +1686,24 @@ it("lists every connection under Providers and adds another for a connected prov
       ),
     ).toEqual(["DeepSeek", "DeepSeek (Work)"]);
     await click(buttons(providersSection() as HTMLElement, "Add provider")[0]);
-    expect(pickerOptions()).toContain("DeepSeek");
-    await choose("DeepSeek");
-    expect(titles(view.container)).toEqual(["Connect DeepSeek"]);
-    expect(keyField(view.container).placeholder).toBe("sk-…");
-    await typeInto(keyField(view.container), "sk-fixture-personal");
-    await click(buttons(view.container, "Connect API key")[0]);
+    expect(pickerOptions()).toEqual(["OpenAI-compatible"]);
+    await choose("OpenAI-compatible");
+    expect(titles(view.container)).toEqual(["Connect OpenAI-compatible"]);
+    await typeInto(baseUrlField(view.container), "https://personal.example.test/v1");
+    await typeInto(
+      view.container.querySelector<HTMLInputElement>('input[aria-label="Model id"]')!,
+      "personal-model",
+    );
+    await click(
+      buttons(view.container, "API key").find((entry) => entry.textContent === "API key"),
+    );
+    await typeInto(compatibleKeyField(view.container), "sk-fixture-personal");
+    await click(buttons(view.container, "Save")[0]);
     expect(models.connect).toHaveBeenCalledWith(
       expect.objectContaining({
-        provider: "deepseek",
+        provider: "openai-compatible",
+        baseUrl: "https://personal.example.test/v1",
+        modelId: "personal-model",
         apiKey: "sk-fixture-personal",
         credentialId: null,
         makeDefault: false,
@@ -1655,7 +1746,7 @@ it("replaces one connection's key and disconnects only that connection", async (
 });
 
 it("keeps another connection's form when an earlier save finishes", async () => {
-  models.list.mockResolvedValue([deepseekEntry, openrouterEntry]);
+  models.list.mockResolvedValue([deepseekEntry, compatibleEntry]);
   models.credentials.mockResolvedValue([deepseekCredential]);
   let finishSave!: (value: unknown) => void;
   models.connect.mockImplementationOnce(
@@ -1667,16 +1758,20 @@ it("keeps another connection's form when an earlier save finishes", async () => 
   const view = await renderSettings();
   try {
     await openPicker("Add fallback");
-    await choose("OpenRouter");
-    await typeInto(keyField(view.container), "sk-fixture-router");
-    await click(buttons(view.container, "Connect API key")[0]);
+    await choose("OpenAI-compatible");
+    await typeInto(baseUrlField(view.container), "https://fallback.example.test/v1");
+    await typeInto(
+      view.container.querySelector<HTMLInputElement>('input[aria-label="Model id"]')!,
+      "fallback-model",
+    );
+    await click(buttons(view.container, "Save")[0]);
     // Fields wait for the save, so it cannot overwrite edits made meanwhile.
-    expect(keyField(view.container).closest("fieldset")?.disabled).toBe(true);
+    expect(baseUrlField(view.container).closest("fieldset")?.disabled).toBe(true);
     // The main model's connection opens while the first key still saves.
     await manage();
     expect(titles(view.container)).toEqual(["DeepSeek"]);
     await act(async () => {
-      finishSave({ ...deepseekCredential, id: "cred-openrouter", provider: "openrouter" });
+      finishSave({ id: "cred-fallback", provider: "openai-compatible", modelId: "fallback-model" });
     });
     expect(titles(view.container)).toEqual(["DeepSeek"]);
     // The finished save's slot picker does not take over.
@@ -1723,19 +1818,192 @@ it("shows what a disconnect left, not a read sent before it", async () => {
           releaseStale = () => resolve([deepseekCredential, workCredential]);
         }),
     )
-    .mockResolvedValue([deepseekCredential]);
+    .mockResolvedValue([deepseekCredential, workCredential]);
   const providerNames = () =>
     [...providersSection().querySelectorAll("button")].map((entry) => entry.textContent);
   const view = await renderSettings(true, queryClient);
   try {
     expect(providerNames()).toContain("DeepSeek (Work)");
     await openProvider("DeepSeek (Work)");
+    models.credentials.mockResolvedValue([deepseekCredential]);
     await click(buttons(view.container, "Disconnect")[0]);
     const confirm = buttons(view.container, "Disconnect");
     await click(confirm[confirm.length - 1]);
     await act(async () => releaseStale());
     await act(() => new Promise((resolve) => setTimeout(resolve, 20)));
     expect(providerNames()).not.toContain("DeepSeek (Work)");
+  } finally {
+    await view.unmount();
+  }
+});
+
+const catalogSource = {
+  id: "source-fixture",
+  label: "Model gateway",
+  group: "messages",
+  apiProtocol: "anthropic-messages",
+  lastSyncedAt: "2026-11-16T10:00:00.000Z",
+  lastAttemptAt: "2026-11-16T10:00:00.000Z",
+  error: null,
+  connectionCount: 2,
+  unavailableCount: 1,
+};
+
+it("does not show a cancelled initial read when catalog sync replaces it", async () => {
+  models.list.mockImplementationOnce(() => new Promise(() => {}));
+  models.credentials.mockResolvedValue([deepseekCredential]);
+  const view = await renderSettings();
+  try {
+    await act(async () => {
+      await vi.waitFor(() =>
+        expect(view.container.querySelector('[data-testid="model-role-row-1"]')).not.toBeNull(),
+      );
+    });
+    expect(view.container.textContent).not.toContain("CancelledError");
+    expect(view.container.querySelector('[role="alert"]')).toBeNull();
+  } finally {
+    await view.unmount();
+  }
+});
+
+it("syncs on open and shows channel names with warnings only on affected connections", async () => {
+  const sourceRef = {
+    id: catalogSource.id,
+    label: catalogSource.label,
+    group: catalogSource.group,
+    providerId: "provider-a",
+    available: true,
+    unavailableModelIds: [],
+  };
+  models.sources.mockResolvedValue([catalogSource]);
+  models.syncSources.mockImplementationOnce(async () => {
+    models.credentials.mockResolvedValue([
+      { ...compatibleCredential, label: "Channel A", catalogSource: sourceRef },
+      {
+        ...compatibleCredential,
+        id: "cred-unavailable",
+        label: "Channel B",
+        catalogSource: { ...sourceRef, providerId: "provider-b", available: false },
+      },
+    ]);
+    return [catalogSource];
+  });
+  models.list.mockResolvedValue([compatibleEntry]);
+  const view = await renderSettings();
+  try {
+    expect(models.syncSources).toHaveBeenCalledExactlyOnceWith({});
+    const sourceRow = view.container.querySelector('[data-testid="model-sources"]')!;
+    expect(sourceRow.textContent).toContain("Model gateway");
+    expect(sourceRow.querySelector("time")?.dateTime).toBe(catalogSource.lastSyncedAt);
+    const healthy = view.container.querySelector(
+      `[data-testid="model-provider-${compatibleCredential.id}"]`,
+    )!;
+    const unavailable = view.container.querySelector(
+      '[data-testid="model-provider-cred-unavailable"]',
+    )!;
+    expect(healthy.textContent).toBe("Channel A");
+    expect(unavailable.textContent).toBe("Channel BUnavailable");
+    expect(healthy.textContent).not.toContain("OpenAI-compatible");
+  } finally {
+    await view.unmount();
+  }
+});
+
+it("keeps edited fields while refreshing a source and displays the new sync failure", async () => {
+  models.sources.mockResolvedValue([catalogSource]);
+  models.syncSources.mockResolvedValue([catalogSource]);
+  const view = await renderCompatible();
+  try {
+    await typeInto(baseUrlField(view.container), "https://edited.example.test/v1");
+    const limit = view.container.querySelector<HTMLInputElement>(
+      'input[aria-label="Maximum output tokens"]',
+    )!;
+    await typeInto(limit, "8192");
+    models.syncSources.mockResolvedValue([
+      { ...catalogSource, error: "Source temporarily unavailable" },
+    ]);
+    await click(view.container.querySelector('button[aria-label="Refresh Model gateway"]'));
+    expect(models.syncSources).toHaveBeenLastCalledWith({ sourceId: catalogSource.id });
+    expect(baseUrlField(view.container).value).toBe("https://edited.example.test/v1");
+    expect(limit.value).toBe("8192");
+    expect(view.container.textContent).toContain("Source temporarily unavailable");
+    expect(
+      view.container.querySelector('[data-testid="model-sources"] time')?.getAttribute("datetime"),
+    ).toBe(catalogSource.lastSyncedAt);
+    expect(models.connect).not.toHaveBeenCalled();
+  } finally {
+    await view.unmount();
+  }
+});
+
+it("preserves a connection opened and edited before the initial sync finishes", async () => {
+  let finishSync!: () => void;
+  models.syncSources.mockReturnValueOnce(
+    new Promise((resolve) => {
+      finishSync = () => resolve([]);
+    }),
+  );
+  const view = await renderCompatible();
+  try {
+    await typeInto(baseUrlField(view.container), "https://draft.example.test/v1");
+    await act(async () => finishSync());
+    expect(baseUrlField(view.container).value).toBe("https://draft.example.test/v1");
+    expect(models.connect).not.toHaveBeenCalled();
+  } finally {
+    await view.unmount();
+  }
+});
+
+it("keeps saved connections accessible after a source RPC failure and offers a retry", async () => {
+  models.credentials.mockResolvedValue([deepseekCredential]);
+  models.syncSources.mockRejectedValueOnce(new Error("Source unavailable"));
+  const view = await renderSettings();
+  try {
+    expect(providersSection().textContent).toContain("DeepSeek");
+    expect(view.container.querySelector('button[aria-label="Retry sync"]')).not.toBeNull();
+    await click(view.container.querySelector('button[aria-label="Retry sync"]'));
+    expect(models.syncSources).toHaveBeenCalledTimes(2);
+    expect(view.container.querySelector('button[aria-label="Retry sync"]')).toBeNull();
+  } finally {
+    await view.unmount();
+  }
+});
+
+it("keeps a managed endpoint and protocol fixed while allowing capability overrides", async () => {
+  const view = await renderCompatible({
+    ...compatibleCredential,
+    apiProtocol: "anthropic-messages",
+    modelId: "retired",
+    enabledModelIds: ["model-a"],
+    catalogSource: {
+      id: catalogSource.id,
+      label: catalogSource.label,
+      group: catalogSource.group,
+      providerId: "provider-a",
+      available: true,
+      unavailableModelIds: ["retired"],
+    },
+  });
+  try {
+    expect(baseUrlField(view.container).readOnly).toBe(true);
+    expect(protocolField(view.container).disabled).toBe(true);
+    expect(view.container.textContent).not.toContain("Find models");
+    const modelsSelect = view.container.querySelector<HTMLSelectElement>(
+      'select[aria-label="Models from server"]',
+    )!;
+    expect(modelsSelect.value).toBe("retired");
+    expect(modelsSelect.querySelector<HTMLOptionElement>('option[value="retired"]')?.disabled).toBe(
+      true,
+    );
+    expect(modelsSelect.querySelector<HTMLOptionElement>('option[value="model-a"]')?.disabled).toBe(
+      false,
+    );
+    const limit = view.container.querySelector<HTMLInputElement>(
+      'input[aria-label="Maximum output tokens"]',
+    )!;
+    expect(limit.disabled).toBe(false);
+    await typeInto(limit, "8192");
+    expect(limit.value).toBe("8192");
   } finally {
     await view.unmount();
   }

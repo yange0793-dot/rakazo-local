@@ -1596,6 +1596,37 @@ it("keeps a reply-linked dictation's words without its nonce", async () => {
   }
 });
 
+it("persists a plain-text nonce before its request settles and reuses it after reopening", async () => {
+  const nonces: string[] = [];
+  let fail!: (error: Error) => void;
+  const textarea = renderComposer((_text: string, _mentions: unknown[], nonce: string) => {
+    nonces.push(nonce);
+    return new Promise<boolean>((_resolve, reject) => {
+      fail = reject;
+    });
+  });
+  type(textarea, "Keep this request");
+  pressEnter(textarea);
+  await act(async () => {});
+  try {
+    expect(localStorage.getItem("rakazo.composerNonce.bot:bot-1")).toBe(nonces[0]);
+    act(() => root?.unmount());
+    container?.remove();
+    const reopened = renderComposer(async (_text: string, _mentions: unknown[], nonce: string) => {
+      nonces.push(nonce);
+      return true;
+    });
+    expect(reopened.value).toBe("Keep this request");
+    pressEnter(reopened);
+    await act(async () => {});
+    expect(nonces[1]).toBe(nonces[0]);
+  } finally {
+    await act(async () => fail(new Error("late disconnect")));
+  }
+  expect(localStorage.getItem("rakazo.composerNonce.bot:bot-1")).toBeNull();
+  expect(localStorage.getItem("rakazo.composerDraft.bot:bot-1")).toBeNull();
+});
+
 it("reuses the stored nonce when a send that lost its answer is retried from the saved draft", async () => {
   const nonces: string[] = [];
   let fail!: (error: Error) => void;

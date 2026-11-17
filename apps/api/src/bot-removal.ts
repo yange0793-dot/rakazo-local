@@ -34,6 +34,7 @@ export function createBotRemoval(deps: RouterDeps, repos: ReturnType<typeof crea
         secretStore: deps.secrets,
         dataDir: deps.dataDir,
         messagingInstallations: deps.messagingInstallations,
+        semanticFacts: deps.semanticFacts,
       },
       bot,
       {

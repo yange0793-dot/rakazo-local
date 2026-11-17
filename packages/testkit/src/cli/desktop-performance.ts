@@ -618,6 +618,19 @@ function metricDelta(before: Record<string, number>, after: Record<string, numbe
   );
 }
 
+interface ElectronProcessMetric {
+  pid: number;
+  creationTime: number;
+  type: string;
+  serviceName?: string;
+  name?: string;
+  cpu: {
+    percentCPUUsage: number;
+    idleWakeupsPerSecond: number;
+  };
+  memory: { workingSetSize: number };
+}
+
 async function sampleAppMetrics(app: ElectronApplication, durationMs: number, intervalMs: number) {
   return app.evaluate(
     async ({ app, BrowserWindow }, options) => {
@@ -627,9 +640,10 @@ async function sampleAppMetrics(app: ElectronApplication, durationMs: number, in
       const count = Math.ceil(options.durationMs / options.intervalMs);
       for (let index = 0; index < count; index += 1) {
         await new Promise((resolve) => setTimeout(resolve, options.intervalMs));
+        const metrics: ElectronProcessMetric[] = app.getAppMetrics();
         samples.push({
           at: performance.timeOrigin + performance.now(),
-          processes: app.getAppMetrics().map((metric) => ({
+          processes: metrics.map((metric) => ({
             pid: metric.pid,
             creationTime: metric.creationTime,
             type: metric.type,
@@ -675,7 +689,7 @@ function workingSetKiB(memory: object) {
   return value;
 }
 
-function environmentFingerprint(versions: { electron?: string; chrome?: string }) {
+function environmentFingerprint(versions: NodeJS.ProcessVersions) {
   return {
     gitSha: output("git", ["rev-parse", "HEAD"]),
     gitDirty: output("git", ["status", "--porcelain"]).length > 0,

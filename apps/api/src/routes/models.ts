@@ -71,6 +71,13 @@ export function modelsRoutes(ctx: RouterContext) {
   } = ctx;
   return {
     models: {
+      sources: authed.models.sources.handler(
+        async ({ context }) => deps.modelCatalogSync?.list(context.actor.userId) ?? [],
+      ),
+      syncSources: authed.models.syncSources.handler(
+        async ({ context, input }) =>
+          deps.modelCatalogSync?.sync(context.actor, input.sourceId, context.signal) ?? [],
+      ),
       list: authed.models.list.handler(async ({ context }) => chatCatalog(context.actor)),
       credentials: authed.models.credentials.handler(async ({ context }) => {
         const [rows, main] = await Promise.all([
@@ -218,6 +225,8 @@ export function modelsRoutes(ctx: RouterContext) {
       }),
       probeOpenAiCompatible: authed.models.probeOpenAiCompatible.handler(
         async ({ context, input }) => {
+          const managed = await deps.modelCatalogSync?.models(context.actor, input, context.signal);
+          if (managed !== undefined) return { models: managed };
           let apiKey = input.apiKey;
           let headers = input.headers;
           if (!apiKey?.trim() || headers === undefined) {

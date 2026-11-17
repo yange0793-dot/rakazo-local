@@ -42,13 +42,30 @@ function catalogModels(): Models {
 // reasoning (e.g. google/gemini-3.7-flash). Keep a real level when model.reasoning
 // is set; plain models stay off.
 const REASONING_MODEL_THINKING_LEVEL: ModelThinkingLevel = "medium";
+/** Reports local selection only; an endpoint may still reject or ignore the emitted setting. */
+export function thinkingSelectionFor(
+  model: Model<Api>,
+  preferred?: ModelThinkingLevel | null,
+): {
+  requested: ModelThinkingLevel | null;
+  effective: ModelThinkingLevel;
+  adjusted: boolean;
+} {
+  const effective = model.reasoning
+    ? clampThinkingLevel(model, preferred ?? REASONING_MODEL_THINKING_LEVEL)
+    : "off";
+  return {
+    requested: preferred ?? null,
+    effective,
+    adjusted: preferred != null && preferred !== effective,
+  };
+}
+
 export function thinkingLevelFor(
   model: Model<Api>,
   preferred?: ModelThinkingLevel | null,
 ): ModelThinkingLevel {
-  if (!model.reasoning) return "off";
-  if (preferred) return clampThinkingLevel(model, preferred);
-  return clampThinkingLevel(model, REASONING_MODEL_THINKING_LEVEL);
+  return thinkingSelectionFor(model, preferred).effective;
 }
 
 function configuredOpenRouterModel(
@@ -79,6 +96,7 @@ export function resolveRuntimeModel(modelConfig: AgentRunRequest["model"]): {
   apiKey: string | undefined;
   /** Live credential store; OAuth refreshes swap the credential mid-run. */
   credentials: PiRuntimeCredentialStore | undefined;
+  thinking: ReturnType<typeof thinkingSelectionFor> | undefined;
 } {
   const provider = canonicalPiProviderId(
     modelConfig.provider === "scripted" ? "openrouter" : modelConfig.provider,
@@ -122,7 +140,15 @@ export function resolveRuntimeModel(modelConfig: AgentRunRequest["model"]): {
         // another provider would ship our key to a vendor it was not issued for.
         (modelConfig.apiKey ??
         (provider === "openrouter" ? process.env.OPENROUTER_API_KEY : undefined));
-  return { provider, modelId, models, model, apiKey, credentials };
+  return {
+    provider,
+    modelId,
+    models,
+    model,
+    apiKey,
+    credentials,
+    thinking: model ? thinkingSelectionFor(model, modelConfig.thinkingLevel) : undefined,
+  };
 }
 
 function credentialStoreForRequest(
@@ -167,6 +193,7 @@ export function modelsForRequest(
       headers: request.model.headers,
       allowPrivate: request.model.allowPrivateEndpoint,
       reasoning: request.model.reasoning,
+      reasoningCapabilities: request.model.reasoningCapabilities,
       acceptsImages: request.model.acceptsImages,
       maxTokens: request.model.maxTokens,
       contextWindow: request.model.contextWindow,
@@ -258,7 +285,12 @@ export function acceptedReasoningEfforts(
   const accepted = new Set(listed);
   const levels: ThinkingLevelMap = {};
   for (const level of ["minimal", "low", "medium", "high", "xhigh", "max"] as const) {
-    const effort = current[level] ?? (level === "xhigh" || level === "max" ? null : level);
+    const effort =
+      current[level] !== undefined
+        ? current[level]
+        : level === "xhigh" || level === "max"
+          ? null
+          : level;
     levels[level] = effort !== null && accepted.has(effort) ? effort : null;
   }
   if (Object.values(levels).every((effort) => effort === null)) return undefined;

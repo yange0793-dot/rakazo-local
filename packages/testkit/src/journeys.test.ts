@@ -70,13 +70,48 @@ describeJourneys("required product journeys", () => {
   async function sendAndWait(app: App, cookie: string, botId: string, text: string) {
     const { runId } = await rpc<{ runId: string }>(app, cookie, "threads/send", { botId, text });
     let terminal = null as { status: string; error: string | null } | null;
-    await waitForDatabase(async () => {
-      terminal = await prisma.run.findUnique({
-        where: { id: runId },
-        select: { status: true, error: true },
+    try {
+      await waitForDatabase(async () => {
+        terminal = await prisma.run.findUnique({
+          where: { id: runId },
+          select: { status: true, error: true },
+        });
+        return Boolean(terminal && ["completed", "failed", "cancelled"].includes(terminal.status));
       });
-      return Boolean(terminal && ["completed", "failed", "cancelled"].includes(terminal.status));
-    });
+    } catch (error) {
+      if (!(error instanceof Error) || error.message !== "timeout waiting for database state") {
+        throw error;
+      }
+      // Timeout only: show what this bot was doing so a run stalled behind a held computer
+      // lease is distinguishable from one that was never dispatched.
+      const run = await prisma.run.findUnique({
+        where: { id: runId },
+        select: {
+          status: true,
+          wakeAt: true,
+          leaseOwner: true,
+          leaseFence: true,
+          error: true,
+          trigger: true,
+          updatedAt: true,
+        },
+      });
+      const computerLeases = await prisma.computerExecutionLease.findMany({
+        where: { botId },
+        select: { runId: true, expiresAt: true },
+      });
+      const activeRuns = await prisma.run.findMany({
+        where: {
+          botId,
+          status: { in: ["queued", "leased", "running", "waiting_input", "waiting_takeover"] },
+        },
+        orderBy: [{ createdAt: "asc" }, { id: "asc" }],
+        select: { id: true, trigger: true, status: true },
+      });
+      throw new Error(
+        `${error.message} (run ${runId}): ${JSON.stringify({ run, computerLeases, activeRuns })}`,
+      );
+    }
     if (!terminal) throw new Error(`run ${runId} was not found after completion`);
     if (terminal.status !== "completed") {
       throw new Error(
@@ -2302,38 +2337,79 @@ describeJourneys("required product journeys", () => {
     );
   });
 
-  it("13e: helpers only read: approval-gated and connector writes are refused in any mode", async () => {
-    const { cookie, bot } = await newChief("Background Ask");
+  it("13e: a helper asks in the chat instead of acting on its own authority", async () => {
+    const { cookie, bot, chat } = await newChief("Background Ask");
+    // Auto Review is the default: a helper's fetch pauses on a card in the chat that started it.
     await startHelper(cookie, bot.id, "fetch https://helper-approval.rakazo.test/venues");
-    const asked = await waitForHelper(bot.id, "completed");
+    const asked = await waitForHelper(bot.id, "waiting_input");
+    // The helper keeps working in a thread of its own; only its card lives here.
+    expect(asked.threadId).not.toBe(chat.id);
+    const waitingCard = (await helperCards(cookie, bot.id))[0];
+    expect(waitingCard).toMatchObject({ status: "waiting" });
+    const snap = await rpc<Snap>(app, cookie, "threads/get", { botId: bot.id });
+    // The helper run waits in the chat only so its card can be answered there; it is not the
+    // chat's own turn.
+    expect(
+      snap.activeRuns?.some((run) => run.id === asked.id && run.status === "waiting_input"),
+    ).toBe(true);
+    expect(snap.run?.id).not.toBe(asked.id);
+    const ask = snap.messages.find(
+      (message) =>
+        message.runId === asked.id && message.blocks.some((block) => block.kind === "ask"),
+    );
+    expect(ask).toBeDefined();
+    // The ask names the card it belongs to, so settling that card ends the wait.
     expect(
       (
-        await prisma.event.findFirst({
-          where: { runId: asked.id, type: "agent.tool.completed" },
-          select: { payload: true },
+        ask!.blocks.find((block) => block.kind === "ask") as {
+          helper?: { messageId?: string };
+        }
+      ).helper?.messageId,
+    ).toBe(waitingCard!.messageId);
+    const effectStatuses = async () =>
+      (
+        await prisma.externalEffect.findMany({
+          where: { runId: asked.id },
+          select: { status: true },
         })
-      )?.payload,
-    ).toMatchObject({
-      name: "web_fetch",
-      outcome: "error",
-      error: expect.stringContaining("a background helper cannot ask"),
-    });
-    // The refused fetch leaves no approval waiting behind.
-    expect(
-      await prisma.externalEffect.count({ where: { runId: asked.id, status: "intended" } }),
-    ).toBe(0);
+      ).map((effect) => effect.status);
+    expect(await effectStatuses()).toEqual(["intended"]);
 
-    // Let the turn passing on that result finish, so the next message starts its own turn.
+    // Denying keeps the fetch from happening, and the helper still reports back.
+    await rpc(app, cookie, "threads/answer", {
+      botId: bot.id,
+      runId: asked.id,
+      messageId: ask!.id,
+      answer: "deny",
+    });
+    await waitForDatabase(
+      async () =>
+        (await prisma.run.findUniqueOrThrow({ where: { id: asked.id } })).status === "completed",
+    );
+    expect(await effectStatuses()).toEqual(["denied"]);
+    await waitForDatabase(async () => {
+      const card = (await helperCards(cookie, bot.id)).find(
+        (candidate) => candidate.messageId === waitingCard!.messageId,
+      );
+      return card?.status === "completed";
+    });
+    // Let the turn passing on that result finish, so later turns start on their own.
     await waitForDatabase(async () =>
       Boolean(
         await prisma.run.findFirst({
-          where: { botId: bot.id, trigger: "helper_result", status: "completed" },
+          where: {
+            botId: bot.id,
+            threadId: chat.id,
+            trigger: "helper_result",
+            status: "completed",
+          },
           select: { id: true },
         }),
       ),
     );
 
-    // Never ask lets the owner's own turn write; a helper still may not.
+    // Never ask is the owner's own policy, so a helper's write runs exactly as the owner's would:
+    // never more authority than the owner gave, and no card of its own.
     await runWithoutAsking(cookie);
     const before = connector.records.length;
     await startHelper(cookie, bot.id, "write this to the destination crm");
@@ -2345,28 +2421,25 @@ describeJourneys("required product journeys", () => {
       });
       return Boolean(writer);
     });
+    expect(connector.records.length).toBe(before + 1);
     expect(
-      (
-        await prisma.event.findFirst({
-          where: { runId: writer!.id, type: "agent.tool.completed" },
-          select: { payload: true },
-        })
-      )?.payload,
-    ).toMatchObject({
-      name: "destination.write",
-      outcome: "error",
-      error: expect.stringContaining("a background helper may only read"),
-    });
-    expect(connector.records.length).toBe(before);
-    // Its result turn too, so the next message starts a turn of its own.
+      await prisma.externalEffect.count({ where: { runId: writer!.id, status: "intended" } }),
+    ).toBe(0);
+    // Its result turn too, so the owner's own message starts a turn of its own.
     await waitForDatabase(
       async () =>
         (await prisma.run.count({
-          where: { botId: bot.id, trigger: "helper_result", status: "completed" },
+          where: {
+            botId: bot.id,
+            threadId: chat.id,
+            trigger: "helper_result",
+            status: "completed",
+          },
         })) === 2,
     );
+    // The owner's own turn under the same policy still writes.
     await sendAndWait(app, cookie, bot.id, "write this to the destination crm as a note");
-    expect(connector.records.length).toBeGreaterThan(before);
+    expect(connector.records.length).toBe(before + 2);
   });
 
   it("13f: a helper that fails comes back as a failure, and so does one that expired", async () => {
