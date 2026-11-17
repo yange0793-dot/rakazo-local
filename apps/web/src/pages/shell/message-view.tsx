@@ -20,7 +20,6 @@ import { CollaborationMarker } from "../../components/ai/CollaborationMarker";
 import { CloudAgentCard } from "../../components/CloudAgentCard";
 import { ComputerCard } from "../../components/ComputerCard";
 import { McpAppCard } from "../../components/McpAppCard";
-import { PageBlockCard } from "../../components/pages/PageBlockCard";
 import { SubagentCard } from "../../components/SubagentCard";
 import {
   LIVE_TOOL_STEP_WINDOW,
@@ -32,7 +31,6 @@ import {
 import { SkillDraftCard } from "../../components/teach/SkillDraftCard";
 import type { ArtifactTarget } from "../../lib/artifact-open";
 import { messageProviderLabel } from "../../lib/messaging";
-import type { PageBlock } from "../../lib/page-cards";
 import { useOpenPage } from "../../lib/pages";
 import type { createSpaceRpc } from "../../lib/rpc";
 import {
@@ -62,8 +60,6 @@ export const MessageView = memo(function MessageView({
   message,
   meId,
   mentions,
-  pages,
-  isPageSuperseded,
   onAnswer,
   onOpenBot,
   onOpenPeerMessages,
@@ -99,10 +95,6 @@ export const MessageView = memo(function MessageView({
   meId?: string;
   /** Bots this reply announces, named inline in its text. */
   mentions?: readonly ChildBotBlock[];
-  /** Pages saved just before this reply, drawn under its text. */
-  pages?: readonly PageBlock[];
-  /** Whether a later card in the chat shows the same page. */
-  isPageSuperseded?: (messageId: string, block: PageBlock) => boolean;
   onAnswer: (
     message: ThreadMessage,
     text: string,
@@ -166,17 +158,6 @@ export const MessageView = memo(function MessageView({
     [message.blocks, mentions],
   );
   const openPage = useOpenPage();
-  const pageCards = pages?.length ? (
-    <div className="mt-3 flex flex-col gap-3">
-      {pages.map((page) => (
-        <PageBlockCard
-          key={`${page.pageId}:${page.version}`}
-          block={page}
-          updated={isPageSuperseded?.(message.id, page) ?? false}
-        />
-      ))}
-    </div>
-  ) : null;
   const visibleNarrationBlocks = renderableMessageBlocks(blocks, showToolActivity);
   const renderMention = useCallback(
     (id: string) => {
@@ -333,7 +314,6 @@ export const MessageView = memo(function MessageView({
           </div>
           {hoverActions}
         </div>
-        {pageCards}
       </>
     );
   }
@@ -494,13 +474,7 @@ export const MessageView = memo(function MessageView({
             );
           }
           if (block.kind === "page") {
-            return (
-              <PageBlockCard
-                key={i}
-                block={block}
-                updated={isPageSuperseded?.(message.id, block) ?? false}
-              />
-            );
+            return null;
           }
           if (block.kind === "chart") {
             return (
@@ -684,7 +658,6 @@ export const MessageView = memo(function MessageView({
         })}
         {hoverAnchorIndex === -1 ? hoverActions : null}
       </div>
-      {pageCards}
     </>
   );
 });

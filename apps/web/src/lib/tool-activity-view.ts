@@ -23,6 +23,8 @@ export function renderableMessageBlocks(
 }
 
 function isShown(block: MessageBlock, showToolActivity: boolean): boolean {
+  // A page lives in the Pages panel; a card for it in the chat is not drawn.
+  if (block.kind === "page") return false;
   if (isRetiredImportSetup(block)) return false;
   return !isToolActivityBlock(block) || shouldRenderToolCard(block, showToolActivity);
 }

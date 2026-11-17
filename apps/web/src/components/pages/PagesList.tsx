@@ -13,13 +13,14 @@ import {
   Spinner,
 } from "@rakazo/ui-web";
 import { useInfiniteQuery, useMutation, useQueryClient } from "@tanstack/react-query";
-import { Globe, MoreHorizontal, Search } from "lucide-react";
+import { MoreHorizontal, Search } from "lucide-react";
 import { useDeferredValue, useState } from "react";
 import { pageMutationOptions } from "../../lib/page-actions";
 import { useOpenPage } from "../../lib/pages";
 import { useSpaceQueries } from "../../lib/query";
-import { formatRelativeTime } from "../../lib/relative-time";
 import { DeleteItemDialog } from "../../pages/shell/dialogs";
+import { PagePreviewPane } from "./PagePreviewPane";
+import { PageTile } from "./PageTile";
 
 /** Enough to fill the panel; Show more brings the next batch. */
 const PAGE_SIZE = 20;
@@ -61,6 +62,9 @@ function OwnerPages({ botId, groupId }: { botId?: string; groupId?: string }) {
   const rename = useMutation(actions.rename);
   const [deleting, setDeleting] = useState<PageSummary | null>(null);
   const [renaming, setRenaming] = useState<{ id: string; draft: string } | null>(null);
+  // The newest page shows whole by default; the list is for choosing another.
+  const [picking, setPicking] = useState(false);
+  const [selectedId, setSelectedId] = useState<string | null>(null);
   if (pages.isPending) {
     return (
       <div className="grid place-items-center py-6 text-muted-foreground">
@@ -100,6 +104,15 @@ function OwnerPages({ botId, groupId }: { botId?: string; groupId?: string }) {
       </p>
     );
   }
+  // The newest page, unless the list was used to pick another.
+  const newest = items.reduce<PageSummary | null>(
+    (latest, page) => (latest === null || page.updatedAt > latest.updatedAt ? page : latest),
+    null,
+  );
+  const selected = items.find((page) => page.id === selectedId) ?? newest;
+  if (!picking && selected) {
+    return <PagePreviewPane page={selected} onOpenList={() => setPicking(true)} />;
+  }
   const commitRename = () => {
     if (!renaming) return;
     const next = renaming.draft.trim();
@@ -112,13 +125,11 @@ function OwnerPages({ botId, groupId }: { botId?: string; groupId?: string }) {
   };
   const pinned = items.filter((page) => page.pinned);
   const rest = items.filter((page) => !page.pinned);
-  const row = (page: PageSummary) => (
-    <li key={page.id} className="flex items-center rounded-md hover:bg-accent">
+  const tile = (page: PageSummary) => (
+    <li key={page.id} className="relative">
       {renaming?.id === page.id ? (
-        <div className="flex min-w-0 flex-1 items-center gap-3 px-2 py-2">
-          <span className="grid size-8 shrink-0 place-items-center rounded-sm bg-muted">
-            <PageIcon className="h-5 w-4" />
-          </span>
+        <div className="flex items-center gap-2 rounded-xl bg-card p-3 ring-[0.5px] ring-border">
+          <PageIcon className="h-5 w-4 shrink-0" />
           <input
             // biome-ignore lint/a11y/noAutofocus: the field appears because Rename was chosen.
             autoFocus
@@ -139,62 +150,47 @@ function OwnerPages({ botId, groupId }: { botId?: string; groupId?: string }) {
           />
         </div>
       ) : (
-        <button
-          type="button"
-          onClick={() => openPage(page.id)}
-          className="flex min-w-0 flex-1 items-center gap-3 rounded-md px-2 py-2 text-start outline-none focus-visible:ring-2 focus-visible:ring-ring"
-        >
-          <span className="grid size-8 shrink-0 place-items-center rounded-sm bg-muted text-foreground">
-            <PageIcon className="h-5 w-4" />
-          </span>
-          <span className="flex min-w-0 flex-1 flex-col">
-            <span className="truncate text-body text-foreground" dir="auto">
-              {page.title}
-            </span>
-            <span className="flex items-center gap-1 text-label text-muted-foreground">
-              {page.visibility === "link" ? (
-                <>
-                  <Globe aria-hidden="true" className="size-3" strokeWidth={1.8} />
-                  <Trans>Shared</Trans>
-                  <span aria-hidden="true">·</span>
-                </>
-              ) : null}
-              <span>{formatRelativeTime(page.updatedAt)}</span>
-            </span>
-          </span>
-        </button>
-      )}
-      <DropdownMenu>
-        <DropdownMenuTrigger
-          aria-label={t`Actions for ${page.title}`}
-          className="me-1 grid size-8 shrink-0 place-items-center rounded-full text-muted-foreground outline-none hover:text-foreground focus-visible:ring-2 focus-visible:ring-ring data-popup-open:bg-accent"
-        >
-          <MoreHorizontal className="size-4" />
-        </DropdownMenuTrigger>
-        <DropdownMenuContent align="end" className="w-44">
-          <DropdownMenuItem onClick={() => openPage(page.id)}>
-            <Trans>Open</Trans>
-          </DropdownMenuItem>
-          <DropdownMenuItem onClick={() => setRenaming({ id: page.id, draft: page.title })}>
-            <Trans>Rename</Trans>
-          </DropdownMenuItem>
-          <DropdownMenuItem onClick={() => openPage(page.id, { share: true })}>
-            <Trans>Share</Trans>
-          </DropdownMenuItem>
-          <DropdownMenuItem
-            disabled={pin.isPending}
-            onClick={() => {
-              rename.reset();
-              pin.mutate({ pageId: page.id, pinned: !page.pinned });
+        <>
+          <PageTile
+            page={page}
+            onOpen={() => {
+              setSelectedId(page.id);
+              setPicking(false);
             }}
-          >
-            {page.pinned ? <Trans>Unpin</Trans> : <Trans>Pin</Trans>}
-          </DropdownMenuItem>
-          <DropdownMenuItem variant="destructive" onClick={() => setDeleting(page)}>
-            <Trans>Delete</Trans>
-          </DropdownMenuItem>
-        </DropdownMenuContent>
-      </DropdownMenu>
+          />
+          <DropdownMenu>
+            <DropdownMenuTrigger
+              aria-label={t`Actions for ${page.title}`}
+              className="absolute end-1.5 top-1.5 grid size-7 place-items-center rounded-full bg-card text-muted-foreground shadow-sm ring-[0.5px] ring-border outline-none hover:text-foreground focus-visible:ring-2 focus-visible:ring-ring data-popup-open:bg-accent"
+            >
+              <MoreHorizontal className="size-4" />
+            </DropdownMenuTrigger>
+            <DropdownMenuContent align="end" className="w-44">
+              <DropdownMenuItem onClick={() => openPage(page.id)}>
+                <Trans>Open</Trans>
+              </DropdownMenuItem>
+              <DropdownMenuItem onClick={() => setRenaming({ id: page.id, draft: page.title })}>
+                <Trans>Rename</Trans>
+              </DropdownMenuItem>
+              <DropdownMenuItem onClick={() => openPage(page.id, { share: true })}>
+                <Trans>Share</Trans>
+              </DropdownMenuItem>
+              <DropdownMenuItem
+                disabled={pin.isPending}
+                onClick={() => {
+                  rename.reset();
+                  pin.mutate({ pageId: page.id, pinned: !page.pinned });
+                }}
+              >
+                {page.pinned ? <Trans>Unpin</Trans> : <Trans>Pin</Trans>}
+              </DropdownMenuItem>
+              <DropdownMenuItem variant="destructive" onClick={() => setDeleting(page)}>
+                <Trans>Delete</Trans>
+              </DropdownMenuItem>
+            </DropdownMenuContent>
+          </DropdownMenu>
+        </>
+      )}
     </li>
   );
   return (
@@ -231,10 +227,16 @@ function OwnerPages({ botId, groupId }: { botId?: string; groupId?: string }) {
           <SectionHeading variant="label" className="mb-1 px-2">
             <Trans>Pinned</Trans>
           </SectionHeading>
-          <ul className="flex flex-col">{pinned.map(row)}</ul>
+          <ul className="grid grid-cols-[repeat(auto-fill,minmax(240px,1fr))] gap-3">
+            {pinned.map(tile)}
+          </ul>
         </section>
       ) : null}
-      {rest.length ? <ul className="flex flex-col">{rest.map(row)}</ul> : null}
+      {rest.length ? (
+        <ul className="grid grid-cols-[repeat(auto-fill,minmax(240px,1fr))] gap-3">
+          {rest.map(tile)}
+        </ul>
+      ) : null}
       {pages.isError ? (
         // A later read failed (Show more, or reading the list again): the pages above may be stale.
         <div role="alert" className="flex items-center gap-2 px-2 text-label text-destructive">

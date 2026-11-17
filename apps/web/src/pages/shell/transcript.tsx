@@ -624,8 +624,6 @@ export const Transcript = memo(function Transcript({
                       meId={meId}
                       markedUnread={message.id === markedUnreadMessageId}
                       mentions={mentionView.mentions.get(message.id)}
-                      pages={pageView.pages.get(message.id)}
-                      isPageSuperseded={pageView.isSuperseded}
                       canAnswer={answerableAskIds.has(message.id)}
                       canDismiss={dismissableAskIds.has(message.id)}
                       onOpenBot={onOpenBot}
