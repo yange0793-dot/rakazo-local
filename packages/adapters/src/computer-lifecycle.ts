@@ -18,6 +18,7 @@ import type { ComputerSize, ComputerUpdate } from "@rakazo/contracts";
 import {
   ACTIVE_RUN_STATUSES,
   abortableDelay,
+  BACKGROUND_HELPER_TRIGGER,
   COMPUTER_USING_RUNS,
   isRetryableError,
   parseScreenLeaseId,
@@ -142,25 +143,38 @@ async function hasForeignExecutionLease(
  *
  * Dedicated boots never take a computer execution lease, so after BOOT_CLAIM_STALE_MS the
  * claim stamp alone would look abandoned while provision is still running. A heartbeating
- * run lease proves the provisioner is alive. exceptRunId lets a recovering continueRun
- * reclaim its own abandoned boot without treating itself as foreign.
+ * run lease proves the provisioner is alive. A helper holds a run lease while it works on
+ * anything, so only a non-helper run counts by its lease; a helper proves it uses the
+ * computer with a live execution lease, which a tool of its run keeps renewed.
+ * exceptRunId lets a recovering continueRun reclaim its own abandoned boot without treating
+ * itself as foreign.
  */
 async function hasLiveForeignRunLease(
   prisma: PrismaClient,
   computerId: string,
   exceptRunId?: string,
 ): Promise<boolean> {
+  const now = new Date();
   const live = await prisma.run.findFirst({
     where: {
       status: { in: [...ACTIVE_RUN_STATUSES] },
       bot: { computerId },
-      ...COMPUTER_USING_RUNS,
-      leaseExpiresAt: { gt: new Date() },
+      trigger: { not: BACKGROUND_HELPER_TRIGGER },
+      leaseExpiresAt: { gt: now },
       ...(exceptRunId ? { id: { not: exceptRunId } } : {}),
     },
     select: { id: true },
   });
-  return live !== null;
+  if (live) return true;
+  const helperTool = await prisma.computerExecutionLease.findFirst({
+    where: {
+      computerId,
+      expiresAt: { gt: now },
+      ...(exceptRunId ? { runId: { not: exceptRunId } } : {}),
+    },
+    select: { id: true },
+  });
+  return helperTool !== null;
 }
 
 export class ComputerBusyError extends Error {
@@ -1103,6 +1117,8 @@ export async function replaceComputer(
   // an execution-lease TTL (not merely the boot-wait poll) so a slow dedicated provision or
   // suspend is not destroyed mid-flight. Also refuse while a run still uses the computer —
   // before claiming suspending — so rollback cannot bump @updatedAt under an in-flight boot.
+  // A helper takes the computer only while a tool holds its lease, so one waiting on the user
+  // leaves the reset free.
   if (existing.state === "booting" || existing.state === "suspending") {
     if (await hasForeignExecutionLease(deps.prisma, computerId, botId)) {
       throw new ComputerBusyError();
@@ -1114,11 +1130,18 @@ export async function replaceComputer(
       where: {
         status: { in: [...ACTIVE_RUN_STATUSES] },
         bot: { computerId },
+        trigger: { not: BACKGROUND_HELPER_TRIGGER },
         ...COMPUTER_USING_RUNS,
       },
       select: { id: true },
     });
     if (activeBootRun) throw new ComputerBusyError();
+    // A helper uses the computer only while a tool holds a live execution lease.
+    const helperLease = await deps.prisma.computerExecutionLease.findFirst({
+      where: { computerId, expiresAt: { gt: new Date() } },
+      select: { id: true },
+    });
+    if (helperLease) throw new ComputerBusyError();
   }
 
   const previousState = existing.state;
@@ -1188,7 +1211,9 @@ export async function replaceComputer(
     });
   // Re-check after the claim in case a run started between the pre-check and CAS. Under this
   // operation's maintenance reservation, runs that arrived later wait for it without touching
-  // the computer, so only a live lease means one is still using it.
+  // the computer, so only a live execution lease means one is still using it. Without that
+  // reservation a run may have started meanwhile: a live run lease means it is working, and a
+  // helper waiting on the user holds none.
   const inUse =
     existing.maintenanceId === context.operationId
       ? await deps.prisma.computerExecutionLease.findFirst({
@@ -1199,7 +1224,9 @@ export async function replaceComputer(
           where: {
             status: { in: [...ACTIVE_RUN_STATUSES] },
             bot: { computerId },
+            trigger: { not: BACKGROUND_HELPER_TRIGGER },
             ...COMPUTER_USING_RUNS,
+            leaseExpiresAt: { gt: new Date() },
           },
           select: { id: true },
         });

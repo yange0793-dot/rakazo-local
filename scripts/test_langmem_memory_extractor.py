@@ -28,11 +28,12 @@ class Child:
         self.timer = threading.Timer(60, self.proc.kill)
         self.timer.start()
 
-    def run(self, request):
+    def run(self, request, allow_removals=False):
         assert self.proc.stdin is not None
-        self.proc.stdin.write(
-            json.dumps({"type": "extract", "request": request}, ensure_ascii=False) + "\n"
-        )
+        frame = {"type": "extract", "request": request}
+        if allow_removals:
+            frame["allowRemovals"] = True
+        self.proc.stdin.write(json.dumps(frame, ensure_ascii=False) + "\n")
         self.proc.stdin.flush()
         try:
             while True:
@@ -87,6 +88,22 @@ def message(message_id, content, is_new=True, role="user"):
 
 def tool_reply(*calls):
     return {"content": "", "toolCalls": list(calls)}
+
+
+def nothing_reply():
+    return tool_reply({"id": "call-none", "name": "NoDurableFact", "args": {}})
+
+
+def active_preference():
+    return {
+        "id": "f1",
+        "revision": 3,
+        "content": "用户喜欢浅色模式",
+        "status": "active",
+        "sourceMessageId": "m1",
+        "sourceQuote": "喜欢浅色模式",
+        "category": "preference",
+    }
 
 
 class LangMemExtractorTest(unittest.TestCase):
@@ -227,7 +244,7 @@ class LangMemExtractorTest(unittest.TestCase):
         self.assertNotIn("replacesId", event["changes"][1])
 
     def test_unchanged_existing_is_not_written(self):
-        child = Child(lambda event, round_number: {"content": "", "toolCalls": []})
+        child = Child(lambda event, round_number: nothing_reply())
         event = child.run(
             request(
                 [message("m2", "今天天气不错")],
@@ -244,10 +261,43 @@ class LangMemExtractorTest(unittest.TestCase):
                 ],
             )
         )
-        self.assertEqual(event, {"type": "result", "changes": []})
+        self.assertEqual(event, {"type": "result", "changes": [], "dropped": 0})
+
+    def test_nothing_to_remember_is_an_explicit_tool_call(self):
+        child = Child(lambda event, round_number: nothing_reply())
+        event = child.run(request([message("m1", "谢谢")]))
+        self.assertEqual(event["type"], "result")
+        self.assertEqual(event["changes"], [])
+
+    def test_text_only_reply_is_a_protocol_failure(self):
+        child = Child(
+            lambda event, round_number: {
+                "content": "这段对话里没有需要长期记住的信息。",
+                "toolCalls": [],
+            }
+        )
+        event = child.run(
+            request(
+                [message("m2", "谢谢")],
+                existing=[
+                    {
+                        "id": "f1",
+                        "revision": 4,
+                        "content": "用户偏好深色模式",
+                        "status": "active",
+                        "sourceMessageId": "m1",
+                        "sourceQuote": "以后都用深色模式",
+                        "category": "preference",
+                    }
+                ],
+            )
+        )
+        self.assertEqual(event["type"], "error")
+        self.assertEqual(child.proc.returncode, 1)
+        self.assertIn("TransportFailure", child.stderr())
 
     def test_forgotten_evidence_is_context_only_and_kept_out_of_existing(self):
-        child = Child(lambda event, round_number: {"content": "", "toolCalls": []})
+        child = Child(lambda event, round_number: nothing_reply())
         event = child.run(
             request(
                 [message("m1", "今天天气不错")],
@@ -261,7 +311,7 @@ class LangMemExtractorTest(unittest.TestCase):
                 ],
             )
         )
-        self.assertEqual(event, {"type": "result", "changes": []})
+        self.assertEqual(event, {"type": "result", "changes": [], "dropped": 0})
         prompt = "\n".join(
             str(item.get("content", "")) for item in child.requests[0]["messages"]
         )
@@ -269,28 +319,154 @@ class LangMemExtractorTest(unittest.TestCase):
         self.assertIn("retirementEvidence", prompt)
         self.assertNotIn('"status": "active"', prompt)
 
-    def test_quote_outside_new_source_fails_without_echoing_it(self):
+    def test_unverifiable_quote_is_dropped_on_its_own(self):
         quote = "这句话不在新消息里"
         child = Child(
             lambda event, round_number: tool_reply(
                 {
-                    "id": "call-1",
+                    "id": "call-good",
                     "name": "DurableFact",
                     "args": {
                         "content": "用户偏好深色模式",
                         "sourceMessageId": "m1",
+                        "sourceQuote": "以后都用深色模式",
+                        "category": "preference",
+                    },
+                },
+                {
+                    "id": "call-bad",
+                    "name": "DurableFact",
+                    "args": {
+                        "content": "用户提到了别的偏好",
+                        "sourceMessageId": "m1",
                         "sourceQuote": quote,
                         "category": "preference",
+                    },
+                },
+            )
+        )
+        event = child.run(request([message("m1", "以后都用深色模式")]))
+        self.assertEqual(event["type"], "result")
+        self.assertEqual(
+            [change["content"] for change in event["changes"]], ["用户偏好深色模式"]
+        )
+        self.assertEqual(event["dropped"], 1)
+        self.assertNotIn(quote, child.stderr())
+
+    def test_removal_is_offered_only_when_the_parent_asks(self):
+        child = Child(
+            lambda event, round_number: tool_reply(
+                {
+                    "id": "call-remove",
+                    "name": "ForgetFact",
+                    "args": {
+                        "targetId": "f1",
+                        "sourceMessageId": "m2",
+                        "sourceQuote": "别再记我的地址了",
                     },
                 }
             )
         )
-        event = child.run(request([message("m1", "以后都用深色模式")]))
-        self.assertEqual(event["type"], "error")
-        self.assertEqual(child.proc.returncode, 1)
-        stderr = child.stderr()
-        self.assertIn("TransportFailure", stderr)
-        self.assertNotIn(quote, stderr)
+        event = child.run(
+            request([message("m2", "别再记我的地址了")], existing=[active_preference()])
+        )
+        # The host did not enable removals, so the tool is not offered and nothing is removed.
+        tool_names = [tool["name"] for tool in child.requests[0]["tools"]]
+        self.assertIn("DurableFact", tool_names)
+        self.assertNotIn("ForgetFact", tool_names)
+        prompt = "\n".join(
+            str(item.get("content", "")) for item in child.requests[0]["messages"]
+        )
+        self.assertIn("You cannot delete a memory from here", prompt)
+        self.assertEqual(event, {"type": "result", "changes": [], "dropped": 0})
+
+    def test_removal_cites_the_users_own_words_and_the_known_revision(self):
+        child = Child(
+            lambda event, round_number: tool_reply(
+                {
+                    "id": "call-remove",
+                    "name": "ForgetFact",
+                    "args": {
+                        "targetId": "f1",
+                        "sourceMessageId": "m2",
+                        "sourceQuote": "别再记我的地址了",
+                    },
+                }
+            )
+        )
+        event = child.run(
+            request(
+                [message("m2", "别再记我的地址了，我早就不住北京了。")],
+                existing=[active_preference()],
+            ),
+            allow_removals=True,
+        )
+        self.assertEqual(event["type"], "result")
+        self.assertEqual(
+            event["changes"],
+            [
+                {
+                    "content": "用户喜欢浅色模式",
+                    "sourceMessageId": "m2",
+                    "sourceQuote": "别再记我的地址了",
+                    "category": "preference",
+                    "replacesId": "f1",
+                    "expectedRevision": 3,
+                    "remove": True,
+                }
+            ],
+        )
+        self.assertEqual(event["dropped"], 0)
+        tool_names = [tool["name"] for tool in child.requests[0]["tools"]]
+        self.assertIn("ForgetFact", tool_names)
+        prompt = "\n".join(
+            str(item.get("content", "")) for item in child.requests[0]["messages"]
+        )
+        self.assertIn("call ForgetFact once", prompt)
+        self.assertNotIn("You cannot delete a memory from here", prompt)
+
+    def test_removal_without_matching_evidence_is_dropped_on_its_own(self):
+        child = Child(
+            lambda event, round_number: tool_reply(
+                {
+                    "id": "call-quote",
+                    "name": "ForgetFact",
+                    "args": {
+                        "targetId": "f1",
+                        "sourceMessageId": "m2",
+                        "sourceQuote": "这句话不在新消息里",
+                    },
+                },
+                {
+                    "id": "call-target",
+                    "name": "ForgetFact",
+                    "args": {
+                        "targetId": "f-missing",
+                        "sourceMessageId": "m2",
+                        "sourceQuote": "别再记我的地址了",
+                    },
+                },
+            )
+        )
+        event = child.run(
+            request(
+                [message("m2", "别再记我的地址了")],
+                existing=[active_preference()],
+            ),
+            allow_removals=True,
+        )
+        self.assertEqual(event, {"type": "result", "changes": [], "dropped": 2})
+
+    def test_removal_is_not_offered_without_an_active_fact(self):
+        child = Child(lambda event, round_number: nothing_reply())
+        event = child.run(
+            request([message("m2", "别再记我的地址了")]),
+            allow_removals=True,
+        )
+        self.assertEqual(event["type"], "result")
+        self.assertEqual(event["changes"], [])
+        tool_names = [tool["name"] for tool in child.requests[0]["tools"]]
+        self.assertNotIn("ForgetFact", tool_names)
 
 
 if __name__ == "__main__":

@@ -37,6 +37,7 @@ export * from "./expire-stuck-run.js";
 export * from "./external-conversations.js";
 export * from "./groups.js";
 export * from "./history-retrieval.js";
+export * from "./lesson-usage.js";
 export * from "./memory-archive.js";
 export * from "./memory-config.js";
 export * from "./messages.js";

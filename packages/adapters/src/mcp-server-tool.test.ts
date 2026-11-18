@@ -105,15 +105,47 @@ describe("addMcpServerFromTool", () => {
       threadId: "t-1",
       botId: "b-1",
     };
+    // A literal public address keeps this offline; a name would need DNS to pass the url check.
     const result = await addMcpServerFromTool(
-      { mcpAllowPrivateEndpoint: true } as ExecutorDeps,
+      {} as ExecutorDeps,
       run,
       "b-1",
-      { name: "Brex", transport: "streamable_http", endpoint: "http://localhost/mcp?token=abc" },
+      {
+        name: "Brex",
+        transport: "streamable_http",
+        endpoint: "https://93.184.216.34/mcp?token=abc",
+      },
       "exec-1",
     );
     expect(result).toEqual({ error: "Put token in a header instead of the server URL" });
   });
+
+  it.each([
+    "http://127.0.0.1:3100/mcp",
+    "http://localhost/mcp",
+    "https://127.0.0.1/mcp",
+    "http://10.0.0.8/mcp",
+  ])(
+    "never reaches a private endpoint even when the deployment allows them: %s",
+    async (endpoint) => {
+      const create = vi.fn();
+      const result = await addMcpServerFromTool(
+        {
+          mcpAllowPrivateEndpoint: true,
+          prisma: { mcpServer: { create }, $transaction: create },
+        } as unknown as ExecutorDeps,
+        { id: "run-1", spaceId: "space-1", userId: "user-1", threadId: "t-1", botId: "b-1" },
+        "b-1",
+        { name: "Local", transport: "streamable_http", endpoint },
+        "exec-1",
+      );
+      expect(result).toMatchObject({
+        error: expect.stringContaining("Ask an admin to add a private address in Settings."),
+      });
+      expect((result as { error: string }).error).not.toContain("MCP_ALLOW_PRIVATE_ENDPOINT");
+      expect(create).not.toHaveBeenCalled();
+    },
+  );
 });
 
 describe("buildMcpCredentialBlob", () => {

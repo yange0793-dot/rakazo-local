@@ -275,4 +275,29 @@ postgres("managed model catalog (isolated PostgreSQL)", () => {
       expect(await sync.list(actor.userId)).toEqual([]);
     });
   });
+
+  it("keeps the connection and its saved choices when a channel returns under a new ID", async () => {
+    await runAsTenant(actor, async () => {
+      const before = await db.prisma.userModelCredential.findUniqueOrThrow({
+        where: { id: credentialId },
+      });
+      channels = [
+        {
+          id: "replacement-id",
+          label: before.label,
+          enabled: true,
+          models: [
+            { id: "replacement-id/model-a", label: "model-a", capabilities: { source: "unknown" } },
+          ],
+        },
+      ];
+      await sync.sync(actor);
+      expect(
+        await db.prisma.userModelCredential.findUniqueOrThrow({ where: { id: credentialId } }),
+      ).toMatchObject({ catalogProviderId: "replacement-id" });
+      expect(
+        await db.prisma.userModelRoleChoice.findFirstOrThrow({ where: { userId: actor.userId } }),
+      ).toMatchObject({ credentialId, modelId: "replacement-id/model-a" });
+    });
+  });
 });

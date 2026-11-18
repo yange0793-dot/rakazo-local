@@ -560,32 +560,41 @@ export function botsRoutes(ctx: RouterContext) {
           if (bot.computer.controlBotId === bot.id && hasActiveComputerControl(bot.computer)) {
             throw new ORPCError("BAD_REQUEST", { message: "Release the computer first" });
           }
-          if (bot.computer.scope === "dedicated" && bot.computer.providerRef) {
-            const ctx = computerContext(context.actor, bot.id, "computer.switch");
-            const ref = toComputerRef(bot.computer);
-            if (bot.computer.state === "running") {
-              await checkpointAndStopComputer(deps, bot.computer, ref, ctx);
+          if (bot.computer.scope === "dedicated") {
+            // The claim above turns away new leases, so a live one belongs to a helper tool
+            // that is using the computer right now; stopping it would cut that tool off.
+            const inUse = await deps.prisma.computerExecutionLease.findFirst({
+              where: { computerId: bot.computer.id, expiresAt: { gt: new Date() } },
+              select: { id: true },
+            });
+            if (inUse) throw new ORPCError("BAD_REQUEST", { message: "Stop the bot first" });
+            if (bot.computer.providerRef) {
+              const ctx = computerContext(context.actor, bot.id, "computer.switch");
+              const ref = toComputerRef(bot.computer);
+              if (bot.computer.state === "running") {
+                await checkpointAndStopComputer(deps, bot.computer, ref, ctx);
+              }
+              await expireComputerExecutionLeases(deps.prisma, {
+                computerId: bot.computer.id,
+                botId: bot.id,
+              });
+              await deps.prisma.computer.update({
+                where: { id: bot.computer.id },
+                data: {
+                  state: "stopped",
+                  controlHolder: "none",
+                  controlLeaseId: null,
+                  controlUserId: null,
+                  controlLeaseExpiresAt: null,
+                  controlBotId: null,
+                  controlRunId: null,
+                  executionRunId: null,
+                  executionBotId: null,
+                  executionLeaseExpiresAt: null,
+                },
+              });
+              await recordComputerRunEnd(deps.prisma, bot.computer, "stopped");
             }
-            await expireComputerExecutionLeases(deps.prisma, {
-              computerId: bot.computer.id,
-              botId: bot.id,
-            });
-            await deps.prisma.computer.update({
-              where: { id: bot.computer.id },
-              data: {
-                state: "stopped",
-                controlHolder: "none",
-                controlLeaseId: null,
-                controlUserId: null,
-                controlLeaseExpiresAt: null,
-                controlBotId: null,
-                controlRunId: null,
-                executionRunId: null,
-                executionBotId: null,
-                executionLeaseExpiresAt: null,
-              },
-            });
-            await recordComputerRunEnd(deps.prisma, bot.computer, "stopped");
           }
           const updated = await repos.setBotComputer(context.actor, bot.id, input.mode);
           deps.analytics?.capture(context.actor.userId, {

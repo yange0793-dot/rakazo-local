@@ -8,9 +8,9 @@ import {
   mapScratchpadItem,
   readAgentMemory,
 } from "@rakazo/adapters";
-import type { Actor, SemanticFact } from "@rakazo/contracts";
+import type { Actor, MessageBlock, SemanticFact } from "@rakazo/contracts";
 import { isDeletableMemoryDocument } from "@rakazo/contracts";
-import { findSpaceMemoryConfig, IsolationError } from "@rakazo/db";
+import { findSpaceMemoryConfig, IsolationError, SemanticFactStore } from "@rakazo/db";
 import {
   disconnectMemoryProvider,
   persistMemoryProviderConfig,
@@ -96,6 +96,86 @@ export function memoryRoutes(ctx: RouterContext) {
         }
         return { ok: true as const };
       }),
+      /**
+       * The draft block on the bot's thread is the only source of cue, lesson, and evidence:
+       * the client names which draft to save and cannot supply or alter its text.
+       */
+      saveLesson: authed.memory.saveLesson.handler(async ({ context, input }) => {
+        const provider = await managedProvider(context.actor, input.botId);
+        if (!provider) factManagementUnsupported();
+        const bot = await deps.prisma.bot.findFirst({
+          where: { id: input.botId, spaceId: context.actor.spaceId },
+          select: { thread: { select: { id: true } } },
+        });
+        if (!bot?.thread) throw new ORPCError("NOT_FOUND", { message: "Lesson draft not found" });
+        const messages = await deps.prisma.message.findMany({
+          where: { threadId: bot.thread.id, role: "bot" },
+          orderBy: { seq: "desc" },
+          take: 100,
+        });
+        let draft:
+          | {
+              messageId: string;
+              blocks: MessageBlock[];
+              index: number;
+              block: Extract<MessageBlock, { kind: "lesson_draft" }>;
+            }
+          | undefined;
+        for (const message of messages) {
+          const blocks = message.blocks as MessageBlock[];
+          if (!Array.isArray(blocks)) continue;
+          const index = blocks.findIndex(
+            (block) => block.kind === "lesson_draft" && block.lessonId === input.lessonId,
+          );
+          const block = blocks[index];
+          if (block?.kind !== "lesson_draft") continue;
+          draft = { messageId: message.id, blocks, index, block };
+          break;
+        }
+        if (!draft) throw new ORPCError("NOT_FOUND", { message: "Lesson draft not found" });
+        // The host-written draft names its run; the store re-checks that the run exists for
+        // this space and bot before attributing the saved lesson to it.
+        const fact = await new SemanticFactStore(deps.prisma).saveLesson(
+          {
+            botId: input.botId,
+            cue: draft.block.cue,
+            lesson: draft.block.lesson,
+            provenance: {
+              kind: "run",
+              runId: draft.block.runId,
+              threadId: bot.thread.id,
+              messageId: draft.messageId,
+              harness: {
+                // The draft block carries no domain; empty leaves the memory page's Domain row out.
+                domainKey: "",
+                signals: [],
+                autoApplied: false,
+                evidence: draft.block.evidence,
+              },
+            },
+          },
+          factContext(context.actor, input.botId, "memory.saveLesson", context.signal),
+        );
+        if (!fact) throw new ORPCError("CONFLICT", { message: "The lesson could not be saved." });
+        // A retry after a lost reply finds the block already saved; the store deduped the write
+        // by content, so only the card still has to hear about it.
+        if (draft.block.status !== "saved") {
+          const nextBlocks: MessageBlock[] = [...draft.blocks];
+          nextBlocks[draft.index] = { ...draft.block, status: "saved" };
+          await deps.prisma.message.update({
+            where: { id: draft.messageId },
+            data: { blocks: nextBlocks as never },
+          });
+          await deps.events.append({
+            spaceId: context.actor.spaceId,
+            threadId: bot.thread.id,
+            botId: input.botId,
+            type: "thread.message.updated",
+            payload: { messageId: draft.messageId, role: "bot", blocks: nextBlocks },
+          });
+        }
+        return fact;
+      }),
       exportFacts: authed.memory.exportFacts.handler(async ({ context, input }) => {
         const provider = await managedProvider(context.actor, input.botId);
         if (!provider?.listFacts) factManagementUnsupported();
@@ -115,7 +195,8 @@ export function memoryRoutes(ctx: RouterContext) {
             ),
           );
           if (!page.supported) factManagementUnsupported();
-          facts.push(...page.items);
+          // Forgotten facts keep only a body-free tombstone; they are not part of an export.
+          facts.push(...page.items.filter((item) => item.status !== "forgotten"));
           cursor = page.nextCursor ?? undefined;
         } while (cursor);
         return { format: "rakazo-semantic-memory-v1" as const, facts };

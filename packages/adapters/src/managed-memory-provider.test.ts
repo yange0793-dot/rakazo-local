@@ -1,7 +1,7 @@
 import type { AdapterContext } from "@rakazo/adapter-kit";
 import { MEMORY_REVISION_CONFLICT_ERROR } from "@rakazo/adapter-kit";
 import type { PrismaClient, SemanticIndexWork } from "@rakazo/db";
-import { IsolationError } from "@rakazo/db";
+import { IsolationError, lessonFactNamespace, semanticFactNamespace } from "@rakazo/db";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { LocalMemoryCandidate, LocalMemoryIndex } from "./local-memory-index.js";
 import { MAX_LOCAL_MEMORY_CANDIDATES } from "./local-memory-index.js";
@@ -104,6 +104,33 @@ describe("managed local memory provider", () => {
     store.authorizeScope.mockRejectedValueOnce(new IsolationError());
     expect(await f.provider.recall(request, ctx)).toMatchObject({ ok: false, code: "NOT_FOUND" });
     expect(f.index.search).toHaveBeenCalledTimes(1);
+  });
+
+  it("reads lessons from their own per-bot namespace, never the fact namespaces", async () => {
+    const f = fixture();
+    expect(
+      await f.provider.recall(
+        { query: "Deploys fail", botId: "bot-a", scope: "isolated", limit: 3, kind: "lesson" },
+        ctx,
+      ),
+    ).toMatchObject({ ok: true });
+    expect(f.index.search).toHaveBeenLastCalledWith(
+      expect.objectContaining({ namespace: lessonFactNamespace(ctx.spaceId, "bot-a") }),
+      ctx.signal,
+    );
+    expect(lessonFactNamespace(ctx.spaceId, "bot-a")).toMatch(/^hl1:/);
+    expect(
+      await f.provider.recall(
+        { query: "console", botId: "bot-a", scope: "isolated", limit: 5 },
+        ctx,
+      ),
+    ).toMatchObject({ ok: true });
+    expect(f.index.search).toHaveBeenLastCalledWith(
+      expect.objectContaining({
+        namespace: semanticFactNamespace(ctx.spaceId, "isolated", "bot-a"),
+      }),
+      ctx.signal,
+    );
   });
 
   it("lets later candidates refill a small final limit after stale top hits are filtered", async () => {

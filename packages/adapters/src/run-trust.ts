@@ -138,11 +138,13 @@ export function createRunTrustLoaders(
           kind: { in: [...SITE_SENDING_TOOLS] },
           status: { in: PASSED_EFFECT_STATUSES },
         },
-        select: { request: true },
+        select: { kind: true, request: true },
       })
       .then(async (rows) => {
         const sites = sitesInText(await loadOwnerWords());
         for (const row of rows) {
+          // A page action names the page it acted on, not a fetch destination this run was given.
+          if (row.kind === "browser_act") continue;
           const url = (row.request as { url?: unknown } | null)?.url;
           const site = typeof url === "string" ? urlSite(url) : undefined;
           if (site) sites.add(site);

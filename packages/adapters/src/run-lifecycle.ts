@@ -9,6 +9,7 @@ import {
   BACKGROUND_HELPER_TRIGGER,
   displayName,
   isTerminal,
+  NON_CONVERSATIONAL_RUN_TRIGGERS,
   nextFence,
   redactSecrets,
   userRunError,
@@ -210,22 +211,49 @@ export function providerOutageRetryDelay(priorFailures: number): number {
 
 /**
  * A bot uses its computer for one run at a time, and runs that found it held wait without
- * a retry timer. The run releasing it starts the next one due. Runs backing off after a
- * failure keep their delay.
+ * a retry timer. The run releasing it starts the next one due, a person's turn ahead of a
+ * background one, so a message that landed behind a routine does not wait for the rest of
+ * the queue as well. Runs backing off after a failure keep their delay.
  */
 export async function startNextWaitingRun(
   deps: ExecutorDeps,
   botId: string,
   releasedBy: string,
 ): Promise<void> {
+  const due = {
+    botId,
+    status: "queued" as const,
+    id: { not: releasedBy },
+    OR: [{ wakeAt: null }, { wakeAt: { lte: new Date() } }],
+  };
+  const orderBy = [{ createdAt: "asc" as const }, { id: "asc" as const }];
+  const next =
+    (await deps.prisma.run.findFirst({
+      where: { ...due, trigger: { notIn: [...NON_CONVERSATIONAL_RUN_TRIGGERS] } },
+      orderBy,
+      select: { id: true },
+    })) ?? (await deps.prisma.run.findFirst({ where: due, orderBy, select: { id: true } }));
+  if (next) await deps.jobs.enqueue(runContinueJob(next.id));
+}
+
+/**
+ * The next member of the same group send starts now instead of on its own retry timer.
+ * It re-checks the order itself, so a member that is still waiting simply tries again.
+ */
+export async function startNextGroupMember(
+  deps: Pick<ExecutorDeps, "prisma" | "jobs">,
+  run: { threadId: string; sourceMessageId: string | null; groupTurn?: number | null },
+): Promise<void> {
+  if (run.groupTurn == null || !run.sourceMessageId) return;
   const next = await deps.prisma.run.findFirst({
     where: {
-      botId,
+      threadId: run.threadId,
+      sourceMessageId: run.sourceMessageId,
+      trigger: "user",
       status: "queued",
-      id: { not: releasedBy },
-      OR: [{ wakeAt: null }, { wakeAt: { lte: new Date() } }],
+      groupTurn: { gt: run.groupTurn },
     },
-    orderBy: [{ createdAt: "asc" }, { id: "asc" }],
+    orderBy: [{ groupTurn: "asc" }, { createdAt: "asc" }, { id: "asc" }],
     select: { id: true },
   });
   if (next) await deps.jobs.enqueue(runContinueJob(next.id));
@@ -308,9 +336,9 @@ export async function writeComputerRunRequeue(
 }
 
 /**
- * This worker is stopping and still owns the run. Queue it for another worker.
- * The row stays recoverable: no failure is recorded, and the lease does not keep
- * the next worker from claiming it.
+ * This worker is stopping and still owns the run, or a background turn yielded to a person's
+ * message. Queue it for another worker. The row stays recoverable: no failure is recorded, and
+ * the lease does not keep the next worker from claiming it.
  */
 export async function requeueRunAfterShutdown(
   deps: ExecutorDeps,
@@ -336,7 +364,7 @@ export async function requeueRunAfterShutdown(
   if (released.count !== 1) return false;
   await deps.jobs
     .enqueue(runContinueJob(runId))
-    .catch((error) => getLogger().error("shutdown run requeue", error));
+    .catch((error) => getLogger().error("run requeue wake", error));
   return true;
 }
 
@@ -368,11 +396,47 @@ export async function requeueComputerRun(
     null,
     retryAt,
   );
-  if (!released || untilReleased) return;
+  if (!released) return;
+  if (untilReleased) {
+    await announceWaitingForComputer(deps, runId, workerId, fence);
+    return;
+  }
   await deps.jobs.enqueue({
     ...runContinueJob(runId),
     availableAt: retryAt,
   });
+}
+
+/** Shown in the chat while a person's turn waits for its bot's computer. */
+export const WAITING_FOR_COMPUTER_TEXT = "Waiting for the computer";
+
+/**
+ * A person's turn queued behind another run says so where they are looking: the chat shows it
+ * waiting, not working. The progress row is transient, so the next event replaces it and the
+ * run's end removes it.
+ */
+async function announceWaitingForComputer(
+  deps: ExecutorDeps,
+  runId: string,
+  workerId: string,
+  fence: number,
+): Promise<void> {
+  const run = await deps.prisma.run.findUnique({
+    where: { id: runId },
+    select: { spaceId: true, threadId: true, botId: true, trigger: true },
+  });
+  if (run?.trigger !== "user") return;
+  await deps.events
+    .append({
+      spaceId: run.spaceId,
+      threadId: run.threadId,
+      botId: run.botId,
+      runId,
+      type: "thread.progress",
+      lease: { owner: workerId, fence },
+      payload: { text: WAITING_FOR_COMPUTER_TEXT, activity: true },
+    })
+    .catch((error) => getLogger().warn("run.waiting_for_computer announce", error));
 }
 
 /**
@@ -541,7 +605,13 @@ export async function retryRunSetup(
 /** Releases what an attempt held, however it ended, and lets the next waiting run start. */
 export async function finishRunAttempt(
   deps: ExecutorDeps,
-  run: { id: string; botId: string },
+  run: {
+    id: string;
+    botId: string;
+    threadId: string;
+    sourceMessageId: string | null;
+    groupTurn?: number | null;
+  },
   attempt: { id: string; workerId: string; fence: number },
   state: {
     lease: RunLeaseState;
@@ -578,6 +648,9 @@ export async function finishRunAttempt(
     if (!deps.shutdownSignal?.aborted) {
       await startNextWaitingRun(deps, run.botId, runId).catch((error) =>
         getLogger().error("start next waiting run", error),
+      );
+      await startNextGroupMember(deps, run).catch((error) =>
+        getLogger().error("start next group member", error),
       );
     }
   }

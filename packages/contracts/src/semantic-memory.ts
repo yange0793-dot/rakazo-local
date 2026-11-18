@@ -5,6 +5,30 @@ import { Id, IsoDate } from "./ids.js";
 export const SemanticFactScopeSchema = z.enum(["isolated", "shared"]);
 export const SemanticFactStatusSchema = z.enum(["active", "historical", "forgotten"]);
 
+/**
+ * Lessons are host-written notes for future runs and live in their own per-bot namespace, so
+ * ordinary fact recall and listing never mix them with durable or history rows.
+ */
+export const SemanticFactKindSchema = z.enum(["durable", "history", "lesson"]);
+export type SemanticFactKind = z.infer<typeof SemanticFactKindSchema>;
+
+export const LessonEvidenceKindSchema = z.enum([
+  "run_failed",
+  "approval_denied",
+  "tool_error",
+  "user_steering",
+]);
+export type LessonEvidenceKind = z.infer<typeof LessonEvidenceKindSchema>;
+
+/** Why a host-written lesson exists and which observed event it cites. */
+export const LessonHarnessProvenanceSchema = z.object({
+  domainKey: z.string().max(120),
+  signals: z.array(z.string().max(40)).max(8),
+  autoApplied: z.boolean(),
+  evidence: z.object({ kind: LessonEvidenceKindSchema, quote: z.string().max(300) }),
+});
+export type LessonHarnessProvenance = z.infer<typeof LessonHarnessProvenanceSchema>;
+
 export const SEMANTIC_RECALL_DEFAULT_LIMIT = 20;
 export const SEMANTIC_RECALL_MAX_LIMIT = 50;
 
@@ -33,6 +57,8 @@ export const SemanticFactProvenanceSchema = z.object({
   observedAt: IsoDate.optional(),
   validFrom: IsoDate.optional(),
   validTo: IsoDate.optional(),
+  /** Set on host-written lessons: why it exists and where it came from. */
+  harness: LessonHarnessProvenanceSchema.optional(),
   /** Imported assertions are retained as history, not newly verified by the host. */
   legacy: z
     .object({
@@ -50,7 +76,7 @@ export const SemanticFactSchema = z.object({
   id: Id,
   botId: Id,
   scope: SemanticFactScopeSchema,
-  kind: z.enum(["durable", "history"]),
+  kind: SemanticFactKindSchema,
   content: z.string(),
   revision: z.number().int().positive(),
   status: SemanticFactStatusSchema,
@@ -63,6 +89,8 @@ export type SemanticFact = z.infer<typeof SemanticFactSchema>;
 export const SemanticFactListRequestSchema = z.object({
   botId: Id,
   scope: SemanticFactScopeSchema,
+  /** "lesson" lists the host's lessons for this bot; omitted lists facts only. */
+  kind: SemanticFactKindSchema.optional(),
   query: z.string().max(500).optional(),
   cursor: z.string().min(1).optional(),
   limit: z.number().int().min(1).max(100).optional(),
@@ -81,6 +109,8 @@ export const SemanticFactCorrectRequestSchema = z.object({
   id: Id,
   botId: Id,
   scope: SemanticFactScopeSchema,
+  /** "lesson" corrects a host-written lesson; omitted corrects a durable or history fact. */
+  kind: SemanticFactKindSchema.optional(),
   content: z
     .string()
     .trim()
@@ -98,6 +128,8 @@ export const SemanticFactForgetRequestSchema = z.object({
   id: Id,
   botId: Id,
   scope: SemanticFactScopeSchema,
+  /** "lesson" forgets a host-written lesson; omitted forgets a durable or history fact. */
+  kind: SemanticFactKindSchema.optional(),
   expectedRevision: z.number().int().positive(),
 });
 

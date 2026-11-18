@@ -405,6 +405,7 @@ describeWithDatabase("API authorization and resource isolation", () => {
           expectedRevision: 1,
         },
       ],
+      ["memory/saveLesson", { botId: "missing-bot", lessonId: "missing-lesson" }],
       ["memory/exportFacts", { botId: "missing-bot", scope: "shared" }],
       ["routines/list", { botId: "missing-bot" }],
       ["routines/listForMentions", { botIds: ["missing-bot"] }],

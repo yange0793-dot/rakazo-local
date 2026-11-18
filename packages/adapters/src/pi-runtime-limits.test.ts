@@ -172,7 +172,9 @@ describe("effectiveOutputReserve", () => {
 
   it("resolves an omitted maxTokens before applying the context limit", () => {
     expect(resolveCompletionMaxTokens(undefined, undefined, undefined, false, 4096)).toBe(1024);
-    expect(resolveCompletionMaxTokens(undefined, undefined, undefined, false, 262_144)).toBe(65_536);
+    expect(resolveCompletionMaxTokens(undefined, undefined, undefined, false, 262_144)).toBe(
+      65_536,
+    );
   });
 });
 
@@ -216,6 +218,16 @@ describe("resolveCompletionMaxTokens", () => {
   it("lets an agent-supplied options maxTokens stay under the user cap", () => {
     expect(resolveCompletionMaxTokens(128_000, undefined, 128_000)).toBe(128_000);
     expect(resolveCompletionMaxTokens(128_000, 16_384, 128_000)).toBe(16_384);
+  });
+
+  it("does not trim an agent's per-call budget with the input reserve", () => {
+    // A call repeated for more room may sit above the quarter this window reserves.
+    expect(resolveCompletionMaxTokens(2_147_483_647, undefined, 131_072, false, 262_144)).toBe(
+      131_072,
+    );
+    // The model's own ceiling and the connection's limit still apply.
+    expect(resolveCompletionMaxTokens(65_536, undefined, 131_072, false, 262_144)).toBe(65_536);
+    expect(resolveCompletionMaxTokens(128_000, 32_768, 131_072, false, 262_144)).toBe(32_768);
   });
 
   it("gives a reasoning model the model card's full budget", () => {

@@ -17,6 +17,8 @@ import {
   HISTORY_WINDOW_SIZE,
   historyWindowSize,
   MAX_COMPACTED_SUMMARY_CHARS,
+  MAX_RECALLED_CITATION_BYTES,
+  MAX_RECALLED_MEMORIES,
   MAX_RECALLED_MEMORY_BYTES,
   MAX_SUMMARIZE_PROMPT_CHARS,
   MAX_TRANSCRIPT_CHARS,
@@ -209,12 +211,13 @@ describe("formatRecalledMemory", () => {
     expect(block).toContain("</recalled_memory>");
   });
 
-  it("includes useful facts beyond the former five-result cap and reports the selection", () => {
+  it("stops at the five-fact automatic recall cap and reports the selection", () => {
     const results = Array.from({ length: 25 }, (_, i) => ({ memory: `fact ${i}.` }));
     const block = formatRecalledMemory(results);
-    expect(block).toContain("fact 19.");
-    expect(block).not.toContain("fact 20.");
-    expect(block).toContain("Showing 20 of 25 recalled facts; 5 omitted");
+    expect(MAX_RECALLED_MEMORIES).toBe(5);
+    expect(block).toContain("fact 4.");
+    expect(block).not.toContain("fact 5.");
+    expect(block).toContain("Showing 5 of 25 recalled facts; 20 omitted");
   });
 
   it("does not let repeated citations consume the budget for different facts", () => {
@@ -238,6 +241,18 @@ describe("formatRecalledMemory", () => {
 
   it("returns an empty string for no results", () => {
     expect(formatRecalledMemory([])).toBe("");
+  });
+
+  it("renders a long stored provenance quote within the citation cap", () => {
+    const quote = JSON.stringify({ kind: "user", quote: "引用".repeat(4_000) });
+    const block = formatRecalledMemory([
+      { memory: "Ava prefers feature flags.", id: "fact-1", provenance: quote, revision: 1 },
+      { memory: "Second fact.", id: "fact-2", revision: 1 },
+    ]);
+    const citation = block.split("\n").find((line) => line.includes("provenance: "))!;
+    expect(Buffer.byteLength(citation, "utf8")).toBeLessThan(MAX_RECALLED_CITATION_BYTES + 200);
+    expect(citation).toContain("…");
+    expect(block).toContain("Second fact.");
   });
 
   it("keeps whole citations including revisions inside the UTF-8 budget", () => {

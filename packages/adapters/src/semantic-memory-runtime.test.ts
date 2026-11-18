@@ -7,13 +7,22 @@ import type {
 } from "@rakazo/adapter-kit";
 import type { MessageBlock } from "@rakazo/contracts";
 import { BACKGROUND_HELPER_TRIGGER, STEERING_CONTINUATION_PROMPT } from "@rakazo/core";
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import type * as ComputerLifecycleModule from "./computer-lifecycle.js";
 import { createRunExecutor } from "./executor.js";
-import { LEGACY_HISTORY_WINDOW_SIZE, MAX_RECALLED_MEMORY_BYTES } from "./history-compaction.js";
+import {
+  LEGACY_HISTORY_WINDOW_SIZE,
+  MAX_RECALLED_MEMORIES,
+  MAX_RECALLED_MEMORY_BYTES,
+} from "./history-compaction.js";
 import { threadContextForRun } from "./run-instructions.js";
 import type { SemanticMemorySourceMessage } from "./run-tools-memory.js";
-import { semanticMemoryUserSource, semanticRecallForRun } from "./run-tools-memory.js";
+import {
+  lessonRecallForRun,
+  MAX_LESSON_RECALLS,
+  semanticMemoryUserSource,
+  semanticRecallForRun,
+} from "./run-tools-memory.js";
 import { withModelRoles } from "./testing/model-roles.js";
 
 const provisionComputer = vi.hoisted(() => vi.fn());
@@ -33,11 +42,22 @@ const FACT: SemanticMemoryResult = {
   entity: "isolated:bot-1",
 };
 
+const LESSON: SemanticMemoryResult = {
+  memory: "cue: Deploys fail on Fridays\nlesson: Deploy on Monday.",
+  score: 0.8,
+  id: "lesson-1",
+  revision: 3,
+  entity: "hl1:noevjA",
+};
+
 function provider(
   preTurn: boolean,
   result: SemanticMemoryResponse<SemanticMemoryResult[]> = { ok: true, value: [FACT] },
+  lessons: SemanticMemoryResult[] = [],
 ) {
-  const recall = vi.fn<SemanticMemoryProvider["recall"]>(async () => result);
+  const recall = vi.fn<SemanticMemoryProvider["recall"]>(async (request) =>
+    request.kind === "lesson" ? { ok: true as const, value: lessons } : result,
+  );
   const memory: SemanticMemoryProvider = {
     describe: () => ({
       id: "test-memory",
@@ -130,7 +150,7 @@ describe("source-derived automatic recall", () => {
         scope: "isolated",
         botId: "bot-1",
         threadId: "thread-1",
-        limit: 20,
+        limit: MAX_RECALLED_MEMORIES,
       },
       CONTEXT,
     );
@@ -154,7 +174,7 @@ describe("source-derived automatic recall", () => {
         botId: "bot-1",
         threadId: "thread-1",
         historyGeneration: 2,
-        limit: 20,
+        limit: MAX_RECALLED_MEMORIES,
       },
       CONTEXT,
     );
@@ -326,7 +346,7 @@ describe("source-derived automatic recall", () => {
         botId: "bot-1",
         threadId: "thread-1",
         historyGeneration: 2,
-        limit: 20,
+        limit: MAX_RECALLED_MEMORIES,
       },
       CONTEXT,
     );
@@ -353,15 +373,74 @@ describe("source-derived automatic recall", () => {
   });
 });
 
+describe("lesson recall", () => {
+  const originalSelfEvolution = process.env.SELF_EVOLUTION;
+  afterEach(() => {
+    if (originalSelfEvolution === undefined) delete process.env.SELF_EVOLUTION;
+    else process.env.SELF_EVOLUTION = originalSelfEvolution;
+  });
+
+  function lessonOptions(memory: SemanticMemoryProvider) {
+    return {
+      provider: memory,
+      botId: "bot-1",
+      run: RUN_SOURCE,
+      sourceMessage: USER_SOURCE,
+      external: false,
+      prompt: "Internal task prompt",
+      secrets: [] as string[],
+    };
+  }
+
+  it("asks for lessons in their own scope from the same user-derived query", async () => {
+    process.env.SELF_EVOLUTION = "1";
+    const { memory, recall } = provider(true, undefined, [LESSON]);
+    expect(await lessonRecallForRun(lessonOptions(memory), CONTEXT)).toEqual({
+      ok: true,
+      value: [LESSON],
+    });
+    expect(recall).toHaveBeenCalledExactlyOnceWith(
+      {
+        query: "What build should I use?",
+        scope: "isolated",
+        botId: "bot-1",
+        kind: "lesson",
+        limit: MAX_LESSON_RECALLS,
+      },
+      CONTEXT,
+    );
+    expect(MAX_LESSON_RECALLS).toBe(3);
+  });
+
+  it("stays off for a provider without host-managed facts, an external chat, or self-evolution off", async () => {
+    process.env.SELF_EVOLUTION = "1";
+    const unmanaged = provider(false);
+    expect(await lessonRecallForRun(lessonOptions(unmanaged.memory), CONTEXT)).toBeNull();
+    expect(unmanaged.recall).not.toHaveBeenCalled();
+
+    const external = provider(true, undefined, [LESSON]);
+    expect(
+      await lessonRecallForRun({ ...lessonOptions(external.memory), external: true }, CONTEXT),
+    ).toBeNull();
+    expect(external.recall).not.toHaveBeenCalled();
+
+    process.env.SELF_EVOLUTION = "off";
+    const off = provider(true, undefined, [LESSON]);
+    expect(await lessonRecallForRun(lessonOptions(off.memory), CONTEXT)).toBeNull();
+    expect(off.recall).not.toHaveBeenCalled();
+  });
+});
+
 async function runWithMemory(options: {
   preTurn: boolean;
   trigger?: string;
   cursor?: number | null;
   visible?: number;
   response?: SemanticMemoryResponse<SemanticMemoryResult[]>;
+  lessons?: SemanticMemoryResult[];
   secrets?: string[];
 }) {
-  const { memory, recall } = provider(options.preTurn, options.response);
+  const { memory, recall } = provider(options.preTurn, options.response, options.lessons);
   const run = {
     id: "run-1",
     botId: "bot-1",
@@ -445,7 +524,9 @@ async function runWithMemory(options: {
     attempt: {
       create: vi.fn(async () => ({ id: "attempt-1" })),
       findMany: vi.fn(async () => []),
+      count: vi.fn(async () => 1),
       updateMany: vi.fn(async () => ({ count: 1 })),
+      update: vi.fn(async () => ({ id: "attempt-1" })),
     },
     thread: { findUniqueOrThrow: vi.fn(async () => thread) },
     message: {
@@ -467,6 +548,10 @@ async function runWithMemory(options: {
         defaultModelId: "openai/gpt-4o",
       })),
     },
+    lessonUsage: {
+      createMany: vi.fn(async () => ({ count: 0 })),
+      updateMany: vi.fn(async () => ({ count: 0 })),
+    },
   };
   // Like the lazy-computer fixture, unrelated model tables are empty; no database exists.
   const empty = {
@@ -485,6 +570,7 @@ async function runWithMemory(options: {
     yield { type: "done" as const, text: "Use the project build." };
   });
   const finalizeRun = vi.fn(async () => ({ continuationRunId: null }));
+  const enqueue = vi.fn(async (_job: unknown) => undefined);
   const executor = createRunExecutor({
     prisma: client,
     deploymentModelKey: "fake-deployment-key",
@@ -498,13 +584,19 @@ async function runWithMemory(options: {
     memoryProviders: { resolve: async () => ({ provider: memory, defaultScope: "isolated" }) },
     home: { commit: vi.fn(async () => "fixture-revision") },
     events: { append: vi.fn(async () => undefined), finalizeRun },
-    jobs: { enqueue: vi.fn(async () => undefined) },
+    jobs: { enqueue },
     secrets: options.secrets ?? [],
   } as unknown as Parameters<typeof createRunExecutor>[0]);
   await executor.continueRun(run.id, "worker-1");
   expect(finalizeRun).not.toHaveBeenCalledWith(expect.objectContaining({ outcome: "failed" }));
   expect(runtimeRun).toHaveBeenCalledOnce();
-  return { recall, request: runtimeRun.mock.calls[0]![0], runtimeRun };
+  return {
+    recall,
+    request: runtimeRun.mock.calls[0]![0],
+    runtimeRun,
+    lessonUsage: prisma.lessonUsage,
+    enqueue,
+  };
 }
 
 describe("executor recall integration", () => {
@@ -517,22 +609,20 @@ describe("executor recall integration", () => {
       scope: "isolated",
       botId: "bot-1",
       threadId: "thread-1",
-      limit: 20,
+      limit: MAX_RECALLED_MEMORIES,
     });
     expect(recall.mock.invocationCallOrder[0]!).toBeLessThan(
       runtimeRun.mock.invocationCallOrder[0]!,
     );
-    const context = request.history.find((message) =>
-      message.content.includes("<recalled_memory>"),
-    )!;
-    expect(context.content).toContain("id: fact-1");
-    expect(context.content).toContain("revision: 4");
-    expect(context.content).toContain("untrusted historical data");
-    expect(request.prompt).not.toContain(FACT.memory);
-    expect(request.instructions).not.toContain(FACT.memory);
-    expect(Buffer.byteLength(context.content, "utf8")).toBeLessThanOrEqual(
-      MAX_RECALLED_MEMORY_BYTES,
+    expect(request.history.some((message) => message.content.includes("<recalled_memory>"))).toBe(
+      false,
     );
+    expect(request.prompt).toContain("<recalled_memory>");
+    expect(request.prompt).toContain("id: fact-1");
+    expect(request.prompt).toContain("revision: 4");
+    expect(request.prompt).toContain("untrusted historical data");
+    expect(request.prompt).toContain(FACT.memory);
+    expect(request.instructions).not.toContain(FACT.memory);
     expect(provisionComputer).not.toHaveBeenCalled();
   });
 
@@ -564,6 +654,7 @@ describe("executor recall integration", () => {
     expect(request.history.some((message) => message.content.includes("<recalled_memory>"))).toBe(
       false,
     );
+    expect(request.prompt).not.toContain("<recalled_memory>");
   });
 
   it("keeps the fallback history on a failed early recall without retrying it", async () => {
@@ -578,6 +669,7 @@ describe("executor recall integration", () => {
     expect(request.history.some((message) => message.content.includes("<recalled_memory>"))).toBe(
       false,
     );
+    expect(request.prompt).not.toContain("<recalled_memory>");
   });
 
   it("bounds and redacts the actual injected block, including every citation", async () => {
@@ -593,14 +685,62 @@ describe("executor recall integration", () => {
       response: { ok: true, value: results },
       secrets: ["<fake-token>"],
     });
-    const block = request.history.find((message) =>
-      message.content.includes("<recalled_memory>"),
-    )!.content;
+    const block = request.prompt.slice(request.prompt.indexOf("<recalled_memory>"));
     expect(Buffer.byteLength(block, "utf8")).toBeLessThanOrEqual(MAX_RECALLED_MEMORY_BYTES);
     expect(block).not.toContain("fake-token");
     expect(block).toContain("[redacted]");
     expect(block).toContain("&amp;&lt;");
     expect(block).toContain("revision: 1");
     expect(block.endsWith("</recalled_memory>")).toBe(true);
+  });
+});
+
+describe("executor lesson integration", () => {
+  const originalSelfEvolution = process.env.SELF_EVOLUTION;
+  afterEach(() => {
+    if (originalSelfEvolution === undefined) delete process.env.SELF_EVOLUTION;
+    else process.env.SELF_EVOLUTION = originalSelfEvolution;
+  });
+
+  it("injects recalled lessons into the current turn, not history, and records their use", async () => {
+    process.env.SELF_EVOLUTION = "1";
+    const { recall, request, lessonUsage, enqueue } = await runWithMemory({
+      preTurn: true,
+      lessons: [LESSON],
+    });
+    const lessonRequest = recall.mock.calls
+      .map(([recallRequest]) => recallRequest)
+      .find((recallRequest) => recallRequest.kind === "lesson");
+    expect(lessonRequest).toMatchObject({ scope: "isolated", botId: "bot-1", limit: 3 });
+    expect(request.prompt).toContain("<your_notes>");
+    expect(request.prompt).toContain("- Deploys fail on Fridays → Deploy on Monday.");
+    expect(request.prompt.trimEnd().endsWith("</your_notes>")).toBe(true);
+    expect(request.history.some((message) => message.content.includes("<your_notes>"))).toBe(false);
+    expect(request.instructions).toContain("Blocks tagged <recalled_memory> or <your_notes>");
+    expect(lessonUsage.createMany).toHaveBeenCalledExactlyOnceWith({
+      data: [{ spaceId: "space-1", botId: "bot-1", lessonId: "lesson-1", runId: "run-1" }],
+      skipDuplicates: true,
+    });
+    // The close settles the use, and a clean run queues no review.
+    expect(lessonUsage.updateMany).toHaveBeenCalledExactlyOnceWith({
+      where: { spaceId: "space-1", runId: "run-1" },
+      data: { outcome: "completed", settledAt: expect.any(Date) },
+    });
+    expect(enqueue.mock.calls.map(([job]) => (job as { name: string }).name)).not.toContain(
+      "harness.reflect",
+    );
+  });
+
+  it("adds no notes when self-evolution is off", async () => {
+    delete process.env.SELF_EVOLUTION;
+    const { recall, request, lessonUsage } = await runWithMemory({
+      preTurn: true,
+      lessons: [LESSON],
+    });
+    expect(recall.mock.calls.every(([recallRequest]) => recallRequest.kind !== "lesson")).toBe(
+      true,
+    );
+    expect(request.prompt).not.toContain("<your_notes>");
+    expect(lessonUsage.createMany).not.toHaveBeenCalled();
   });
 });

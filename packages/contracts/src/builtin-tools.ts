@@ -93,6 +93,7 @@ export const BUILTIN_TOOL_NAMES = [
   "skill_create",
   "skill_update",
   "skill_delete",
+  "reflect_on_run",
   "run_subagent",
   "create_space",
   "spawn_bot",

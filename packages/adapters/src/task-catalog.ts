@@ -1,6 +1,7 @@
 import type { ConnectorTool } from "@rakazo/adapter-kit";
 import type { PrismaClient } from "@rakazo/db";
 import { listSchedulesFromTool } from "./schedule-tools.js";
+import { parsePlaybook } from "./teaching-session.js";
 import { listScratchpadItems } from "./scratchpad-tools.js";
 import { listAgentSkillRecords } from "./skill-tools.js";
 
@@ -48,7 +49,7 @@ export async function taskCatalogFromTool(deps: TaskCatalogToolDeps, input: Task
         status: "saved",
       },
       orderBy: [{ updatedAt: "desc" }, { createdAt: "desc" }],
-      select: { id: true, name: true, goal: true, status: true },
+      select: { id: true, name: true, goal: true, status: true, playbook: true },
     }),
     listAgentSkillRecords(deps.prisma, {
       spaceId: input.spaceId,
@@ -85,6 +86,9 @@ export async function taskCatalogFromTool(deps: TaskCatalogToolDeps, input: Task
       name: skill.name,
       goal: skill.goal,
       status: skill.status,
+      // The full playbook is part of the record so a bot can quote or follow a saved skill even
+      // when the user's wording does not trigger the skill's name.
+      playbook: parsePlaybook(skill.playbook),
       source: "taught_skill",
     })),
     skills: skills.map((skill) => ({

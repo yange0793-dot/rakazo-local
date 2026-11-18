@@ -1,4 +1,5 @@
 import { spawn } from "node:child_process";
+import { existsSync } from "node:fs";
 import type { Readable } from "node:stream";
 import type {
   Context,
@@ -17,6 +18,7 @@ import type {
   MemoryExtractionRequest,
   MemoryExtractor,
 } from "@rakazo/adapter-kit";
+import { getLogger } from "@rakazo/logging";
 import { withChatCompletionsCompatibility } from "./chat-completions-compat.js";
 import { withCloudflareAuth } from "./cloudflare-ai-gateway.js";
 import { sanitizeProviderError } from "./pi-runtime-errors.js";
@@ -81,6 +83,8 @@ interface ProtocolCompletion {
 interface ProtocolResult {
   type: "result";
   changes: unknown;
+  /** Proposals the child dropped on its own because they did not verify. */
+  dropped?: unknown;
 }
 
 interface ProtocolError {
@@ -90,6 +94,13 @@ interface ProtocolError {
 
 type ProtocolEvent = ProtocolCompletion | ProtocolResult | ProtocolError;
 
+/**
+ * The one request ceiling: the coordinator sizes a batch against it and this transport refuses
+ * anything above it. It leaves room for notes and recalled facts inside one protocol frame.
+ */
+export const MAX_EXTRACTION_REQUEST_BYTES = 768 * 1024;
+/** A protocol frame is one JSON line; a completion carrying the same conversation may exceed a
+ * request, so the reader stays above it. */
 const MAX_PROTOCOL_FRAME_BYTES = 1024 * 1024;
 
 const CATEGORIES = new Set<MemoryExtractionCategory>([
@@ -116,9 +127,18 @@ export function createLangMemExtractor(options: LangMemExtractorOptions): Memory
       context: AdapterContext,
     ): Promise<MemoryExtractionChange[]> {
       context.signal?.throwIfAborted();
-      const initialFrame = JSON.stringify({ type: "extract", request });
-      if (Buffer.byteLength(initialFrame) > MAX_PROTOCOL_FRAME_BYTES) {
-        throw new Error("Memory extraction request exceeds the 1 MiB protocol limit.");
+      const requestBytes = Buffer.byteLength(JSON.stringify(request));
+      if (requestBytes > MAX_EXTRACTION_REQUEST_BYTES) {
+        throw new Error(
+          `Memory extraction request is ${requestBytes} bytes, over the ${MAX_EXTRACTION_REQUEST_BYTES}-byte extractor limit.`,
+        );
+      }
+      // A configured path that disappeared fails the spawn with no useful cause; name it here.
+      if (!existsSync(options.pythonPath)) {
+        throw new Error(`LangMem extractor Python is missing at ${options.pythonPath}`);
+      }
+      if (!existsSync(options.scriptPath)) {
+        throw new Error(`LangMem extractor script is missing at ${options.scriptPath}`);
       }
       const child = spawn(options.pythonPath, ["-I", options.scriptPath], {
         stdio: ["pipe", "pipe", "pipe"],
@@ -170,7 +190,9 @@ export function createLangMemExtractor(options: LangMemExtractorOptions): Memory
       const fail = (message: string) => new Error(message);
 
       try {
-        write({ type: "extract", request });
+        // `allowRemovals` is this parent asking for the delete-capable protocol. A request
+        // without it (an older worker on the same script) keeps the previous child behavior.
+        write({ type: "extract", request, allowRemovals: true });
         let rounds = 0;
         for await (const line of protocolLines(child.stdout!)) {
           context.signal?.throwIfAborted();
@@ -197,7 +219,18 @@ export function createLangMemExtractor(options: LangMemExtractorOptions): Memory
             continue;
           }
           if (event.type === "result") {
-            return validateChanges(request, event.changes);
+            const accepted = validateChanges(request, event.changes);
+            const dropped =
+              accepted.dropped + (typeof event.dropped === "number" ? event.dropped : 0);
+            if (dropped > 0) {
+              // Counts only: no quote or content reaches the log.
+              getLogger().warn("memory extraction dropped unverifiable proposals", {
+                "memory.operation_id": context.operationId,
+                "memory.dropped": dropped,
+                "memory.accepted": accepted.changes.length,
+              });
+            }
+            return accepted.changes;
           }
           if (event.type === "error") {
             throw fail(`LangMem extraction failed${stderrSuffix(stderr)}`);
@@ -263,11 +296,13 @@ function normalizeCompletion(event: ProtocolCompletion): MemoryCompletionRequest
 /**
  * A proposal is not permission. Only a real new user message can support it, and a
  * correction can only name an active fact at the revision the host handed to LangMem.
+ * An unverifiable proposal is dropped and counted: one imprecise quote must not cost the
+ * rest of the batch.
  */
 export function validateChanges(
   request: MemoryExtractionRequest,
   raw: unknown,
-): MemoryExtractionChange[] {
+): { changes: MemoryExtractionChange[]; dropped: number } {
   if (!Array.isArray(raw)) throw new Error("LangMem extractor returned no change list");
   const newSources = new Map(
     request.messages
@@ -275,9 +310,12 @@ export function validateChanges(
       .map((message) => [message.id, message.content]),
   );
   const existing = new Map(request.existing.map((fact) => [fact.id, fact]));
-  return raw.map((value, index) => {
+  const changes: MemoryExtractionChange[] = [];
+  let dropped = 0;
+  for (const value of raw) {
     if (!value || typeof value !== "object") {
-      throw new Error(`LangMem change ${index} is not an object`);
+      dropped += 1;
+      continue;
     }
     const change = value as Record<string, unknown>;
     const content = typeof change.content === "string" ? change.content.trim() : "";
@@ -285,42 +323,61 @@ export function validateChanges(
       typeof change.sourceMessageId === "string" ? change.sourceMessageId : "";
     const sourceQuote = typeof change.sourceQuote === "string" ? change.sourceQuote : "";
     const category = change.category;
-    if (!content) throw new Error(`LangMem change ${index} has no content`);
-    if (!CATEGORIES.has(category as MemoryExtractionCategory)) {
-      throw new Error(`LangMem change ${index} has an invalid category`);
-    }
     const source = newSources.get(sourceMessageId);
-    if (source === undefined) {
-      throw new Error(`LangMem change ${index} does not cite a new user message`);
-    }
-    if (!sourceQuote || !source.includes(sourceQuote)) {
-      throw new Error(`LangMem change ${index} quote is not in the cited new user message`);
+    if (
+      !content ||
+      !CATEGORIES.has(category as MemoryExtractionCategory) ||
+      source === undefined ||
+      !sourceQuote ||
+      !source.includes(sourceQuote)
+    ) {
+      dropped += 1;
+      continue;
     }
     const replacesId = typeof change.replacesId === "string" ? change.replacesId : undefined;
+    if (change.remove === true) {
+      // A removal still needs the user's own words, and it can only name an active fact at
+      // the revision the extractor was shown; the host applies it as a tombstone.
+      const target = replacesId === undefined ? undefined : existing.get(replacesId);
+      if (target?.status !== "active" || change.expectedRevision !== target.revision) {
+        dropped += 1;
+        continue;
+      }
+      changes.push({
+        content,
+        sourceMessageId,
+        sourceQuote,
+        category: category as MemoryExtractionCategory,
+        replacesId: target.id,
+        expectedRevision: target.revision,
+        remove: true,
+      });
+      continue;
+    }
     if (replacesId !== undefined) {
       const target = existing.get(replacesId);
-      if (!target || target.status !== "active") {
-        throw new Error(`LangMem change ${index} replaces a fact outside the active candidates`);
+      if (target?.status !== "active" || change.expectedRevision !== target.revision) {
+        dropped += 1;
+        continue;
       }
-      if (change.expectedRevision !== target.revision) {
-        throw new Error(`LangMem change ${index} has a stale expected revision`);
-      }
-      return {
+      changes.push({
         content,
         sourceMessageId,
         sourceQuote,
         category: category as MemoryExtractionCategory,
         replacesId,
         expectedRevision: target.revision,
-      };
+      });
+      continue;
     }
-    return {
+    changes.push({
       content,
       sourceMessageId,
       sourceQuote,
       category: category as MemoryExtractionCategory,
-    };
-  });
+    });
+  }
+  return { changes, dropped };
 }
 
 export interface RuntimeMemoryCompletionDeps {
@@ -375,7 +432,10 @@ export function createRuntimeMemoryCompletion(deps: RuntimeMemoryCompletionDeps)
       }),
     );
     const toolChoice = toPiToolChoice(completionModel.api, request.toolChoice);
-    const reasoning = thinkingLevelFor(completionModel, model.thinkingLevel);
+    const reasoning = completionReasoning(
+      toolChoice,
+      thinkingLevelFor(completionModel, model.thinkingLevel),
+    );
     const completionContext: Context = {
       ...piContext,
       ...(tools.length ? { tools } : {}),
@@ -514,14 +574,29 @@ function completionText(content: unknown): string {
   throw new Error("LangMem sent unsupported completion content");
 }
 
+/**
+ * A forced tool choice conflicts with extended thinking on Anthropic-style APIs, and a gateway
+ * can enforce that rule even when the connection describes another protocol. Extraction always
+ * asks for its tools, so thinking stays off for those calls instead of failing the job.
+ */
+export function completionReasoning(
+  toolChoice: "auto" | "none" | "any" | "required" | undefined,
+  reasoning: ReturnType<typeof thinkingLevelFor>,
+): ReturnType<typeof thinkingLevelFor> | undefined {
+  if (toolChoice === "any" || toolChoice === "required") return undefined;
+  return reasoning === "off" ? undefined : reasoning;
+}
+
 function toPiToolChoice(
   api: string,
   choice: unknown,
 ): "auto" | "none" | "any" | "required" | undefined {
   if (choice === "auto" || choice === "none") return choice;
   if (choice !== "any") return undefined;
-  // Trustcall asks for "any"; each provider spells forced tool use its own way.
-  if (api === "anthropic-messages") return "any";
+  // Trustcall asks for "any". Anthropic rejects a forced tool choice while the model thinks, and
+  // a gateway can run a thinking model regardless of what the request asks, so the extraction
+  // tools are offered and the model picks them rather than being forced.
+  if (api === "anthropic-messages") return "auto";
   if (api.startsWith("openai-")) return "required";
   return undefined;
 }

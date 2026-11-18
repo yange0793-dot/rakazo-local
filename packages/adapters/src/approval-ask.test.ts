@@ -270,6 +270,79 @@ describe("page action context", () => {
     if (block.kind !== "ask") throw new Error("expected ask block");
     expect(block.detail).toContain("actions:");
   });
+
+  it("allows the page's site, not every site the browser can reach", () => {
+    const block = buildApprovalAskBlock(
+      "effect-1",
+      "browser_act",
+      { actions: [{ kind: "click", ref: "e2" }] },
+      [],
+      {
+        browserAction: {
+          url: "https://shop.example.test/checkout",
+          steps: [{ kind: "click", role: "button", name: "Pay" }],
+        },
+      },
+    );
+    // The saved rule is the same kind of site rule a fetch saves, so it names the whole site.
+    expect(block).toMatchObject({ kind: "ask", site: "example.test" });
+    if (block.kind !== "ask") throw new Error("expected ask block");
+    expect(block.actions).toEqual([
+      { id: "allow", label: "Allow once" },
+      { id: "always", label: "Always allow example.test" },
+      { id: "deny", label: "Deny" },
+    ]);
+    expect(block.text).toBe("Review before browser_act → shop.example.test");
+  });
+
+  it("previews the text a fill would enter, cut short", () => {
+    const typed = "x".repeat(300);
+    const block = buildApprovalAskBlock(
+      "effect-1",
+      "browser_act",
+      { actions: [{ kind: "fill", ref: "e1", text: typed }] },
+      [],
+      {
+        onceOnly: true,
+        browserAction: {
+          url: "https://example.test/form",
+          steps: [{ kind: "fill", role: "textbox", name: "Note", text: typed }],
+        },
+      },
+    );
+    if (block.kind !== "ask") throw new Error("expected ask block");
+    expect(block.detail).toBe(
+      `url: https://example.test/form\nfill textbox "Note" "${"x".repeat(240)}…"`,
+    );
+  });
+
+  it("redacts and escapes text a page action would type", () => {
+    const block = buildApprovalAskBlock(
+      "effect-1",
+      "browser_act",
+      { actions: [{ kind: "type", ref: "e1", text: 'line one\nfake-token "quoted"' }] },
+      ["fake-token"],
+      {
+        onceOnly: true,
+        browserAction: {
+          url: "https://example.test/form",
+          steps: [
+            {
+              kind: "type",
+              role: "textbox",
+              name: "Note",
+              text: 'line one\nfake-token "quoted"',
+            },
+          ],
+        },
+      },
+    );
+    if (block.kind !== "ask") throw new Error("expected ask block");
+    expect(block.detail?.split("\n")[1]).toBe(
+      'type textbox "Note" "line one\\n[redacted] \\"quoted\\""',
+    );
+    expect(JSON.stringify(block)).not.toContain("fake-token");
+  });
 });
 
 describe("agent connection response cards", () => {

@@ -5,6 +5,7 @@ import { Id, ThinkingLevelSchema } from "./ids.js";
 import { McpTransportSchema } from "./mcp.js";
 import { McpAppCspSchema } from "./mcp-app.js";
 import { PAGE_TITLE_MAX_LENGTH } from "./pages.js";
+import { LessonEvidenceKindSchema } from "./semantic-memory.js";
 
 export const ProductEventType = z.enum([
   "thread.message.created",
@@ -311,6 +312,19 @@ export const MessageBlock = z.discriminatedUnion("kind", [
       whatToReturn: z.string(),
       approvalBoundaries: z.string(),
       failureHandling: z.string(),
+    }),
+    status: z.enum(["draft", "saved", "deleted"]),
+  }),
+  z.object({
+    /** A lesson a review wrote for a run it could not learn from automatically. */
+    kind: z.literal("lesson_draft"),
+    lessonId: Id,
+    runId: Id,
+    cue: z.string().max(200),
+    lesson: z.string().max(600),
+    evidence: z.object({
+      kind: LessonEvidenceKindSchema,
+      quote: z.string().max(300),
     }),
     status: z.enum(["draft", "saved"]),
   }),

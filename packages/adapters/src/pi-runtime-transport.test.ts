@@ -89,7 +89,8 @@ describe("Pi runtime transport", () => {
       transport: "auto",
       maxRetries: 2,
       timeoutMs: MODEL_STREAM_TIMEOUT_MS,
-      maxTokens: DEFAULT_MODEL_MAX_TOKENS,
+      // The completion default no longer caps a model under its own ceiling.
+      maxTokens: 128_000,
     });
   });
 

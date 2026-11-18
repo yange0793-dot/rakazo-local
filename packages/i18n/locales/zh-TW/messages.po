@@ -82,6 +82,13 @@ msgstr "{0}（最多 {ATTACHMENT_MAX_COUNT} 個附件）"
 msgid "{0} (over {1})"
 msgstr "{0}（超過 {1}）"
 
+#. placeholder {0}: choice.label
+#. placeholder {0}: choice.title ?? choice.label
+#. placeholder {0}: selected?.label
+#: apps/web/src/pages/shell/chat-model-picker.tsx
+msgid "{0} (Unavailable)"
+msgstr "{0}（無法使用）"
+
 #. placeholder {0}: preset.n
 #: apps/web/src/lib/cron.ts
 msgid "{0} {unitLabel}"
@@ -367,6 +374,10 @@ msgstr "{hiddenSelectedCount, plural, other {搜尋結果未顯示 # 個已選�
 #: apps/web/src/lib/relative-time.ts
 msgid "{hours}h ago"
 msgstr "{hours} 小時前"
+
+#: apps/web/src/pages/model-settings/compatible-model-fields.tsx
+msgid "{id} (Unavailable)"
+msgstr "{id}（無法使用）"
 
 #: apps/web/src/pages/Invite.tsx
 msgid "{inviterName} invited you"
@@ -1385,6 +1396,10 @@ msgstr "金額"
 msgid "An API key is stored for this provider, not a subscription sign-in."
 msgstr "此供應商儲存的是 API 金鑰，不是訂閱登入。"
 
+#: apps/web/src/pages/routine-editor/trigger-cards.tsx
+msgid "An HTTPS endpoint"
+msgstr "HTTPS 端點"
+
 #: apps/web/src/lib/agent-import-errors.ts
 msgid "An imported API key could not be checked. Try again."
 msgstr "無法檢查匯入的 API 金鑰。請再試一次。"
@@ -1413,7 +1428,6 @@ msgstr "其他助理"
 
 #: apps/mobile/components/IncomingCall.tsx
 #: apps/mobile/lib/incoming-calls.ts
-#: apps/web/src/components/AskCard.tsx
 msgid "Answer"
 msgstr "回答"
 
@@ -1828,6 +1842,7 @@ msgid "bot"
 msgstr "機器人"
 
 #: apps/mobile/app/(settings)/messaging.tsx
+#: apps/mobile/app/(settings)/semantic-memory.tsx
 #: apps/mobile/app/bot-profile.tsx
 #: apps/mobile/app/computer.tsx
 #: apps/mobile/app/peer-chat.tsx
@@ -1843,6 +1858,7 @@ msgstr "機器人"
 #: apps/web/src/lib/identity-display.ts
 #: apps/web/src/pages/IntegrationSetup.tsx
 #: apps/web/src/pages/MessagingSettingsPanel.tsx
+#: apps/web/src/pages/SemanticFactsSection.tsx
 #: apps/web/src/pages/Shell.tsx
 #: apps/web/src/pages/shell/avatar-studio-popover.tsx
 #: apps/web/src/pages/shell/message-view.tsx
@@ -2017,6 +2033,7 @@ msgstr "無法讀取影像"
 #: apps/mobile/app/(settings)/model-connection.tsx
 #: apps/mobile/app/(settings)/plugin.tsx
 #: apps/mobile/app/(settings)/profile.tsx
+#: apps/mobile/app/(settings)/semantic-memory.tsx
 #: apps/mobile/app/(settings)/skill.tsx
 #: apps/mobile/app/(settings)/space.tsx
 #: apps/mobile/app/(settings)/spending-limit.tsx
@@ -2072,6 +2089,7 @@ msgstr "無法讀取影像"
 #: apps/web/src/pages/onboarding/model-step.tsx
 #: apps/web/src/pages/PaymentWalletSettingsPanel.tsx
 #: apps/web/src/pages/PluginSubmissionsPanel.tsx
+#: apps/web/src/pages/SemanticFactsSection.tsx
 #: apps/web/src/pages/shell/create-bot-dialog.tsx
 #: apps/web/src/pages/shell/dialogs.tsx
 msgid "Cancel"
@@ -2259,6 +2277,7 @@ msgstr "請檢查伺服器 URL 和網路，然後重新測試。"
 msgid "Check this yourself"
 msgstr "請自行檢查"
 
+#: apps/web/src/components/pages/PagePreviewPane.tsx
 #: apps/web/src/components/pages/PageView.tsx
 #: apps/web/src/components/pages/PageViewHost.tsx
 msgid "Check your connection and try again."
@@ -2313,6 +2332,11 @@ msgstr "選擇供應商"
 #: apps/web/src/pages/shell/agent-import.tsx
 msgid "Choose backup"
 msgstr "選擇備份"
+
+#: apps/mobile/app/(settings)/semantic-memory.tsx
+#: apps/web/src/pages/SemanticFactsSection.tsx
+msgid "Choose bot"
+msgstr "選擇 Bot"
 
 #: apps/web/src/pages/shell/agent-import.tsx
 #: apps/web/src/pages/shell/avatar-studio-popover.tsx
@@ -2491,6 +2515,10 @@ msgstr "雲端"
 msgid "Cloud agent"
 msgstr "雲端代理程式"
 
+#: apps/web/src/pages/shell/bot-panel.tsx
+msgid "Cloud computer"
+msgstr "雲端電腦"
+
 #: apps/mobile/app/sign-in.tsx
 #: apps/mobile/components/confirm-identity.tsx
 #: apps/mobile/components/thread/ask-block.tsx
@@ -2579,7 +2607,6 @@ msgstr "已完成"
 #: apps/mobile/components/ComputerCard.tsx
 #: apps/web/src/components/ComputerCard.tsx
 #: apps/web/src/pages/settings-nav.ts
-#: apps/web/src/pages/shell/bot-panel.tsx
 #: apps/web/src/pages/shell/bot-settings-sections.tsx
 msgid "Computer"
 msgstr "電腦"
@@ -2681,6 +2708,7 @@ msgstr "請確認此瀏覽器工作階段可以存取該 URL，然後重新測�
 #: apps/web/src/components/integrations/IntegrationSetup.tsx
 #: apps/web/src/components/integrations/plugin-marketplace.tsx
 #: apps/web/src/pages/memory-providers/HonchoSettingsForm.tsx
+#: apps/web/src/pages/memory-providers/LocalMemorySettingsForm.tsx
 #: apps/web/src/pages/memory-providers/SerenitySettingsForm.tsx
 #: apps/web/src/pages/memory-providers/SupermemorySettingsForm.tsx
 #: apps/web/src/pages/MessagingSettingsPanel.tsx
@@ -2794,6 +2822,7 @@ msgstr "已連線。"
 #: apps/web/src/components/integrations/plugin-marketplace.tsx
 #: apps/web/src/pages/McpServersOverlay.tsx
 #: apps/web/src/pages/memory-providers/HonchoSettingsForm.tsx
+#: apps/web/src/pages/memory-providers/LocalMemorySettingsForm.tsx
 #: apps/web/src/pages/memory-providers/SerenitySettingsForm.tsx
 #: apps/web/src/pages/memory-providers/SupermemorySettingsForm.tsx
 #: apps/web/src/pages/shell/message-cards.tsx
@@ -2964,6 +2993,16 @@ msgstr "複製提示詞"
 #: apps/web/src/components/markdown-copy.tsx
 msgid "Copy rows"
 msgstr "複製列"
+
+#: apps/mobile/app/(settings)/semantic-memory.tsx
+#: apps/web/src/pages/SemanticFactsSection.tsx
+msgid "Correct"
+msgstr "更正"
+
+#: apps/mobile/app/(settings)/semantic-memory.tsx
+#: apps/web/src/pages/SemanticFactsSection.tsx
+msgid "Correction"
+msgstr "更正內容"
 
 #: apps/web/src/pages/AccountSettingsOverlay.tsx
 msgid "Cost"
@@ -3138,6 +3177,11 @@ msgstr "無法繼續"
 msgid "Could not copy the link."
 msgstr "無法複製連結。"
 
+#: apps/mobile/app/(settings)/semantic-memory.tsx
+#: apps/web/src/pages/SemanticFactsSection.tsx
+msgid "Could not correct memory"
+msgstr "無法更正記憶"
+
 #: apps/mobile/app/new-bot.tsx
 #: apps/web/src/pages/shell/agent-import.tsx
 #: apps/web/src/pages/shell/create-bot-dialog.tsx
@@ -3287,9 +3331,19 @@ msgstr "無法下載 {name}。請重試。"
 msgid "Could not enable tools"
 msgstr "無法啟用工具"
 
+#: apps/mobile/app/(settings)/semantic-memory.tsx
+#: apps/web/src/pages/SemanticFactsSection.tsx
+msgid "Could not export memory"
+msgstr "無法匯出記憶"
+
 #: apps/mobile/lib/use-subscription-sign-in.ts
 msgid "Could not finish sign-in"
 msgstr "無法完成登入"
+
+#: apps/mobile/app/(settings)/semantic-memory.tsx
+#: apps/web/src/pages/SemanticFactsSection.tsx
+msgid "Could not forget memory"
+msgstr "無法遺忘記憶"
 
 #: apps/web/src/pages/AdminAccessPage.tsx
 msgid "Could not grant access"
@@ -3346,8 +3400,10 @@ msgstr "無法載入帳務資訊"
 msgid "Could not load bot"
 msgstr "無法載入機器人"
 
+#: apps/mobile/app/(settings)/semantic-memory.tsx
 #: apps/mobile/app/index.tsx
 #: apps/mobile/lib/use-home-inbox.ts
+#: apps/web/src/pages/SemanticFactsSection.tsx
 msgid "Could not load bots"
 msgstr "無法載入機器人清單"
 
@@ -3400,6 +3456,8 @@ msgstr "無法載入成員"
 
 #: apps/mobile/app/(settings)/memory-note.tsx
 #: apps/mobile/app/(settings)/memory.tsx
+#: apps/mobile/app/(settings)/semantic-memory.tsx
+#: apps/web/src/pages/SemanticFactsSection.tsx
 msgid "Could not load memory"
 msgstr "無法載入記憶"
 
@@ -3409,6 +3467,7 @@ msgstr "無法載入記憶"
 #: apps/mobile/app/bot-model.tsx
 #: apps/mobile/app/bot-settings.tsx
 #: apps/web/src/pages/model-settings/use-model-settings.ts
+#: apps/web/src/pages/ModelSettingsOverlay.tsx
 msgid "Could not load model settings"
 msgstr "無法載入模型設定"
 
@@ -3555,6 +3614,10 @@ msgstr "無法播放測試片段"
 #: apps/web/src/lib/tts.ts
 msgid "Could not play that clip."
 msgstr "無法播放該音訊。"
+
+#: apps/web/src/components/pages/DownloadPdfButton.tsx
+msgid "Could not prepare PDF. Try again."
+msgstr "無法產生 PDF，請重試。"
 
 #: apps/mobile/app/(settings)/plugin.tsx
 #: apps/web/src/components/integrations/plugin-marketplace.tsx
@@ -3904,6 +3967,11 @@ msgstr "無法切換電腦"
 msgid "Could not switch spaces"
 msgstr "無法切換空間"
 
+#: apps/mobile/app/(settings)/models.tsx
+#: apps/web/src/pages/model-settings/use-model-settings.ts
+msgid "Could not sync model sources"
+msgstr "無法同步模型來源"
+
 #: apps/web/src/pages/shell/use-computer.tsx
 msgid "Could not take control"
 msgstr "無法接管"
@@ -4099,8 +4167,10 @@ msgstr "建立空間"
 msgid "Create your Rakazo"
 msgstr "建立你的 Rakazo"
 
+#: apps/mobile/app/(settings)/semantic-memory.tsx
 #: apps/mobile/components/thread/message-bubble.tsx
 #: apps/web/src/components/AskCard.tsx
+#: apps/web/src/pages/SemanticFactsSection.tsx
 msgid "Created"
 msgstr "已建立"
 
@@ -4180,6 +4250,7 @@ msgid "Custom header"
 msgstr "自訂標頭"
 
 #: apps/mobile/app/sign-in.tsx
+#: apps/web/src/pages/ModelSettingsOverlay.tsx
 msgid "Custom server"
 msgstr "自訂伺服器"
 
@@ -4274,7 +4345,6 @@ msgstr "預設"
 
 #. placeholder {0}: thinkingLevelLabel(defaultThinkingLevel)
 #: apps/web/src/pages/routine-editor/model-settings.tsx
-#: apps/web/src/pages/shell/bot-settings-sections.tsx
 msgid "Default ({0})"
 msgstr "預設（{0}）"
 
@@ -4285,6 +4355,10 @@ msgstr "Hermes 預設內容"
 #: apps/web/src/pages/shell/agent-import-plan.tsx
 msgid "Default from OpenClaw"
 msgstr "OpenClaw 預設內容"
+
+#: apps/web/src/pages/shell/chat-model-picker.tsx
+msgid "Default model for all bots"
+msgstr "所有 Bot 的預設模型"
 
 #: apps/web/src/pages/MemorySettingsOverlay.tsx
 msgid "Default scope"
@@ -4548,10 +4622,12 @@ msgid "Disabled"
 msgstr "已停用"
 
 #: apps/mobile/app/(settings)/memory-note.tsx
+#: apps/mobile/app/(settings)/semantic-memory.tsx
 msgid "Discard"
 msgstr "捨棄"
 
 #: apps/mobile/app/(settings)/memory-note.tsx
+#: apps/mobile/app/(settings)/semantic-memory.tsx
 msgid "Discard changes?"
 msgstr "要捨棄變更嗎？"
 
@@ -4663,6 +4739,7 @@ msgstr "文件已變更，請重新開啟以編輯最新版本。"
 msgid "Don’t have an account?"
 msgstr "還沒有帳號？"
 
+#: apps/mobile/app/(settings)/semantic-memory.tsx
 #: apps/mobile/app/(settings)/vault.tsx
 #: apps/mobile/app/bot-settings.tsx
 #: apps/mobile/components/ComputerCard.tsx
@@ -4713,6 +4790,7 @@ msgstr "下載 CSV"
 msgid "Download PDF"
 msgstr "下載 PDF"
 
+#: apps/web/src/components/ArtifactFileCard.tsx
 #: apps/web/src/components/DesktopUpdates.tsx
 msgid "Downloading…"
 msgstr "下載中…"
@@ -4749,9 +4827,9 @@ msgstr "編輯"
 msgid "Edit avatar"
 msgstr "編輯頭像"
 
-#: apps/web/src/components/AskCard.tsx
-msgid "Edit first"
-msgstr "先編輯"
+#: apps/mobile/components/model-providers.tsx
+msgid "Edit connection"
+msgstr "編輯連線"
 
 #: apps/mobile/app/(settings)/profile.tsx
 #: apps/mobile/app/bot-settings.tsx
@@ -4769,6 +4847,14 @@ msgstr "編輯資料"
 #: apps/mobile/app/routine.tsx
 msgid "Edit routine"
 msgstr "編輯例行任務"
+
+#: apps/web/src/pages/shell/bot-settings-sections.tsx
+msgid "Effort"
+msgstr "思考強度"
+
+#: apps/web/src/pages/shell/bot-settings-sections.tsx
+msgid "Effort unavailable for this model"
+msgstr "此模型不支援思考強度"
 
 #: apps/mobile/app/bot-profile.tsx
 #: apps/mobile/app/sign-in.tsx
@@ -4816,9 +4902,17 @@ msgstr "內建"
 msgid "Enable {0}"
 msgstr "啟用 {0}"
 
+#: apps/web/src/pages/shell/bot-settings-sections.tsx
+msgid "Enable browser notifications"
+msgstr "啟用瀏覽器通知"
+
 #: apps/web/src/components/ComputerProviderSettings.tsx
 msgid "End user ID"
 msgstr "終端使用者 ID"
+
+#: apps/web/src/pages/memory-providers/LocalMemorySettingsForm.tsx
+msgid "Endpoint"
+msgstr "端點"
 
 #: apps/mobile/app/(settings)/billing.tsx
 msgid "Ends"
@@ -4877,6 +4971,10 @@ msgstr "請輸入金額"
 #: apps/web/src/lib/model-connection-preflight.ts
 msgid "Enter an API key before testing."
 msgstr "測試前請輸入 API 金鑰。"
+
+#: apps/web/src/lib/routine-draft.ts
+msgid "Enter an HTTPS URL"
+msgstr "請輸入 HTTPS 網址"
 
 #: apps/web/src/components/ComputerProviderSettings.tsx
 msgid "Environment ID"
@@ -5044,8 +5142,10 @@ msgstr "{expiry} 到期"
 msgid "Expiry"
 msgstr "到期日"
 
+#: apps/mobile/app/(settings)/semantic-memory.tsx
 #: apps/mobile/app/bot-settings.tsx
 #: apps/web/src/components/AccountDataSettings.tsx
+#: apps/web/src/pages/SemanticFactsSection.tsx
 #: apps/web/src/pages/shell/bot-settings-sections.tsx
 msgid "Export"
 msgstr "匯出"
@@ -5084,6 +5184,7 @@ msgstr "失敗"
 #: apps/mobile/components/thread/special-message-card.tsx
 #: apps/mobile/lib/activity.ts
 #: apps/web/src/components/SubagentCard.tsx
+#: apps/web/src/components/ToolActivityDisclosure.tsx
 #: apps/web/src/pages/ActivityList.tsx
 msgid "Failed"
 msgstr "失敗"
@@ -5107,13 +5208,13 @@ msgstr "失敗。"
 msgid "Failure handling"
 msgstr "失敗處理"
 
-#: apps/web/src/pages/routine-editor/trigger-cards.tsx
-msgid "Fields that mark a change"
-msgstr "標記變化的欄位"
+#: apps/web/src/pages/shell/bot-settings-sections.tsx
+msgid "Faster"
+msgstr "更快"
 
 #: apps/web/src/pages/routine-editor/trigger-cards.tsx
-msgid "Fields to compare, e.g. id, modifiedTime (optional)"
-msgstr "要比較的欄位，例如 id, modifiedTime（選填）"
+msgid "Fields to compare (optional)"
+msgstr "要比較的欄位（選填）"
 
 #: apps/mobile/components/thread/message-bubble.tsx
 #: apps/mobile/lib/search-sheet.ts
@@ -5223,10 +5324,25 @@ msgstr "正在完成 MCP 連線…"
 msgid "Focus message"
 msgstr "移至訊息欄"
 
+#: apps/mobile/app/(settings)/semantic-memory.tsx
+#: apps/web/src/pages/SemanticFactsSection.tsx
+msgid "Forget"
+msgstr "遺忘"
+
+#: apps/mobile/app/(settings)/semantic-memory.tsx
+#: apps/web/src/pages/SemanticFactsSection.tsx
+msgid "Forget this record?"
+msgstr "遺忘這筆記憶？"
+
 #: apps/mobile/app/sign-in.tsx
 #: apps/web/src/pages/Auth.tsx
 msgid "Forgot password?"
 msgstr "忘記密碼？"
+
+#: apps/mobile/app/(settings)/semantic-memory.tsx
+#: apps/web/src/pages/SemanticFactsSection.tsx
+msgid "Forgotten"
+msgstr "已遺忘"
 
 #: apps/mobile/app/(settings)/model-connection.tsx
 msgid "Found {count} model."
@@ -5513,6 +5629,11 @@ msgstr "隱藏 {label}"
 msgid "Hide chats"
 msgstr "隱藏聊天"
 
+#: apps/mobile/app/(settings)/semantic-memory.tsx
+#: apps/web/src/pages/SemanticFactsSection.tsx
+msgid "Hide history"
+msgstr "隱藏歷史"
+
 #: apps/web/src/pages/routine-editor/trigger-cards.tsx
 msgid "Hide key"
 msgstr "隱藏金鑰"
@@ -5543,6 +5664,16 @@ msgstr "高"
 msgid "High"
 msgstr "高"
 
+#: apps/mobile/app/(settings)/semantic-memory.tsx
+#: apps/web/src/pages/SemanticFactsSection.tsx
+msgid "Historical"
+msgstr "歷史記錄"
+
+#: apps/mobile/app/(settings)/semantic-memory.tsx
+#: apps/web/src/pages/SemanticFactsSection.tsx
+msgid "History"
+msgstr "歷史"
+
 #: apps/web/src/components/composer/HoldToTalk.tsx
 msgid "Hold to talk"
 msgstr "按住說話"
@@ -5555,6 +5686,16 @@ msgstr "按住說話，放開傳送"
 #: apps/web/src/components/vault/VaultItemEditor.tsx
 msgid "Home"
 msgstr "住家"
+
+#. js-lingui-explicit-id
+#: apps/web/src/pages/memory-providers/registry.ts
+msgid "Honcho Cloud"
+msgstr "Honcho 雲端"
+
+#. js-lingui-explicit-id
+#: apps/web/src/pages/memory-providers/registry.ts
+msgid "Honcho Cloud ({workspaceId})"
+msgstr "Honcho 雲端（{workspaceId}）"
 
 #: apps/mobile/lib/cron.ts
 #: apps/web/src/lib/cron.ts
@@ -5601,6 +5742,10 @@ msgstr "你會如何使用 Rakazo？"
 #: apps/mobile/components/compatible-endpoint-form.tsx
 msgid "http://127.0.0.1:8000/v1"
 msgstr "http://127.0.0.1:8000/v1"
+
+#: apps/web/src/pages/routine-editor/trigger-cards.tsx
+msgid "HTTPS URL"
+msgstr "HTTPS 網址"
 
 #: apps/mobile/components/add-custom-integration.tsx
 msgid "https://example.com/graphql"
@@ -5653,7 +5798,9 @@ msgstr "此模型尚未設定圖片輸入。"
 msgid "Image upload area"
 msgstr "圖片上傳區域"
 
+#: apps/mobile/app/(settings)/semantic-memory.tsx
 #: apps/web/src/components/AccountDataSettings.tsx
+#: apps/web/src/pages/SemanticFactsSection.tsx
 msgid "Import"
 msgstr "匯入"
 
@@ -5817,7 +5964,9 @@ msgstr "邀請連結"
 msgid "Invite link copied"
 msgstr "已複製邀請連結"
 
+#: apps/mobile/app/(settings)/semantic-memory.tsx
 #: apps/web/src/pages/MemorySettingsOverlay.tsx
+#: apps/web/src/pages/SemanticFactsSection.tsx
 #: apps/web/src/pages/shell/bot-settings-sections.tsx
 msgid "Isolated"
 msgstr "隔離"
@@ -5833,6 +5982,11 @@ msgstr "無法開啟。請從側邊欄重試。"
 #: apps/web/src/components/pages/PageViewHost.tsx
 msgid "It may have been deleted, or it belongs to someone else."
 msgstr "它可能已被刪除，或屬於其他人。"
+
+#: apps/mobile/app/(settings)/semantic-memory.tsx
+#: apps/web/src/pages/SemanticFactsSection.tsx
+msgid "It will no longer be recalled."
+msgstr "之後不會再召回這筆記憶。"
 
 #: apps/mobile/lib/confirm-delete-section.ts
 #: apps/web/src/pages/shell/shell-dialogs.tsx
@@ -5965,10 +6119,6 @@ msgstr "向左"
 msgid "Let bots use this computer"
 msgstr "允許機器人使用這部電腦"
 
-#: apps/web/src/pages/MemorySettingsOverlay.tsx
-msgid "Lets bots save and recall facts by meaning, alongside MEMORY.md."
-msgstr "讓機器人在 MEMORY.md 之外，依語意儲存和回想事實。"
-
 #: apps/mobile/app/(settings)/general.tsx
 #: apps/web/src/pages/AccountSettingsOverlay.tsx
 #: apps/web/src/pages/shell/use-palette-actions.ts
@@ -6038,6 +6188,10 @@ msgstr "載入更早的執行紀錄"
 msgid "Load web images automatically"
 msgstr "自動載入網路圖片"
 
+#: apps/web/src/pages/shell/bot-settings-sections.tsx
+msgid "Loading"
+msgstr "載入中"
+
 #: apps/web/src/pages/ActivityList.tsx
 msgid "Loading activity…"
 msgstr "正在載入動態…"
@@ -6054,6 +6208,10 @@ msgstr "正在載入整合…"
 #: apps/web/src/pages/MemorySettingsOverlay.tsx
 msgid "Loading memory settings…"
 msgstr "正在載入記憶設定…"
+
+#: apps/web/src/pages/SemanticFactsSection.tsx
+msgid "Loading memory…"
+msgstr "正在載入記憶…"
 
 #: apps/web/src/pages/ModelRoleSettings.tsx
 #: apps/web/src/pages/ModelSettingsOverlay.tsx
@@ -6081,6 +6239,7 @@ msgstr "正在載入語音供應商…"
 #: apps/mobile/app/(settings)/memory-note.tsx
 #: apps/mobile/app/(settings)/memory.tsx
 #: apps/mobile/app/(settings)/plugin.tsx
+#: apps/mobile/app/(settings)/semantic-memory.tsx
 #: apps/mobile/app/(settings)/skill.tsx
 #: apps/mobile/app/(settings)/skills.tsx
 #: apps/mobile/app/paywall.tsx
@@ -6110,6 +6269,11 @@ msgstr "本機存取權限允許機器人無需詢問就執行命令。請勿在
 #: apps/web/src/pages/HostComputerPrompt.tsx
 msgid "Local computer access requires the latest desktop app."
 msgstr "存取本機電腦需要最新版桌面應用程式。"
+
+#. js-lingui-explicit-id
+#: apps/web/src/pages/memory-providers/registry.ts
+msgid "Local memory"
+msgstr "本地記憶"
 
 #: apps/web/src/components/AccountMenu.tsx
 #: apps/web/src/components/SidebarFooter.tsx
@@ -6204,6 +6368,11 @@ msgstr "管理其他機器人"
 #: apps/web/src/pages/plugins/domain-search.tsx
 msgid "Manual"
 msgstr "手動"
+
+#: apps/mobile/app/(settings)/semantic-memory.tsx
+#: apps/web/src/pages/SemanticFactsSection.tsx
+msgid "Manual correction"
+msgstr "手動更正"
 
 #: apps/web/src/pages/plugins/domain-search.tsx
 msgid "Manual setup required"
@@ -6325,6 +6494,11 @@ msgstr "記憶"
 msgid "Memory {position}"
 msgstr "記憶 {position}"
 
+#: apps/mobile/app/(settings)/semantic-memory.tsx
+#: apps/web/src/pages/SemanticFactsSection.tsx
+msgid "Memory actions"
+msgstr "記憶操作"
+
 #: apps/web/src/pages/shell/agent-import-plan.tsx
 msgid "Memory for {title}"
 msgstr "{title} 的記憶"
@@ -6350,8 +6524,10 @@ msgstr "提及 OpenClaw 功能"
 msgid "Mentions: {mentions}"
 msgstr "提及：{mentions}"
 
+#: apps/mobile/app/(settings)/semantic-memory.tsx
 #: apps/mobile/lib/search-sheet.ts
 #: apps/mobile/lib/thread-message-text.ts
+#: apps/web/src/pages/SemanticFactsSection.tsx
 #: apps/web/src/pages/shell/chat-shared.ts
 #: apps/web/src/pages/shell/composer.tsx
 #: apps/web/src/pages/SpaceSearch.tsx
@@ -6474,6 +6650,7 @@ msgstr "模式"
 #: apps/web/src/pages/onboarding/model-step.tsx
 #: apps/web/src/pages/routine-editor/model-settings.tsx
 #: apps/web/src/pages/shell/agent-import-plan.tsx
+#: apps/web/src/pages/shell/bot-panel.tsx
 #: apps/web/src/pages/shell/bot-settings-sections.tsx
 msgid "Model"
 msgstr "模型"
@@ -6500,6 +6677,10 @@ msgstr "模型選項"
 #: apps/mobile/components/run-error-sheet.tsx
 msgid "Model provider"
 msgstr "模型供應商"
+
+#: apps/mobile/components/model-providers.tsx
+msgid "Model sources"
+msgstr "模型來源"
 
 #: apps/mobile/app/(settings)/_layout.tsx
 #: apps/mobile/app/(settings)/account.tsx
@@ -6855,6 +7036,7 @@ msgid "Next page"
 msgstr "下一頁"
 
 #: apps/mobile/app/routine.tsx
+#: apps/web/src/pages/RoutineEditor.tsx
 msgid "Next run"
 msgstr "下次執行"
 
@@ -6897,10 +7079,19 @@ msgstr "無驗證"
 msgid "No bots"
 msgstr "沒有機器人"
 
+#: apps/mobile/app/(settings)/semantic-memory.tsx
+#: apps/web/src/pages/SemanticFactsSection.tsx
+msgid "No bots available"
+msgstr "沒有可用的 Bot"
+
 #: apps/web/src/pages/GroupPanel.tsx
 #: apps/web/src/pages/shell/bot-picker.tsx
 msgid "No bots match"
 msgstr "沒有符合的機器人"
+
+#: apps/web/src/pages/SemanticFactsSection.tsx
+msgid "No current records. Show history to include earlier ones."
+msgstr "暫無目前記錄。顯示歷史可查看更早的記錄。"
 
 #: apps/mobile/components/thread/message-bubble.tsx
 #: apps/web/src/components/AskCard.tsx
@@ -6933,6 +7124,11 @@ msgstr "沒有符合的機器人"
 #: apps/web/src/pages/shell/chat-model-picker.tsx
 msgid "No matching models"
 msgstr "沒有符合的模型"
+
+#: apps/mobile/app/(settings)/semantic-memory.tsx
+#: apps/web/src/pages/SemanticFactsSection.tsx
+msgid "No matching records"
+msgstr "沒有符合的記憶"
 
 #: apps/mobile/components/bot-member-picker.tsx
 #: apps/web/src/pages/GroupPanel.tsx
@@ -7122,6 +7318,11 @@ msgstr "未傳送。點一下重試"
 msgid "Not supported in Rakazo"
 msgstr "Rakazo 不支援"
 
+#: apps/mobile/components/model-providers.tsx
+#: apps/web/src/pages/model-settings/providers-section.tsx
+msgid "Not synced"
+msgstr "未同步"
+
 #: apps/web/src/pages/shell/agent-import-plan.tsx
 msgid "Not used by Rakazo"
 msgstr "Rakazo 不使用"
@@ -7133,7 +7334,9 @@ msgid "Not working"
 msgstr "無法正常工作"
 
 #: apps/mobile/app/(settings)/memory.tsx
+#: apps/mobile/app/(settings)/semantic-memory.tsx
 #: apps/web/src/pages/KnowledgeSection.tsx
+#: apps/web/src/pages/SemanticFactsSection.tsx
 msgid "Nothing remembered yet"
 msgstr "尚無記憶"
 
@@ -7151,6 +7354,10 @@ msgstr "通知設定"
 #: apps/web/src/pages/shell/bot-settings-sections.tsx
 msgid "Notifications"
 msgstr "通知"
+
+#: apps/web/src/pages/shell/bot-settings-sections.tsx
+msgid "Notifications are blocked in your browser's site settings."
+msgstr "瀏覽器網站設定封鎖了通知。"
 
 #: apps/mobile/components/inbox-rows.tsx
 msgid "notifications silenced"
@@ -7183,6 +7390,11 @@ msgstr "OAuth 客戶端金鑰（選填）"
 #: apps/web/src/pages/McpOAuthCallback.tsx
 msgid "OAuth connection failed"
 msgstr "OAuth 連線失敗"
+
+#: apps/mobile/app/(settings)/semantic-memory.tsx
+#: apps/web/src/pages/SemanticFactsSection.tsx
+msgid "Observed"
+msgstr "記錄時間"
 
 #: apps/web/src/components/ComputerDeviceSettings.tsx
 msgid "Offline"
@@ -7222,6 +7434,8 @@ msgstr "按鈕上的金額"
 
 #: apps/mobile/lib/cron.ts
 #: apps/web/src/lib/cron.ts
+#: apps/web/src/pages/routine-editor/add-trigger-menu.tsx
+#: apps/web/src/pages/RoutineSchedule.tsx
 msgid "One-time"
 msgstr "一次性"
 
@@ -7275,6 +7489,8 @@ msgid "Open"
 msgstr "開啟"
 
 #. placeholder {0}: headerName(group)
+#. placeholder {0}: page.title
+#: apps/web/src/components/pages/PageTile.tsx
 #: apps/web/src/pages/shell/sidebar-roster.tsx
 msgid "Open {0}"
 msgstr "開啟 {0}"
@@ -7323,6 +7539,10 @@ msgstr "開啟對話"
 msgid "Open external link?"
 msgstr "開啟外部連結？"
 
+#: apps/web/src/components/pages/PagePreviewPane.tsx
+msgid "Open full screen"
+msgstr "全螢幕開啟"
+
 #: apps/mobile/components/inline-image-attachment.tsx
 msgid "Open image {name}"
 msgstr "開啟圖片 {name}"
@@ -7339,6 +7559,10 @@ msgstr "在完整視窗中開啟"
 #: apps/web/src/components/pages/SharePopover.tsx
 msgid "Open link"
 msgstr "開啟連結"
+
+#: apps/web/src/pages/shell/bot-panel.tsx
+msgid "Open live desktop"
+msgstr "開啟即時桌面"
 
 #: apps/web/src/pages/shell/chat-header.tsx
 msgid "Open navigation"
@@ -7442,6 +7666,10 @@ msgstr "OTA {id}，{date}"
 msgid "Other model…"
 msgstr "其他模型…"
 
+#: apps/web/src/components/ToolActivityDisclosure.tsx
+msgid "Outcome unavailable"
+msgstr "結果未知"
+
 #: apps/web/src/pages/AccountSettingsOverlay.tsx
 msgid "Output"
 msgstr "輸出"
@@ -7502,6 +7730,7 @@ msgstr "頁面標題"
 #: apps/mobile/app/_layout.tsx
 #: apps/mobile/app/bot-profile.tsx
 #: apps/mobile/app/group-settings.tsx
+#: apps/web/src/components/pages/PagePreviewPane.tsx
 #: apps/web/src/pages/GroupPanel.tsx
 #: apps/web/src/pages/shell/bot-panel.tsx
 #: apps/web/src/pages/shell/command-palette.tsx
@@ -7606,6 +7835,11 @@ msgstr "貼上你的 API 金鑰"
 #: apps/web/src/lib/model-connection-preflight.ts
 msgid "Paste your API key, then test again."
 msgstr "請貼上你的 API 金鑰，然後重新測試。"
+
+#: apps/mobile/app/(settings)/semantic-memory.tsx
+#: apps/web/src/pages/SemanticFactsSection.tsx
+msgid "Path"
+msgstr "路徑"
 
 #: apps/mobile/components/audio-attachment.tsx
 #: apps/mobile/components/voice-player-bar.tsx
@@ -7749,8 +7983,8 @@ msgid "Plugins"
 msgstr "外掛"
 
 #: apps/web/src/pages/routine-editor/trigger-cards.tsx
-msgid "Post \"No changes\" in chat"
-msgstr "在聊天室中傳送「沒有變更」"
+msgid "Post a chat message when a check finds no changes. The routine won't run."
+msgstr "檢查未發現變化時在聊天中傳送訊息；此時例程不會執行。"
 
 #: apps/mobile/lib/bot-template-copy.ts
 #: apps/web/src/components/bot-templates/bot-template-copy.ts
@@ -7875,6 +8109,7 @@ msgstr "提問、核准和接管"
 msgid "Queued"
 msgstr "排隊中"
 
+#: apps/mobile/app/(settings)/semantic-memory.tsx
 #: apps/mobile/components/thread/message-row.tsx
 #: apps/mobile/components/thread/quote-sheet.tsx
 msgid "Quote"
@@ -7916,6 +8151,11 @@ msgstr "讀取自頁面，未核實"
 msgid "Read replies aloud"
 msgstr "朗讀回覆"
 
+#. js-lingui-explicit-id
+#: apps/web/src/pages/memory-providers/registry.ts
+msgid "read/write"
+msgstr "讀寫"
+
 #: apps/web/src/pages/shell/import-status.ts
 msgid "Ready"
 msgstr "就緒"
@@ -7937,6 +8177,11 @@ msgstr "回想與寫入"
 #: apps/web/src/pages/memory-providers/HonchoSettingsForm.tsx
 msgid "Recall from this peer; save to Rakazo’s own peers."
 msgstr "從此 peer 讀取；儲存至 Rakazo 自己的 peer。"
+
+#. js-lingui-explicit-id
+#: apps/web/src/pages/memory-providers/registry.ts
+msgid "recall only"
+msgstr "僅召回"
 
 #: apps/web/src/pages/memory-providers/SerenitySettingsForm.tsx
 msgid "Recall only"
@@ -7977,6 +8222,11 @@ msgstr "重新連線 OAuth"
 #: apps/web/src/components/ComputerUpdateProgress.tsx
 msgid "Reconnecting"
 msgstr "正在重新連線"
+
+#: apps/mobile/app/(settings)/semantic-memory.tsx
+#: apps/web/src/pages/SemanticFactsSection.tsx
+msgid "Record changed. Reload to discard your edit and use the latest version."
+msgstr "記錄已變更。請重新載入以放棄目前編輯並使用最新版本。"
 
 #: apps/web/src/components/teach/TeachComputerOverlay.tsx
 msgid "Recording may have started, but the view could not refresh"
@@ -8063,6 +8313,12 @@ msgstr "重新導向 URI"
 msgid "Refresh"
 msgstr "重新整理"
 
+#. placeholder {0}: source.label
+#: apps/mobile/components/model-providers.tsx
+#: apps/web/src/pages/model-settings/providers-section.tsx
+msgid "Refresh {0}"
+msgstr "重新整理{0}"
+
 #: apps/web/src/components/ModelCredits.tsx
 msgid "Refresh credits"
 msgstr "重新整理額度"
@@ -8109,8 +8365,10 @@ msgstr "釋放控制"
 msgid "Release control"
 msgstr "交還控制權"
 
+#: apps/mobile/app/(settings)/semantic-memory.tsx
 #: apps/web/src/components/InstructionSettings.tsx
 #: apps/web/src/lib/client-update.ts
+#: apps/web/src/pages/SemanticFactsSection.tsx
 msgid "Reload"
 msgstr "重新載入"
 
@@ -8344,6 +8602,10 @@ msgstr "已取消回覆"
 msgid "Replying to {0}"
 msgstr "正在回覆 {0}"
 
+#: apps/web/src/pages/routine-editor/trigger-cards.tsx
+msgid "Report unchanged checks"
+msgstr "回報未發現變化的檢查"
+
 #: apps/mobile/lib/user-error.ts
 #: apps/web/src/lib/user-error.ts
 msgid "Request a new code"
@@ -8483,6 +8745,7 @@ msgstr "恢復通知"
 #: apps/mobile/app/(settings)/memory.tsx
 #: apps/mobile/app/(settings)/plugin.tsx
 #: apps/mobile/app/(settings)/profile.tsx
+#: apps/mobile/app/(settings)/semantic-memory.tsx
 #: apps/mobile/app/(settings)/skill.tsx
 #: apps/mobile/app/(settings)/skills.tsx
 #: apps/mobile/app/sign-in.tsx
@@ -8503,6 +8766,7 @@ msgstr "恢復通知"
 #: apps/web/src/pages/plugins/plugin-browse.tsx
 #: apps/web/src/pages/PluginsOverlay.tsx
 #: apps/web/src/pages/PluginSubmissionsPanel.tsx
+#: apps/web/src/pages/SemanticFactsSection.tsx
 #: apps/web/src/pages/SpaceSettingOverrides.tsx
 msgid "Retry"
 msgstr "重試"
@@ -8516,6 +8780,11 @@ msgstr "立即重試"
 #: apps/web/src/pages/shell/use-computer.tsx
 msgid "Retry screen"
 msgstr "重新連線螢幕"
+
+#: apps/mobile/components/model-providers.tsx
+#: apps/web/src/pages/model-settings/providers-section.tsx
+msgid "Retry sync"
+msgstr "重試同步"
 
 #. placeholder {0}: call.botName
 #: apps/web/src/components/call/CallCard.tsx
@@ -8598,6 +8867,11 @@ msgstr "列"
 msgid "Rules"
 msgstr "規則"
 
+#: apps/mobile/app/(settings)/semantic-memory.tsx
+#: apps/web/src/pages/SemanticFactsSection.tsx
+msgid "Run"
+msgstr "執行記錄"
+
 #: apps/web/src/pages/RoutineEditor.tsx
 msgid "Run at"
 msgstr "執行時間"
@@ -8626,6 +8900,7 @@ msgstr "執行中"
 #: apps/mobile/components/thread/special-message-card.tsx
 #: apps/mobile/lib/activity.ts
 #: apps/web/src/components/SubagentCard.tsx
+#: apps/web/src/components/ToolActivityDisclosure.tsx
 #: apps/web/src/pages/ActivityList.tsx
 #: apps/web/src/pages/RoutineList.tsx
 msgid "Running"
@@ -8715,6 +8990,11 @@ msgstr "週六"
 msgid "Save"
 msgstr "儲存"
 
+#: apps/mobile/app/(settings)/semantic-memory.tsx
+#: apps/web/src/pages/SemanticFactsSection.tsx
+msgid "Save correction"
+msgstr "儲存更正"
+
 #: apps/mobile/app/(settings)/memory-note.tsx
 msgid "Save mine"
 msgstr "儲存我的版本"
@@ -8741,9 +9021,25 @@ msgstr "儲存到保管庫"
 msgid "Saved"
 msgstr "已儲存"
 
+#. placeholder {0}: thinkingLevelLabel(choice.thinkingLevel!)
+#. placeholder {1}: thinkingLevelLabel(effectiveThinking)
+#: apps/web/src/pages/ModelRoleSettings.tsx
+msgid "Saved {0}; using {1}."
+msgstr "已儲存 {0}；目前使用 {1}。"
+
 #: apps/mobile/lib/artifact-open.ts
 msgid "Saved {name} locally"
 msgstr "已將 {name} 儲存在本機"
+
+#: apps/web/src/pages/shell/bot-settings-sections.tsx
+msgid "Saved {requestedLabel}; using {effectiveLabel}."
+msgstr "已儲存 {requestedLabel}；目前使用 {effectiveLabel}。"
+
+#: apps/mobile/app/(settings)/_layout.tsx
+#: apps/mobile/app/(settings)/memory.tsx
+#: apps/web/src/pages/SemanticFactsSection.tsx
+msgid "Saved facts"
+msgstr "已儲存的記憶"
 
 #: apps/web/src/pages/ScratchpadSection.tsx
 msgid "Saved, but list refresh failed"
@@ -8798,6 +9094,11 @@ msgstr "排程例行任務"
 msgid "Scheduled tasks"
 msgstr "排程任務"
 
+#: apps/mobile/app/(settings)/semantic-memory.tsx
+#: apps/web/src/pages/SemanticFactsSection.tsx
+msgid "Scope"
+msgstr "範圍"
+
 #: apps/web/src/pages/McpServerForm.tsx
 msgid "Scopes (optional)"
 msgstr "範圍（選填）"
@@ -8819,6 +9120,7 @@ msgstr "螢幕未連線"
 #: apps/web/src/pages/model-settings/providers-section.tsx
 #: apps/web/src/pages/model-settings/role-model-picker.tsx
 #: apps/web/src/pages/plugins/domain-search.tsx
+#: apps/web/src/pages/SemanticFactsSection.tsx
 #: apps/web/src/pages/shell/bot-picker.tsx
 #: apps/web/src/pages/shell/chat-model-picker.tsx
 #: apps/web/src/pages/shell/command-palette.tsx
@@ -8940,6 +9242,11 @@ msgstr "選擇文字"
 msgid "Self-hosted"
 msgstr "自行託管"
 
+#. js-lingui-explicit-id
+#: apps/web/src/pages/memory-providers/registry.ts
+msgid "Self-hosted ({baseUrl})"
+msgstr "自行託管（{baseUrl}）"
+
 #: apps/mobile/components/thread-composer.tsx
 #: apps/web/src/pages/shell/composer-parts.tsx
 msgid "Send"
@@ -8962,7 +9269,6 @@ msgid "Send <0>{linkCode}</0> to <1>{linkAddress}</1> from {linkApp} within 10 m
 msgstr "請在 10 分鐘內從 {linkApp} 將 <0>{linkCode}</0> 傳送到 <1>{linkAddress}</1>。"
 
 #: apps/mobile/components/thread/ask-block.tsx
-#: apps/web/src/components/AskCard.tsx
 msgid "Send answer"
 msgstr "傳送回答"
 
@@ -8975,10 +9281,6 @@ msgstr "以檔案傳送"
 #: apps/web/src/components/AccountAccess.tsx
 msgid "Send deletion code"
 msgstr "傳送刪除驗證碼"
-
-#: apps/web/src/components/AskCard.tsx
-msgid "Send it"
-msgstr "傳送"
 
 #: apps/web/src/components/composer/HoldToTalk.tsx
 msgid "Send recording"
@@ -9138,9 +9440,11 @@ msgstr "分享到"
 msgid "Share, anyone with the link can view"
 msgstr "共用，任何擁有連結的人都能檢視"
 
+#: apps/mobile/app/(settings)/semantic-memory.tsx
 #: apps/mobile/app/pages.tsx
-#: apps/web/src/components/pages/PagesList.tsx
+#: apps/web/src/components/pages/PageTile.tsx
 #: apps/web/src/pages/MemorySettingsOverlay.tsx
+#: apps/web/src/pages/SemanticFactsSection.tsx
 #: apps/web/src/pages/shell/bot-settings-sections.tsx
 msgid "Shared"
 msgstr "共享"
@@ -9173,6 +9477,11 @@ msgstr "顯示機器人"
 msgid "Show chats"
 msgstr "顯示聊天"
 
+#: apps/mobile/app/(settings)/semantic-memory.tsx
+#: apps/web/src/pages/SemanticFactsSection.tsx
+msgid "Show history"
+msgstr "顯示歷史"
+
 #: apps/web/src/pages/routine-editor/trigger-cards.tsx
 msgid "Show key"
 msgstr "顯示金鑰"
@@ -9186,6 +9495,7 @@ msgid "Show list"
 msgstr "顯示清單"
 
 #: apps/mobile/app/(settings)/integrations.tsx
+#: apps/mobile/app/(settings)/semantic-memory.tsx
 #: apps/mobile/app/pages.tsx
 #: apps/mobile/components/bot-context-cards.tsx
 #: apps/mobile/components/integration-plugins.tsx
@@ -9193,6 +9503,7 @@ msgstr "顯示清單"
 #: apps/web/src/pages/KnowledgeSection.tsx
 #: apps/web/src/pages/plugins/plugin-browse.tsx
 #: apps/web/src/pages/ScratchpadSection.tsx
+#: apps/web/src/pages/SemanticFactsSection.tsx
 msgid "Show more"
 msgstr "顯示更多"
 
@@ -9404,6 +9715,10 @@ msgstr "未啟用 Slack"
 msgid "Slide up to lock"
 msgstr "向上滑動以鎖定"
 
+#: apps/web/src/pages/shell/bot-settings-sections.tsx
+msgid "Smarter"
+msgstr "更深入"
+
 #: apps/mobile/components/bot-organize-modal.tsx
 #: apps/mobile/components/inbox-swipe-row.ios.tsx
 #: apps/web/src/pages/BotContextMenu.tsx
@@ -9414,6 +9729,12 @@ msgstr "延後"
 #: apps/web/src/pages/shell/snoozed-chats.tsx
 msgid "Snoozed"
 msgstr "已延後"
+
+#: apps/mobile/app/(settings)/model-connection.tsx
+#: apps/mobile/components/model-providers.tsx
+#: apps/web/src/pages/model-settings/providers-section.tsx
+msgid "Some models unavailable"
+msgstr "部分模型無法使用"
 
 #: apps/mobile/app/(settings)/skills.tsx
 #: apps/mobile/components/integration-plugins.tsx
@@ -9477,6 +9798,16 @@ msgstr "已依 {column} 遞減排序"
 #: apps/web/src/components/bot-templates/bot-template-copy.ts
 msgid "Sorts new email and drafts the replies"
 msgstr "分類新郵件並草擬回覆"
+
+#: apps/mobile/app/(settings)/semantic-memory.tsx
+#: apps/web/src/pages/SemanticFactsSection.tsx
+msgid "Source"
+msgstr "來源"
+
+#: apps/mobile/app/(settings)/semantic-memory.tsx
+#: apps/web/src/pages/SemanticFactsSection.tsx
+msgid "Source ID"
+msgstr "來源編號"
 
 #: apps/mobile/app/(settings)/_layout.tsx
 #: apps/mobile/lib/identity-display.ts
@@ -9614,9 +9945,11 @@ msgstr "正在開始…"
 msgid "State or region"
 msgstr "州或地區"
 
+#: apps/mobile/app/(settings)/semantic-memory.tsx
 #: apps/mobile/components/run-error-sheet.tsx
 #: apps/web/src/pages/ActivityList.tsx
 #: apps/web/src/pages/Board.tsx
+#: apps/web/src/pages/SemanticFactsSection.tsx
 msgid "Status"
 msgstr "狀態"
 
@@ -9653,6 +9986,7 @@ msgstr "停止示範"
 
 #: apps/mobile/components/thread/special-message-card.tsx
 #: apps/web/src/components/SubagentCard.tsx
+#: apps/web/src/components/ToolActivityDisclosure.tsx
 msgid "Stopped"
 msgstr "已停止"
 
@@ -9717,10 +10051,19 @@ msgstr "使用自己的 AI 訂閱"
 msgid "Subscription required"
 msgstr "需要訂閱"
 
+#: apps/web/src/components/ToolActivityDisclosure.tsx
+msgid "Succeeded"
+msgstr "成功"
+
 #: apps/mobile/lib/cron.ts
 #: apps/web/src/lib/cron.ts
 msgid "Sunday"
 msgstr "週日"
+
+#. js-lingui-explicit-id
+#: apps/web/src/pages/memory-providers/registry.ts
+msgid "Supermemory Cloud"
+msgstr "Supermemory 雲端"
 
 #: apps/mobile/components/compatible-endpoint-form.tsx
 #: apps/web/src/pages/model-settings/compatible-model-fields.tsx
@@ -9778,6 +10121,15 @@ msgstr "切換伺服器將刪除未傳送的訊息。"
 #: apps/web/src/pages/model-settings/space-bots-model.tsx
 msgid "Switching…"
 msgstr "正在切換…"
+
+#: apps/mobile/components/model-providers.tsx
+msgid "Synced {syncedAt}"
+msgstr "已同步 {syncedAt}"
+
+#. placeholder {0}: new Date(source.lastSyncedAt).toLocaleString()
+#: apps/web/src/pages/model-settings/providers-section.tsx
+msgid "Synced <0>{0}</0>"
+msgstr "已同步 <0>{0}</0>"
 
 #: apps/mobile/app/(settings)/general.tsx
 #: apps/web/src/pages/AccountSettingsOverlay.tsx
@@ -10048,11 +10400,10 @@ msgstr "對方可免費使用 {weeks} 週。"
 #: apps/web/src/components/call/CallCard.tsx
 #: apps/web/src/pages/ModelRoleSettings.tsx
 #: apps/web/src/pages/routine-editor/model-settings.tsx
-#: apps/web/src/pages/shell/bot-settings-sections.tsx
 msgid "Thinking"
 msgstr "思考"
 
-#. placeholder {0}: thinkingLevelLabel(choice.thinkingLevel)
+#. placeholder {0}: thinkingLevelLabel(effectiveThinking)
 #: apps/web/src/pages/ModelRoleSettings.tsx
 msgid "Thinking: {0}"
 msgstr "思考：{0}"
@@ -10210,7 +10561,8 @@ msgid "This page couldn't be shown."
 msgstr "無法顯示此頁面。"
 
 #: apps/mobile/components/pages/page-card.tsx
-#: apps/web/src/components/pages/PageCard.tsx
+#: apps/web/src/components/pages/PagePreview.tsx
+#: apps/web/src/components/pages/PagePreviewPane.tsx
 #: apps/web/src/components/pages/PageView.tsx
 #: apps/web/src/components/pages/PageViewHost.tsx
 msgid "This page couldn't load"
@@ -10243,6 +10595,11 @@ msgstr "將永久刪除全部訊息並停止目前工作。聊天仍可使用。
 #: apps/web/src/lib/model-connection-preflight.ts
 msgid "This provider cannot be tested without saving."
 msgstr "此供應商必須先儲存才能測試。"
+
+#: apps/mobile/app/(settings)/semantic-memory.tsx
+#: apps/web/src/pages/SemanticFactsSection.tsx
+msgid "This provider does not support managing saved facts."
+msgstr "此提供者不支援管理已儲存的記憶。"
 
 #: apps/web/src/lib/model-connection-preflight.ts
 msgid "This provider is not connected yet."
@@ -10302,8 +10659,10 @@ msgid "This week"
 msgstr "本週"
 
 #: apps/mobile/app/_layout.tsx
+#: apps/mobile/app/(settings)/semantic-memory.tsx
 #: apps/mobile/components/chat-header-title.tsx
 #: apps/mobile/components/thread/thread-header.tsx
+#: apps/web/src/pages/SemanticFactsSection.tsx
 msgid "Thread"
 msgstr "對話"
 
@@ -10360,6 +10719,10 @@ msgstr "今天"
 msgid "Toggle sidebar"
 msgstr "顯示或隱藏側邊欄"
 
+#: apps/web/src/pages/memory-providers/LocalMemorySettingsForm.tsx
+msgid "Token"
+msgstr "權杖"
+
 #: apps/web/src/pages/AccountSettingsOverlay.tsx
 msgid "Tokens"
 msgstr "Token"
@@ -10368,6 +10731,10 @@ msgstr "Token"
 #: apps/web/src/pages/BotContextMenu.tsx
 msgid "Tomorrow"
 msgstr "明天"
+
+#: apps/web/src/pages/SemanticFactsSection.tsx
+msgid "Too long to save: a memory record holds at most 40 KB of text."
+msgstr "內容過長，無法儲存：單筆記憶最多 40 KB 文字。"
 
 #: apps/mobile/lib/user-error.ts
 msgid "Too many attempts. Try again in a few minutes."
@@ -10543,7 +10910,6 @@ msgid "Type without recording"
 msgstr "輸入文字但不記錄內容"
 
 #: apps/mobile/components/thread/ask-block.tsx
-#: apps/web/src/components/AskCard.tsx
 msgid "Type your answer"
 msgstr "輸入你的回答"
 
@@ -10554,6 +10920,15 @@ msgstr "輸入你的回答"
 #: apps/web/src/pages/Shell.tsx
 msgid "Unassigned"
 msgstr "未分配"
+
+#: apps/mobile/app/(settings)/model-connection.tsx
+#: apps/mobile/components/compatible-endpoint-form.tsx
+#: apps/mobile/components/model-providers.tsx
+#: apps/mobile/components/model-role-settings.tsx
+#: apps/web/src/pages/model-settings/providers-section.tsx
+#: apps/web/src/pages/ModelRoleSettings.tsx
+msgid "Unavailable"
+msgstr "無法使用"
 
 #: apps/mobile/components/change-undo.tsx
 #: apps/web/src/components/AskCard.tsx
@@ -10668,6 +11043,11 @@ msgstr "需要更新"
 #: apps/mobile/lib/api.ts
 msgid "Update your server to use AI data sharing in this mobile version."
 msgstr "請更新伺服器，以在此手機版本中使用 AI 資料分享功能。"
+
+#: apps/mobile/app/(settings)/semantic-memory.tsx
+#: apps/web/src/pages/SemanticFactsSection.tsx
+msgid "Updated"
+msgstr "更新時間"
 
 #: apps/mobile/components/pages/page-card.tsx
 msgid "Updated below"
@@ -10826,6 +11206,11 @@ msgstr "最多可使用 512 個英文字母、數字、_ 或 -。"
 msgid "Use your own key"
 msgstr "使用自己的金鑰"
 
+#: apps/mobile/app/(settings)/semantic-memory.tsx
+#: apps/web/src/pages/SemanticFactsSection.tsx
+msgid "User"
+msgstr "使用者"
+
 #: apps/web/src/pages/memory-providers/HonchoSettingsForm.tsx
 msgid "User peer"
 msgstr "使用者對端"
@@ -10864,6 +11249,16 @@ msgstr "使用你的 API 金鑰"
 #: apps/web/src/components/ModelCredits.tsx
 msgid "Using your API key. Free plan ends {freeUntil}."
 msgstr "正在使用你的 API 金鑰。免費方案將於 {freeUntil} 結束。"
+
+#: apps/mobile/app/(settings)/semantic-memory.tsx
+#: apps/web/src/pages/SemanticFactsSection.tsx
+msgid "Valid from"
+msgstr "生效時間"
+
+#: apps/mobile/app/(settings)/semantic-memory.tsx
+#: apps/web/src/pages/SemanticFactsSection.tsx
+msgid "Valid to"
+msgstr "失效時間"
 
 #: apps/mobile/components/login-fields-editor.tsx
 #: apps/mobile/components/vault-item-editor.tsx
@@ -10908,7 +11303,9 @@ msgstr "驗證並新增"
 msgid "Verifying…"
 msgstr "正在驗證…"
 
+#: apps/mobile/app/(settings)/semantic-memory.tsx
 #: apps/web/src/pages/Artifacts.tsx
+#: apps/web/src/pages/SemanticFactsSection.tsx
 msgid "Version"
 msgstr "版本"
 
@@ -10953,6 +11350,11 @@ msgstr "語音請求逾時。"
 #: apps/web/src/lib/model-connection-preflight.ts
 msgid "Wait a moment and test again."
 msgstr "請稍候並重新測試。"
+
+#: apps/mobile/components/thread/special-message-card.tsx
+#: apps/web/src/components/SubagentCard.tsx
+msgid "Waiting"
+msgstr "等待中"
 
 #: apps/mobile/app/(settings)/model-connection.tsx
 msgid "Waiting for sign-in — the code expires in about {minutes} minutes."
@@ -11300,7 +11702,6 @@ msgid "Your card is charged the prorated difference today."
 msgstr "今天將從你的卡片扣除按比例計算的差額。"
 
 #: apps/mobile/app/computer.tsx
-#: apps/web/src/pages/Shell.tsx
 msgid "Your computer's disk is nearly full. Free up space by removing build output and caches you no longer need."
 msgstr "電腦的磁碟快滿了。請刪除不再需要的建置輸出和快取，以釋放空間。"
 

@@ -53,7 +53,7 @@ export async function threadSnapshot(
                 orderBy: [{ createdAt: "desc" }, { id: "desc" }],
                 include: { routine: { select: { name: true } } },
               }),
-              waitingHelperRuns(tx, target.threadId),
+              waitingHelperRuns(tx, target.threadId, viewerId),
               tx.run.findFirst({
                 where: {
                   botId: target.botId,
@@ -158,7 +158,7 @@ export async function threadSnapshot(
           orderBy: { createdAt: "desc" },
           include: { routine: { select: { name: true } } },
         }),
-        waitingHelperRuns(tx, target.threadId),
+        waitingHelperRuns(tx, target.threadId, viewerId),
         // Recently updated terminals (completion bumps updatedAt). pickLatestTerminalRun then
         // ranks by completedAt ?? createdAt so null timestamps cannot revive a stale failure.
         tx.run.findMany({
@@ -230,12 +230,14 @@ export async function threadSnapshot(
  * Background helpers waiting on their owner in this chat. They work on their own threads, so the
  * thread's own runs never include them; the approval card they left here is the link back.
  */
-function waitingHelperRuns(tx: Prisma.TransactionClient, threadId: string) {
+function waitingHelperRuns(tx: Prisma.TransactionClient, threadId: string, viewerId?: string) {
   return tx.run.findMany({
     where: {
       trigger: BACKGROUND_HELPER_TRIGGER,
       status: "waiting_input",
       sourceMessage: { threadId },
+      // The card is the requester's to answer; other members of a shared Space see none.
+      ...(viewerId ? { userId: viewerId } : {}),
     },
     orderBy: [{ createdAt: "desc" as const }, { id: "desc" as const }],
     include: { routine: { select: { name: true } } },

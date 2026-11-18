@@ -31,7 +31,21 @@ describe("task catalog", () => {
       },
       taughtSkill: {
         findMany: vi.fn(async (_args: Record<string, unknown>) => [
-          { id: "taught-1", name: "Export report", goal: "Export the report", status: "saved" },
+          {
+            id: "taught-1",
+            name: "Export report",
+            goal: "Export the report",
+            status: "saved",
+            playbook: {
+              whenToUse: "When the user asks for the export.",
+              inputs: [],
+              steps: ["Open the export page."],
+              howToCheck: "The file exists.",
+              whatToReturn: "The file path.",
+              approvalBoundaries: "Do not email it.",
+              failureHandling: "Report the error.",
+            },
+          },
         ]),
       },
       agentSkill: {
@@ -68,13 +82,17 @@ describe("task catalog", () => {
       expect.objectContaining({ routineId: "routine-1", name: "Morning report", active: true }),
     ]);
     expect(result.taughtSkills).toEqual([
-      {
+      expect.objectContaining({
         id: "taught-1",
         name: "Export report",
         goal: "Export the report",
         status: "saved",
         source: "taught_skill",
-      },
+        playbook: expect.objectContaining({
+          whenToUse: "When the user asks for the export.",
+          steps: ["Open the export page."],
+        }),
+      }),
     ]);
     expect(prisma.taughtSkill.findMany).toHaveBeenCalledWith(
       expect.objectContaining({

@@ -1,5 +1,6 @@
 // @vitest-environment jsdom
 
+import { i18n } from "@lingui/core";
 import type { ComponentProps, ReactNode } from "react";
 import { act } from "react";
 import type { Root } from "react-dom/client";
@@ -25,6 +26,9 @@ let container: HTMLDivElement;
 let root: Root;
 const onConnect = vi.fn();
 beforeEach(() => {
+  // The registry reads its labels through the shared catalog, so a locale must be active.
+  i18n.load("en", {});
+  i18n.activate("en");
   vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
   onConnect.mockReset().mockResolvedValue(true);
   container = document.createElement("div");

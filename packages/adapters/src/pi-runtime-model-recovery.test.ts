@@ -33,15 +33,28 @@ vi.mock("./pi-openai-compatible-provider.js", () => ({
 import { PiAgentRuntime } from "./pi-runtime.js";
 import { continuationOverlap, continuationRepeat } from "./pi-runtime-fallback.js";
 
-// A plain model with a card ceiling above the 4k completion default, and a reasoning model
-// already at its 32k default with the input reserve as the limit.
-const plain = model("provider-a", "plain", { reasoning: false, maxTokens: 65_536 });
+// A plain model whose card ceiling is twice the quarter window its completion budget reserves,
+// and a reasoning model on the same window: one retry may double their budget within the ceiling.
+const plain = model("provider-a", "plain", {
+  reasoning: false,
+  maxTokens: 65_536,
+  contextWindow: 131_072,
+});
 const reasoner = model("provider-a", "reasoner", {
   reasoning: true,
   maxTokens: 65_536,
   contextWindow: 131_072,
 });
-const backup = model("provider-b", "backup", { reasoning: false, maxTokens: 65_536 });
+const cappedReasoner = model("provider-a", "capped-reasoner", {
+  reasoning: true,
+  maxTokens: 32_768,
+  contextWindow: 131_072,
+});
+const backup = model("provider-b", "backup", {
+  reasoning: false,
+  maxTokens: 65_536,
+  contextWindow: 131_072,
+});
 
 function model(
   provider: string,
@@ -197,7 +210,7 @@ const texts = (events: AgentRuntimeEvent[]) =>
 
 beforeEach(() => {
   providerState.models.clear();
-  for (const candidate of [plain, reasoner, backup]) {
+  for (const candidate of [plain, reasoner, cappedReasoner, backup]) {
     providerState.models.set(
       `${candidate.provider}/${candidate.id}`,
       candidate as unknown as Record<string, unknown>,
@@ -277,10 +290,30 @@ describe("a call that spends its whole output budget on thinking", () => {
       .mockImplementationOnce(() => thinkingOnly(plain, "length"))
       .mockImplementation(() => reply(plain));
     const events = await run(request(plain));
-    expect(sentOptions().map((options) => options.maxTokens)).toEqual([4_096, 8_192]);
+    expect(sentOptions().map((options) => options.maxTokens)).toEqual([32_768, 65_536]);
     const [first, second] = sentContexts();
     expect(second).toBe(first);
     expect(providerState.delay).not.toHaveBeenCalled();
+    expect(events.at(-1)).toEqual({ type: "done", text: "Recovered." });
+  });
+
+  it("doubles a budget that came from the window's input reserve", async () => {
+    // An openai-compatible model has no card ceiling: its budget is the quarter window, which
+    // the retry may exceed up to half the window.
+    const compatible = model("openai-compatible", "compatible-model", {
+      reasoning: false,
+      maxTokens: 2_147_483_647,
+      contextWindow: 262_144,
+    });
+    providerState.models.set(
+      "openai-compatible/compatible-model",
+      compatible as unknown as Record<string, unknown>,
+    );
+    providerState.stream
+      .mockImplementationOnce(() => thinkingOnly(compatible, "length"))
+      .mockImplementation(() => reply(compatible));
+    const events = await run(request(compatible));
+    expect(sentOptions().map((options) => options.maxTokens)).toEqual([65_536, 131_072]);
     expect(events.at(-1)).toEqual({ type: "done", text: "Recovered." });
   });
 
@@ -292,11 +325,11 @@ describe("a call that spends its whole output budget on thinking", () => {
     expect(providerState.stream).toHaveBeenCalledTimes(2);
   });
 
-  it("thinks one level less when the budget is already at the input reserve", async () => {
+  it("thinks one level less when the model's ceiling is the budget", async () => {
     providerState.stream
-      .mockImplementationOnce(() => thinkingOnly(reasoner, "length"))
-      .mockImplementation(() => reply(reasoner));
-    await run(request(reasoner, { thinkingLevel: "high" }));
+      .mockImplementationOnce(() => thinkingOnly(cappedReasoner, "length"))
+      .mockImplementation(() => reply(cappedReasoner));
+    await run(request(cappedReasoner, { thinkingLevel: "high" }));
     expect(sentOptions().map(({ maxTokens, reasoning }) => [maxTokens, reasoning])).toEqual([
       [32_768, "high"],
       [32_768, "medium"],
@@ -338,15 +371,19 @@ describe("a call that spends its whole output budget on thinking", () => {
         (options as StreamOptions).maxTokens,
       ]),
     ).toEqual([
-      [plain.id, 4_096],
-      [plain.id, 8_192],
-      [backup.id, 4_096],
+      [plain.id, 32_768],
+      [plain.id, 65_536],
+      [backup.id, 32_768],
     ]);
     expect(texts(events)).toContain("From the backup.");
   });
 
   it("takes a smaller output reservation the provider can afford after the raise", async () => {
-    const router = model("openrouter", "router", { reasoning: false, maxTokens: 65_536 });
+    const router = model("openrouter", "router", {
+      reasoning: false,
+      maxTokens: 65_536,
+      contextWindow: 131_072,
+    });
     providerState.models.set("openrouter/router", router as unknown as Record<string, unknown>);
     const credits =
       '402: {"message":"This request requires more credits, or fewer max_tokens. You requested up to 8192 tokens, but can only afford 6000.","metadata":{"limit_source":"openrouter_credits"}}';
@@ -355,7 +392,7 @@ describe("a call that spends its whole output budget on thinking", () => {
       .mockImplementationOnce(() => thinkingOnly(router, "error", credits))
       .mockImplementation(() => reply(router));
     const events = await run(request(router));
-    expect(sentOptions().map((options) => options.maxTokens)).toEqual([4_096, 8_192, 6_000]);
+    expect(sentOptions().map((options) => options.maxTokens)).toEqual([32_768, 65_536, 6_000]);
     expect(events.at(-1)).toEqual({ type: "done", text: "Recovered." });
   });
 
@@ -547,7 +584,7 @@ describe("a tool call cut at the output limit", () => {
       .mockImplementation(() => reply(plain, "Done."));
     const input = request(plain);
     const events = await run(input);
-    expect(sentOptions().map((options) => options.maxTokens)).toEqual([4_096, 8_192, 4_096]);
+    expect(sentOptions().map((options) => options.maxTokens)).toEqual([32_768, 65_536, 32_768]);
     expect(input.executeTool).toHaveBeenCalledOnce();
     expect(vi.mocked(input.executeTool)?.mock.calls[0]?.slice(0, 2)).toEqual([
       "write_effect",
@@ -615,7 +652,7 @@ describe("a reply cut off at the output limit", () => {
       .mockImplementationOnce(() => replyAtLimit(plain, "Your login just"))
       .mockImplementation(() => streamedReply(plain, " expired. Sign in again."));
     const events = await run(request(plain));
-    expect(sentOptions().map((options) => options.maxTokens)).toEqual([4_096, 8_192]);
+    expect(sentOptions().map((options) => options.maxTokens)).toEqual([32_768, 65_536]);
     expect(texts(events).join("")).toBe("Your login just expired. Sign in again.");
     expect(events.some((event) => event.type === "turn")).toBe(false);
     expect(events.at(-1)).toEqual({
@@ -731,25 +768,25 @@ describe("a reply cut off at the output limit", () => {
     expect(events.at(-1)).toEqual({ type: "done", text: "Your login just expired." });
   });
 
-  it("thinks less for the continuation when the budget is already at its ceiling", async () => {
+  it("continues a cut reply with more room instead of thinking less", async () => {
     providerState.stream
       .mockImplementationOnce(() => replyAtLimit(reasoner, "Step one, then"))
       .mockImplementation(() => streamedReply(reasoner, " step two."));
     const events = await run(request(reasoner, { thinkingLevel: "high" }));
     expect(sentOptions().map(({ maxTokens, reasoning }) => [maxTokens, reasoning])).toEqual([
       [32_768, "high"],
-      [32_768, "medium"],
+      [65_536, "high"],
     ]);
     expect(events.at(-1)).toEqual({ type: "done", text: "Step one, then step two." });
   });
 
-  it("continues again while the run has recoveries, with more room each time", async () => {
+  it("continues again while the run has recoveries, with the room each call has", async () => {
     providerState.stream
       .mockImplementationOnce(() => replyAtLimit(plain, "Part one. "))
       .mockImplementationOnce(() => replyAtLimit(plain, "Part two. "))
       .mockImplementation(() => streamedReply(plain, "Part three."));
     const events = await run(request(plain));
-    expect(sentOptions().map((options) => options.maxTokens)).toEqual([4_096, 8_192, 16_384]);
+    expect(sentOptions().map((options) => options.maxTokens)).toEqual([32_768, 65_536, 32_768]);
     expect(events.at(-1)).toEqual({ type: "done", text: "Part one. Part two. Part three." });
   });
 
@@ -862,7 +899,7 @@ describe("a reply cut off at the output limit", () => {
       .mockImplementation(() => reply(plain, "Saved."));
     const input = request(plain);
     const events = await run(input);
-    expect(sentOptions().map((options) => options.maxTokens)).toEqual([4_096, 8_192]);
+    expect(sentOptions().map((options) => options.maxTokens)).toEqual([32_768, 65_536]);
     expect(input.executeTool).not.toHaveBeenCalled();
     expect(sentContexts()[1]).not.toContain("hit the output limit");
     expect(events.at(-1)).toMatchObject({ type: "done" });

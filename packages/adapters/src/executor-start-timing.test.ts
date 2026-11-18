@@ -124,9 +124,16 @@ describe("execution start timing", () => {
     const { prisma, enqueue, start } = fixture({ heldBy: "lease-of-run-0" });
     await start();
     expect(enqueue).not.toHaveBeenCalled();
+    // Queued again due now with no lease: the run releasing the computer wakes it, so there is
+    // no retry timer to enqueue.
     expect(prisma.run.updateMany).toHaveBeenCalledWith(
       expect.objectContaining({
-        data: expect.objectContaining({ status: "queued", wakeAt: null }),
+        data: expect.objectContaining({
+          status: "queued",
+          wakeAt: expect.any(Date),
+          leaseOwner: null,
+          leaseExpiresAt: null,
+        }),
       }),
     );
   });

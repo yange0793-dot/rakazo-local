@@ -69,6 +69,23 @@ describe("built-in tool bridge", () => {
     for (const name of CORE_BUILTIN_TOOL_NAMES) expect(BUILTIN_AGENT_TOOL_NAMES).toContain(name);
   });
 
+  it("lets save_memory name a citation's namespace when correcting", () => {
+    const withMemory = selectBuiltinToolsForRun({
+      graphicalToolsAllowed: false,
+      groupId: null,
+      trigger: "user",
+      semanticMemoryEnabled: true,
+      semanticMemoryForgets: true,
+      historyRetrievalEnabled: true,
+      messagingChannelRun: false,
+    });
+    const save = withMemory.find((tool) => tool.name === "save_memory");
+    expect(save?.inputSchema).toMatchObject({
+      properties: { entity: { type: "string", minLength: 1 } },
+      additionalProperties: false,
+    });
+  });
+
   it("lists every tool when none is deferred", () => {
     const core = ownerChat.filter((tool) => CORE_BUILTIN_TOOL_NAMES.has(tool.name));
     expect(partitionTools(core)).toEqual({ listed: core, deferred: [] });

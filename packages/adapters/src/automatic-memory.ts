@@ -10,8 +10,9 @@ import type {
 } from "@rakazo/adapter-kit";
 import { automaticMemoryJob, semanticMemorySyncJob } from "@rakazo/adapter-kit";
 import type { MemoryArchiveBatch, PrismaClient } from "@rakazo/db";
-import { MemoryArchiveStore } from "@rakazo/db";
+import { FORCE_BATCH_MESSAGES, MemoryArchiveStore } from "@rakazo/db";
 import { getLogger } from "@rakazo/logging";
+import { MAX_EXTRACTION_REQUEST_BYTES } from "./langmem-memory-extractor.js";
 import { readAgentMemory } from "./memory-context.js";
 import type { MemoryProviderResolver } from "./memory-provider-factory.js";
 
@@ -20,9 +21,15 @@ const DEFAULT_MAX_BATCHES = 4;
 /** A clear drain still needs a finite ceiling; reaching it fails instead of deferring. */
 const FORCE_MAX_BATCHES = 64;
 const RECALL_LIMIT = 20;
+/** The local index rejects a longer query, so recall reads the tail of the newest message. */
+const MAX_RECALL_QUERY_BYTES = 8 * 1024;
 const REDACTED = "[redacted]";
-/** An explicit ceiling for one extractor frame. Overflow fails; sources are never truncated. */
-const MAX_EXTRACTION_REQUEST_BYTES = 4 * 1024 * 1024;
+/** Shorter values cannot be redacted without shredding ordinary words; the password rule agrees. */
+const MIN_SECRET_REDACTION_LENGTH = 6;
+/** A turn this short holds no durable fact, so it must not cost a model call. */
+const MIN_EXTRACTION_SOURCE_CHARS = 4;
+/** A worker killed mid-extraction leaves its job locked for Graphile's hours; retry after this. */
+const LOCKED_EXTRACTION_ABANDONED_MS = 10 * 60_000;
 
 export interface AutomaticMemoryDeps {
   prisma: PrismaClient;
@@ -52,7 +59,9 @@ export interface AutomaticMemoryOptions {
 /**
  * Archive new direct user text from one personal conversation. Ordinary chat never calls this on
  * its hot path: a durable pointer job invokes it, and a batch with no new source only advances the
- * checkpoint. Failures propagate so the job retries instead of appearing complete.
+ * checkpoint. A failure still propagates, but the pointer stops retrying so a range that cannot
+ * be extracted costs one call per turn instead of one per reconciler tick; a forced clear steps
+ * over such a range instead of blocking the clear for good.
  */
 export async function archiveConversationMemory(
   deps: AutomaticMemoryDeps,
@@ -65,10 +74,13 @@ export async function archiveConversationMemory(
     1,
     options.maxBatches ?? (options.force ? FORCE_MAX_BATCHES : DEFAULT_MAX_BATCHES),
   );
+  // A clear runs inside one request with an eight-minute budget, so each of its batches
+  // covers as much of the conversation as one extraction request allows.
+  const batchInput = options.force ? { ...input, limit: FORCE_BATCH_MESSAGES } : input;
 
   for (let processed = 0; ; processed += 1) {
     if (processed === maxBatches) {
-      const remaining = await store.loadBatch(input, ctx);
+      const remaining = await store.loadBatch(batchInput, ctx);
       if (!remaining) return;
       if (options.force) {
         throw new Error(
@@ -81,9 +93,37 @@ export async function archiveConversationMemory(
       );
       return;
     }
-    const batch = await store.loadBatch(input, ctx);
+    const batch = await store.loadBatch(batchInput, ctx);
     if (!batch) return;
-    await archiveBatch(deps, store, batch, ctx);
+    try {
+      await archiveBatch(deps, store, batch, ctx);
+    } catch (error) {
+      if (options.force && !ctx.signal.aborted) {
+        // The person asked for these messages to be deleted: archive what can be archived,
+        // step over one unextractable range, and keep the clear inside its request budget.
+        getLogger().error("automatic memory skipped an unextractable range during a clear", error, {
+          threadId: batch.threadId,
+          fromSeq: batch.fromSeq,
+          throughSeq: batch.throughSeq,
+        });
+        await store.applyBatch(batch, [], ctx);
+        continue;
+      }
+      // The reconciler would retry this same range forever, one paid model call per tick.
+      // Stop the automatic retries and keep the range; the next completed turn re-arms it.
+      if (!ctx.signal.aborted) {
+        await store.pause(input, ctx).catch((pauseError) => {
+          getLogger().error("automatic memory pause failed", pauseError, {
+            threadId: input.threadId,
+          });
+        });
+        getLogger().warn("automatic memory stopped retrying this range", {
+          threadId: input.threadId,
+          botId: input.botId,
+        });
+      }
+      throw error;
+    }
   }
 }
 
@@ -93,11 +133,14 @@ export async function reconcileAutomaticMemory(deps: {
   jobs: JobPublisher;
 }): Promise<void> {
   const pending = await new MemoryArchiveStore(deps.prisma).pending(100);
+  const abandonedLockAt = new Date(Date.now() - LOCKED_EXTRACTION_ABANDONED_MS);
   await Promise.all(
     pending.map((pointer) =>
       deps.jobs.enqueue({
         ...automaticMemoryJob(pointer.threadId, pointer.botId, pointer.userId, pointer.availableAt),
         keepExisting: true,
+        // A worker that died mid-extraction never unlocks its job; replace that one.
+        replaceLockedBefore: abandonedLockAt,
       }),
     ),
   );
@@ -114,6 +157,15 @@ async function archiveBatch(
     await store.applyBatch(batch, [], ctx);
     return;
   }
+  // Acknowledgement-only turns ("谢谢", "好的") carry no durable fact; skip the paid call.
+  if (batch.newSources.every((source) => source.text.trim().length < MIN_EXTRACTION_SOURCE_CHARS)) {
+    await store.applyBatch(batch, [], ctx);
+    getLogger().info("automatic memory extraction skipped a short turn", {
+      threadId: batch.threadId,
+      sources: batch.newSources.length,
+    });
+    return;
+  }
 
   const secrets = await collectSecrets(deps, ctx);
   const request = await buildExtractionRequest(deps, batch, ctx, secrets);
@@ -127,7 +179,17 @@ async function archiveBatch(
   const proposed = await deps.extractor.extract(request, ctx);
   const changes = verifyProposedChanges(proposed, batch, secrets);
   const applied = await store.applyBatch(batch, changes, ctx);
-  if (applied.saved + applied.updated === 0) return;
+  // Counts only, never content: an extraction used to leave no trace at all.
+  getLogger().info("automatic memory extraction finished", {
+    threadId: batch.threadId,
+    saved: applied.saved,
+    updated: applied.updated,
+    removed: applied.removed,
+    skipped: applied.skipped,
+    proposed: proposed.length,
+    rejected: proposed.length - changes.length,
+  });
+  if (applied.saved + applied.updated + applied.removed === 0) return;
 
   try {
     await deps.jobs.enqueue(semanticMemorySyncJob(batch.spaceId));
@@ -146,7 +208,7 @@ async function buildExtractionRequest(
   ctx: AdapterContext,
   secrets: readonly string[],
 ): Promise<MemoryExtractionRequest> {
-  const query = batch.newSources.at(-1)?.text ?? "";
+  const query = tailBytes(batch.newSources.at(-1)?.text ?? "", MAX_RECALL_QUERY_BYTES);
   const recalled = await recallRelatedFacts(deps, batch, ctx, redactText(query, secrets));
   const notes = (await readAgentMemory(deps.memory, batch.botId, ctx)).map(
     (document): MemoryExtractionNote => ({
@@ -184,7 +246,12 @@ async function recallRelatedFacts(
     ctx,
   );
   if (!response.ok) {
-    throw new Error(`Semantic memory recall failed for automatic extraction: ${response.error}`);
+    // Recall only supplies correction candidates; an index outage must not block archiving.
+    getLogger().warn("automatic memory recall failed; extracting without candidates", {
+      threadId: batch.threadId,
+      error: response.error,
+    });
+    return [];
   }
   return response.value.flatMap((result): MemoryExtractionExisting[] =>
     result.id === undefined || result.revision === undefined
@@ -219,8 +286,10 @@ function mergeExisting(
 }
 
 /**
- * Only a literal quotation of this batch's new direct user message can support a fact, and no
- * proposal may carry protected secret material or a redaction placeholder into storage.
+ * Only a literal quotation of this batch's new direct user message can support a change, and no
+ * proposal may carry protected secret material or a redaction placeholder into storage. A
+ * removal writes no new text: its content is the fact being forgotten, so only the quote is
+ * checked.
  */
 function verifyProposedChanges(
   changes: readonly MemoryExtractionChange[],
@@ -232,19 +301,42 @@ function verifyProposedChanges(
     const source = sources.get(change.sourceMessageId);
     if (source === undefined) return false;
     if (!change.sourceQuote || !source.includes(change.sourceQuote)) return false;
-    if (containsSecret(change.content, secrets) || containsSecret(change.sourceQuote, secrets)) {
-      return false;
+    if (containsSecret(change.sourceQuote, secrets)) return false;
+    if (change.sourceQuote.includes(REDACTED)) return false;
+    if (change.remove === true) {
+      const revision = change.expectedRevision;
+      return (
+        typeof change.replacesId === "string" &&
+        typeof revision === "number" &&
+        Number.isSafeInteger(revision) &&
+        revision > 0
+      );
     }
-    return !change.content.includes(REDACTED) && !change.sourceQuote.includes(REDACTED);
+    return !containsSecret(change.content, secrets) && !change.content.includes(REDACTED);
   });
 }
 
 async function collectSecrets(deps: AutomaticMemoryDeps, ctx: AdapterContext): Promise<string[]> {
   const loaded = deps.loadSecrets ? await deps.loadSecrets(ctx) : [];
-  // Longest first so a secret that contains another value is replaced whole.
+  // Longest first so a secret that contains another value is replaced whole. A one- or
+  // two-character command value would otherwise shred ordinary text into [redacted].
   return [
-    ...new Set([...(deps.secrets ?? []), ...loaded].filter((secret) => secret.length > 0)),
+    ...new Set(
+      [...(deps.secrets ?? []), ...loaded].filter(
+        (secret) => secret.length >= MIN_SECRET_REDACTION_LENGTH,
+      ),
+    ),
   ].sort((left, right) => right.length - left.length);
+}
+
+/** The tail of a text in whole characters, at most maxBytes of UTF-8. */
+function tailBytes(text: string, maxBytes: number): string {
+  if (Buffer.byteLength(text) <= maxBytes) return text;
+  const bytes = Buffer.from(text);
+  return bytes
+    .subarray(bytes.length - maxBytes)
+    .toString("utf8")
+    .replace(/^\uFFFD+/, "");
 }
 
 function redactText(text: string, secrets: readonly string[]): string {

@@ -6,6 +6,7 @@ import {
   resolveBotUploadPath,
   resolveBotWorkspaceCwd,
   resolveBotWorkspacePath,
+  resolveBotWorkspaceWritePath,
   teamBotWorkspaceDirectory,
   teamWorkspaceInstruction,
   workspaceCwd,
@@ -153,6 +154,36 @@ describe("Team Computer bot folders", () => {
     expect(displayBotWorkspacePath("dedicated", "bot-1", "notes", "notes/result.txt")).toBe(
       "notes/result.txt",
     );
+  });
+});
+
+describe("resolveBotWorkspaceWritePath", () => {
+  it("keeps a team bot's writes in its own folder or shared", () => {
+    expect(resolveBotWorkspaceWritePath("team", "bot-1", "notes.txt")).toBe("bots/bot-1/notes.txt");
+    expect(resolveBotWorkspaceWritePath("team", "bot-1", "shared/brief.md")).toBe(
+      "shared/brief.md",
+    );
+    expect(resolveBotWorkspaceWritePath("team", "bot-1", "~/shared/brief.md")).toBe(
+      "shared/brief.md",
+    );
+    expect(resolveBotWorkspaceWritePath("team", "bot-1", "bots/bot-1/notes.txt")).toBe(
+      "bots/bot-1/notes.txt",
+    );
+  });
+
+  it("refuses another bot's folder, the Team root, and absolute paths", () => {
+    expect(resolveBotWorkspaceWritePath("team", "bot-1", "")).toBe("bots/bot-1");
+    for (const path of ["bots/bot-2/notes.txt", "bots", "/etc/passwd", "/shared/../x"]) {
+      expect(() => resolveBotWorkspaceWritePath("team", "bot-1", path)).toThrow(
+        /escapes the bot workspace|escapes the computer workspace/,
+      );
+    }
+  });
+
+  it("leaves a private computer's writes unchanged", () => {
+    expect(resolveBotWorkspaceWritePath("dedicated", "bot-1", "notes.txt")).toBe("notes.txt");
+    // Same normalization the upload path uses: the sandbox resolves it inside the one home.
+    expect(resolveBotWorkspaceWritePath("dedicated", "bot-1", "/notes.txt")).toBe("notes.txt");
   });
 });
 

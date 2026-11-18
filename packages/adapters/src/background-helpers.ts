@@ -1,12 +1,12 @@
 import { runContinueJob } from "@rakazo/adapter-kit";
 import type { MessageBlock } from "@rakazo/contracts";
 import {
-  ACTIVE_RUN_STATUSES,
   BACKGROUND_HELPER_TRIGGER,
   escapePromptData,
   HELPER_RESULT_TRIGGER,
   isConversationalRun,
   STOPPED_HELPER_RESULT,
+  WORKING_RUN_STATUSES,
 } from "@rakazo/core";
 import type { Prisma } from "@rakazo/db";
 import {
@@ -133,14 +133,24 @@ export async function startBackgroundHelper(
       await tx.run.findFirst({ where: { spaceId: run.spaceId, clientNonce }, select: { id: true } })
     )
       return null;
-    const running = await tx.run.count({
-      where: {
-        botId: bot.id,
-        trigger: BACKGROUND_HELPER_TRIGGER,
-        status: { in: [...ACTIVE_RUN_STATUSES] },
-      },
-    });
-    if (running >= MAX_PARALLEL_SUBAGENTS) return "full" as const;
+    const [working, waiting] = await Promise.all([
+      tx.run.count({
+        where: {
+          botId: bot.id,
+          trigger: BACKGROUND_HELPER_TRIGGER,
+          status: { in: [...WORKING_RUN_STATUSES] },
+        },
+      }),
+      // A helper paused on an approval card holds no slot: it is not computing anything.
+      tx.run.count({
+        where: {
+          botId: bot.id,
+          trigger: BACKGROUND_HELPER_TRIGGER,
+          status: "waiting_input",
+        },
+      }),
+    ]);
+    if (working >= MAX_PARALLEL_SUBAGENTS) return { full: true as const, waiting };
     // Only this turn's live worker may start one, but the card is not part of the turn: a turn
     // ending settles its own helper cards as stopped, while this helper keeps working.
     await assertRunCanWriteHistory(tx, runId, { lease: runLeaseFor(deps, runId) });
@@ -191,10 +201,8 @@ export async function startBackgroundHelper(
     });
     return { eventSeq: event.seq, helperRunId: helperRun.id };
   }, THREAD_LOCK_TRANSACTION_OPTIONS);
-  if (committed === "full") {
-    return {
-      error: `${MAX_PARALLEL_SUBAGENTS} background helpers are already working. Wait for a result before starting another.`,
-    };
+  if (committed && "full" in committed && committed.full === true) {
+    return { error: helperLimitMessage(committed.waiting) };
   }
   if (!committed) return started;
   await deps.events.notify(thread.id, committed.eventSeq).catch((error) => {
@@ -205,6 +213,14 @@ export async function startBackgroundHelper(
     getLogger().error("background helper enqueue", error);
   });
   return started;
+}
+
+/** Says what the full slots are doing: waiting on an approval is not working. */
+function helperLimitMessage(waiting: number): string {
+  const working = `${MAX_PARALLEL_SUBAGENTS} background helpers are already working`;
+  const paused =
+    waiting > 0 ? `, and ${waiting} more ${waiting === 1 ? "is" : "are"} waiting for approval` : "";
+  return `${working}${paused}. Wait for a result before starting another.`;
 }
 
 function startedNote(name: string) {

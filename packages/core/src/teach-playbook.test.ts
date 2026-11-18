@@ -22,6 +22,61 @@ describe("promptInvokesSkill", () => {
     expect(promptInvokesSkill("Run taught skill: Export\nSteps:", "Export")).toBe(false);
     expect(promptInvokesSkill("run cs now", "cs")).toBe(false);
   });
+
+  it("matches a Chinese request with the verb before the name or 技能 after it", () => {
+    expect(
+      promptInvokesSkill(
+        "用 Daily Notes Scaffold 技能，根目录用 /tmp/x，建一份今天的笔记。",
+        "Daily Notes Scaffold",
+      ),
+    ).toBe(true);
+    expect(promptInvokesSkill("按 Daily Notes Scaffold 做一遍", "Daily Notes Scaffold")).toBe(true);
+    expect(promptInvokesSkill("帮我跑一下 Daily Notes Scaffold", "Daily Notes Scaffold")).toBe(
+      true,
+    );
+    expect(promptInvokesSkill("请使用「Daily Notes Scaffold」建笔记", "Daily Notes Scaffold")).toBe(
+      true,
+    );
+    expect(promptInvokesSkill("Daily Notes Scaffold 技能再跑一遍", "Daily Notes Scaffold")).toBe(
+      true,
+    );
+  });
+
+  it("still ignores a Chinese prompt that only mentions the name", () => {
+    expect(promptInvokesSkill("Daily Notes Scaffold 这个名字不用改", "Daily Notes Scaffold")).toBe(
+      false,
+    );
+    expect(
+      promptInvokesSkill("用中文解释 Daily Notes Scaffold 是做什么的", "Daily Notes Scaffold"),
+    ).toBe(false);
+  });
+
+  it("matches a Chinese skill name inside a Chinese sentence", () => {
+    for (const [prompt, name] of [
+      ["用周报模板整理这周的进展", "周报模板"],
+      ["帮我用周报模板", "周报模板"],
+      ["请按照会议纪要格式输出", "会议纪要格式"],
+      ["运行数据清洗流程", "数据清洗流程"],
+      ["用邮件模板回复一下", "邮件模板"],
+      ["把这个交给财务对账技能处理", "财务对账"],
+      ["用「周报模板」整理", "周报模板"],
+      ["用Q3 周报整理", "Q3 周报"],
+    ] as const) {
+      expect(promptInvokesSkill(prompt, name)).toBe(true);
+    }
+  });
+
+  it("allows a two-character Chinese name only when it is invoked", () => {
+    expect(promptInvokesSkill("用周报", "周报")).toBe(true);
+    expect(promptInvokesSkill("帮我整理周报", "周报")).toBe(false);
+    // The shorter floor is only for CJK names; short Latin names stay unusable.
+    expect(promptInvokesSkill("use cs now", "cs")).toBe(false);
+  });
+
+  it("ignores a Chinese name that is only mentioned", () => {
+    expect(promptInvokesSkill("周报模板这个名字不用改", "周报模板")).toBe(false);
+    expect(promptInvokesSkill("我看了一下周报模板这个文件", "周报模板")).toBe(false);
+  });
 });
 
 describe("buildPlaybookFromRecording", () => {

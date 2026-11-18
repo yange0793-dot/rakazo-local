@@ -7,6 +7,7 @@ import {
   historyCompactJobKey,
   messagingDeliverJob,
   parseBackgroundJob,
+  reflectRunJob,
   routineRetryJob,
   semanticMemorySyncJob,
 } from "./background-jobs.js";
@@ -25,6 +26,7 @@ function handlers(): BackgroundJobHandlers {
     "history.compact": vi.fn(async () => undefined),
     "memory.sync": vi.fn(async () => undefined),
     "memory.extract": vi.fn(async () => undefined),
+    "harness.reflect": vi.fn(async () => undefined),
     "messaging.deliver": vi.fn(async () => undefined),
     "messaging.progress": vi.fn(async () => undefined),
     "messaging.credential-cleanup": vi.fn(async () => undefined),
@@ -68,6 +70,38 @@ describe("background job contracts", () => {
     expect(() => parseBackgroundJob("memory.extract", { threadId: "thread-a" })).toThrow();
     expect(() =>
       parseBackgroundJob("memory.extract", { ...job.payload, content: "a conversation" }),
+    ).toThrow();
+  });
+
+  it("collapses repeated reflections of one run into a pointer job", async () => {
+    const target = handlers();
+    const job = reflectRunJob("run-a");
+    expect(job).toEqual({
+      name: "harness.reflect",
+      payload: { runId: "run-a" },
+      replaceKey: "harness.reflect:run-a",
+      maxAttempts: 2,
+    });
+    await dispatchBackgroundJob(target, job.name, job.payload);
+    expect(target["harness.reflect"]).toHaveBeenCalledWith({ runId: "run-a" });
+    expect(() => parseBackgroundJob("harness.reflect", { runId: "" })).toThrow();
+    expect(() => parseBackgroundJob("harness.reflect", { runId: "run-a", extra: 1 })).toThrow();
+  });
+
+  it("carries the signal-triggered and caller-excluding options", async () => {
+    const target = handlers();
+    const job = reflectRunJob("run-a", { auto: true, exceptMessageId: "message-a" });
+    expect(job.payload).toEqual({
+      runId: "run-a",
+      auto: true,
+      exceptMessageId: "message-a",
+    });
+    await dispatchBackgroundJob(target, job.name, job.payload);
+    expect(target["harness.reflect"]).toHaveBeenLastCalledWith(job.payload);
+    // Only a signal-triggered review may say auto; a person-asked one omits it.
+    expect(() => parseBackgroundJob("harness.reflect", { runId: "run-a", auto: false })).toThrow();
+    expect(() =>
+      parseBackgroundJob("harness.reflect", { runId: "run-a", exceptMessageId: "" }),
     ).toThrow();
   });
 

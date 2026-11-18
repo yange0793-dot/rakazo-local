@@ -64,6 +64,16 @@ describe("background helper tools", () => {
     }
   });
 
+  it("offers run reviews only to the owner's own chat", () => {
+    const names = (options: Parameters<typeof selectBuiltinToolsForRun>[0]) =>
+      selectBuiltinToolsForRun(options).map((tool) => tool.name);
+    expect(names({ ...helperOptions, trigger: "user" })).toContain("reflect_on_run");
+    expect(names(helperOptions)).not.toContain("reflect_on_run");
+    expect(names({ ...helperOptions, trigger: "user", messagingChannelRun: true })).not.toContain(
+      "reflect_on_run",
+    );
+  });
+
   it("drops the page browser where the run may not use one", () => {
     const names = selectBuiltinToolsForRun({
       ...helperOptions,

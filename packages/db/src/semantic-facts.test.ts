@@ -1,9 +1,10 @@
 import type { AdapterContext } from "@rakazo/adapter-kit";
 import { MEMORY_REVISION_CONFLICT_ERROR } from "@rakazo/adapter-kit";
-import { describe, expect, it, vi } from "vitest";
+import { createLogger, createTestSink, installLogger } from "@rakazo/logging";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import type { SemanticFact as FactRecord, PrismaClient } from "./generated/prisma/client.js";
 import { IsolationError } from "./scope.js";
-import { SemanticFactStore, semanticFactNamespace } from "./semantic-facts.js";
+import { lessonFactNamespace, SemanticFactStore, semanticFactNamespace } from "./semantic-facts.js";
 
 const ctx: AdapterContext = {
   operationId: "op",
@@ -39,6 +40,24 @@ function record(overrides: Partial<FactRecord> = {}): FactRecord {
   };
 }
 
+/** Enough of Prisma's `where` for the queries these tests drive. */
+function matchesWhere(row: FactRecord, where: Record<string, unknown>): boolean {
+  return Object.entries(where).every(([key, value]) => {
+    if (key === "AND" && Array.isArray(value))
+      return value.every((part) => matchesWhere(row, part as Record<string, unknown>));
+    if (key === "OR" && Array.isArray(value))
+      return value.some((part) => matchesWhere(row, part as Record<string, unknown>));
+    const own = row[key as keyof FactRecord];
+    if (value && typeof value === "object" && !Array.isArray(value)) {
+      const filter = value as { in?: unknown[]; not?: unknown };
+      if ("in" in filter) return (filter.in ?? []).includes(own);
+      if ("not" in filter) return own !== filter.not;
+      return true;
+    }
+    return own === value;
+  });
+}
+
 function fixture(rows: FactRecord[] = []) {
   const sources = new Map<string, string>();
   const outbox = new Map<string, Record<string, unknown>>();
@@ -52,7 +71,9 @@ function fixture(rows: FactRecord[] = []) {
   );
   const fact = {
     findFirst,
-    findMany: vi.fn(async (_args?: unknown) => rows),
+    findMany: vi.fn(async (args?: { where?: Record<string, unknown> }) =>
+      args?.where ? rows.filter((row) => matchesWhere(row, args.where!)) : rows,
+    ),
     create: vi.fn(async ({ data }: { data: Record<string, unknown> }) => {
       const row = record({ ...data, id: `fact-${rows.length + 1}` } as Partial<FactRecord>);
       rows.push(row);
@@ -122,6 +143,12 @@ function fixture(rows: FactRecord[] = []) {
         revisions.push(data);
         return data;
       }),
+      deleteMany: vi.fn(async ({ where }: { where: { factId?: string } }) => {
+        const before = revisions.length;
+        for (let index = revisions.length - 1; index >= 0; index -= 1)
+          if (revisions[index]!.factId === where.factId) revisions.splice(index, 1);
+        return { count: before - revisions.length };
+      }),
     },
     semanticMemoryRetirement: {
       findFirst: vi.fn(async () => retired[0] ?? null),
@@ -144,7 +171,9 @@ function fixture(rows: FactRecord[] = []) {
       })),
     },
     $queryRaw: vi.fn(async () => []),
-    $transaction: vi.fn(async (fn: (tx: unknown) => Promise<unknown>) => fn(db)),
+    $transaction: vi.fn(async (fn: (tx: unknown) => Promise<unknown>, _options?: unknown) =>
+      fn(db),
+    ),
     $contentEncryption: () => ({
       ring: {
         encryptWrites: true,
@@ -165,6 +194,10 @@ function fixture(rows: FactRecord[] = []) {
 }
 
 describe("managed semantic fact authority", () => {
+  afterEach(() => {
+    installLogger(createLogger({ service: "test", level: "off", sinks: [] }));
+  });
+
   it("uses exactly one isolated or shared namespace without delimiter collisions", () => {
     expect(semanticFactNamespace("space-a", "shared", "bot-a")).toBe(
       semanticFactNamespace("space-a", "shared", "bot-b"),
@@ -197,9 +230,12 @@ describe("managed semantic fact authority", () => {
       id: saved.id,
       status: "forgotten",
       revision: 2,
+      content: "[forgotten]",
     });
     expect(f.db.semanticFact.create).toHaveBeenCalledTimes(1);
-    expect(f.revisions.map((row) => row.status)).toEqual(["active", "forgotten"]);
+    expect(f.revisions.map((row) => [row.status, row.content])).toEqual([
+      ["forgotten", "[forgotten]"],
+    ]);
     expect(
       [...f.outbox.values()].every((work) => !("content" in work) && !("provenance" in work)),
     ).toBe(true);
@@ -561,7 +597,7 @@ describe("managed semantic fact authority", () => {
       },
       ctx,
     );
-    expect(result).toEqual({ saved: 1, updated: 0, skipped: 2 });
+    expect(result).toEqual({ saved: 1, updated: 0, removed: 0, skipped: 2 });
     expect(f.revisions).toHaveLength(1);
     expect(JSON.parse(f.rows[0]!.provenance)).toMatchObject({
       kind: "run",
@@ -610,7 +646,7 @@ describe("managed semantic fact authority", () => {
       },
       ctx,
     );
-    expect(replay).toEqual({ saved: 0, updated: 0, skipped: 1 });
+    expect(replay).toEqual({ saved: 0, updated: 0, removed: 0, skipped: 1 });
     expect(f.rows).toHaveLength(1);
     expect(f.rows[0]!.status).toBe("forgotten");
   });
@@ -648,8 +684,580 @@ describe("managed semantic fact authority", () => {
       },
       ctx,
     );
-    expect(result).toEqual({ saved: 0, updated: 0, skipped: 1 });
+    expect(result).toEqual({ saved: 0, updated: 0, removed: 0, skipped: 1 });
     expect(f.db.semanticFact.create).not.toHaveBeenCalled();
     expect(f.db.semanticFact.update).not.toHaveBeenCalled();
+  });
+
+  it("forgets the body and every revision while keeping the tombstone and source keys", async () => {
+    const f = fixture();
+    const saved = await f.store.save(
+      {
+        botId: "bot-a",
+        scope: "isolated",
+        content: "A private preference.",
+        source: { kind: "durable" },
+      },
+      ctx,
+    );
+    const sourceKeys = [...f.sources.keys()];
+    const forgotten = await f.store.forget(
+      { id: saved.id, botId: "bot-a", scope: "isolated", expectedRevision: 1 },
+      ctx,
+    );
+    expect(forgotten).toEqual({ id: saved.id, expired: true, reason: null });
+    expect(f.rows[0]).toMatchObject({
+      status: "forgotten",
+      revision: 2,
+      content: "[forgotten]",
+    });
+    expect(f.revisions.map((row) => [row.revision, row.status, row.content])).toEqual([
+      [2, "forgotten", "[forgotten]"],
+    ]);
+    expect([...f.sources.keys()]).toEqual(sourceKeys);
+    expect([...f.outbox.values()].map((work) => [work.revision, work.action])).toEqual([
+      [1, "upsert"],
+      [1, "delete"],
+      [2, "delete"],
+    ]);
+  });
+
+  it("treats a repeated forget as already done but rejects a different revision", async () => {
+    const f = fixture();
+    const saved = await f.store.save(
+      { botId: "bot-a", scope: "isolated", content: "A fact.", source: { kind: "durable" } },
+      ctx,
+    );
+    const request = {
+      id: saved.id,
+      botId: "bot-a",
+      scope: "isolated" as const,
+      expectedRevision: 1,
+    };
+    await f.store.forget(request, ctx);
+    await expect(f.store.forget(request, ctx)).resolves.toEqual({
+      id: saved.id,
+      expired: true,
+      reason: null,
+    });
+    expect(f.rows[0]!.revision).toBe(2);
+    await expect(f.store.forget({ ...request, expectedRevision: 9 }, ctx)).rejects.toThrow(
+      MEMORY_REVISION_CONFLICT_ERROR,
+    );
+  });
+
+  it("lets a correction restore content an earlier revision or a forgotten fact used", async () => {
+    const f = fixture();
+    const input = {
+      botId: "bot-a",
+      scope: "isolated" as const,
+      threadId: "thread-a",
+      sources: new Map([
+        [
+          "message-a",
+          {
+            messageId: "message-a",
+            threadId: "thread-a",
+            text: "Use a narrow console. Change it. Actually keep the narrow console.",
+            observedAt: time,
+          },
+        ],
+      ]),
+    };
+    const changes = [
+      {
+        content: "Use a narrow console.",
+        sourceMessageId: "message-a",
+        sourceQuote: "Use a narrow console",
+        category: "preference" as const,
+      },
+      {
+        content: "Use a wide console.",
+        sourceMessageId: "message-a",
+        sourceQuote: "Change it",
+        category: "preference" as const,
+        replacesId: "fact-1",
+        expectedRevision: 1,
+      },
+      {
+        content: "Use a narrow console.",
+        sourceMessageId: "message-a",
+        sourceQuote: "keep the narrow console",
+        category: "preference" as const,
+        replacesId: "fact-1",
+        expectedRevision: 2,
+      },
+    ];
+    expect(
+      await f.store.applyArchiveChanges(f.db as never, { ...input, changes: [changes[0]!] }, ctx),
+    ).toEqual({ saved: 1, updated: 0, removed: 0, skipped: 0 });
+    expect(
+      await f.store.applyArchiveChanges(f.db as never, { ...input, changes: [changes[1]!] }, ctx),
+    ).toEqual({ saved: 0, updated: 1, removed: 0, skipped: 0 });
+    expect(
+      await f.store.applyArchiveChanges(f.db as never, { ...input, changes: [changes[2]!] }, ctx),
+    ).toEqual({ saved: 0, updated: 1, removed: 0, skipped: 0 });
+    expect(f.rows[0]).toMatchObject({
+      content: "Use a narrow console.",
+      revision: 3,
+      status: "active",
+    });
+  });
+
+  it("deduplicates an archived fact whose wording differs only by case, width and punctuation", async () => {
+    const f = fixture();
+    const sources = new Map([
+      [
+        "message-a",
+        {
+          messageId: "message-a",
+          threadId: "thread-a",
+          text: "Prefer dark mode. Prefer  DARK mode.",
+          observedAt: time,
+        },
+      ],
+    ]);
+    const base = {
+      sourceMessageId: "message-a",
+      category: "preference" as const,
+    };
+    expect(
+      await f.store.applyArchiveChanges(
+        f.db as never,
+        {
+          botId: "bot-a",
+          scope: "isolated",
+          threadId: "thread-a",
+          sources,
+          changes: [{ ...base, content: "Prefer dark mode.", sourceQuote: "Prefer dark mode" }],
+        },
+        ctx,
+      ),
+    ).toEqual({ saved: 1, updated: 0, removed: 0, skipped: 0 });
+    expect(
+      await f.store.applyArchiveChanges(
+        f.db as never,
+        {
+          botId: "bot-a",
+          scope: "isolated",
+          threadId: "thread-a",
+          sources,
+          changes: [{ ...base, content: "prefer  DARK mode", sourceQuote: "Prefer  DARK mode" }],
+        },
+        ctx,
+      ),
+    ).toEqual({ saved: 0, updated: 0, removed: 0, skipped: 1 });
+    expect(f.rows).toHaveLength(1);
+  });
+
+  it("logs a correction it had to drop instead of discarding it silently", async () => {
+    const sink = createTestSink();
+    installLogger(createLogger({ service: "test", sinks: [sink] }));
+    const f = fixture([record()]);
+    const result = await f.store.applyArchiveChanges(
+      f.db as never,
+      {
+        botId: "bot-a",
+        scope: "isolated",
+        threadId: "thread-a",
+        sources: new Map([
+          [
+            "message-a",
+            {
+              messageId: "message-a",
+              threadId: "thread-a",
+              text: "Change the console.",
+              observedAt: time,
+            },
+          ],
+        ]),
+        changes: [
+          {
+            content: "Use a wide console.",
+            sourceMessageId: "message-a",
+            sourceQuote: "Change the console",
+            category: "preference",
+            replacesId: "fact-a",
+            expectedRevision: 7,
+          },
+        ],
+      },
+      ctx,
+    );
+    expect(result).toEqual({ saved: 0, updated: 0, removed: 0, skipped: 1 });
+    const logged = sink.events.find(
+      (event) => event.message === "memory archive correction skipped",
+    );
+    expect(logged).toMatchObject({
+      "memory.fact_id": "fact-a",
+      "memory.reason": "revision_changed",
+    });
+  });
+
+  it("forgets or corrects a fact under the namespace its recall citation named", async () => {
+    const shared = semanticFactNamespace(ctx.spaceId, "shared", "bot-a");
+    const forgotten = fixture([record({ id: "shared-fact", namespace: shared, scope: "shared" })]);
+    await forgotten.store.forget(
+      {
+        id: "shared-fact",
+        botId: "bot-a",
+        scope: "isolated",
+        entity: shared,
+        expectedRevision: 1,
+      },
+      ctx,
+    );
+    expect(forgotten.rows[0]).toMatchObject({ status: "forgotten", revision: 2 });
+
+    const corrected = fixture([record({ id: "shared-fact", namespace: shared, scope: "shared" })]);
+    expect(
+      await corrected.store.save(
+        {
+          botId: "bot-a",
+          scope: "isolated",
+          entity: shared,
+          replacesId: "shared-fact",
+          expectedRevision: 1,
+          content: "Corrected shared fact.",
+          source: { kind: "durable" },
+        },
+        ctx,
+      ),
+    ).toMatchObject({ id: "shared-fact", revision: 2, content: "Corrected shared fact." });
+  });
+
+  it("refuses a citation namespace this bot could not have read", async () => {
+    const foreign = semanticFactNamespace(ctx.spaceId, "isolated", "bot-b");
+    const f = fixture([record({ id: "peer-fact", namespace: foreign, botId: "bot-b" })]);
+    await expect(
+      f.store.forget(
+        {
+          id: "peer-fact",
+          botId: "bot-a",
+          scope: "isolated",
+          entity: foreign,
+          expectedRevision: 1,
+        },
+        ctx,
+      ),
+    ).rejects.toBeInstanceOf(IsolationError);
+    await expect(
+      f.store.save(
+        {
+          botId: "bot-a",
+          scope: "isolated",
+          entity: foreign,
+          replacesId: "peer-fact",
+          expectedRevision: 1,
+          content: "Stolen.",
+          source: { kind: "durable" },
+        },
+        ctx,
+      ),
+    ).rejects.toBeInstanceOf(IsolationError);
+    await expect(
+      f.store.save(
+        {
+          botId: "bot-a",
+          scope: "isolated",
+          entity: semanticFactNamespace(ctx.spaceId, "shared", "bot-a"),
+          content: "No correction target.",
+          source: { kind: "durable" },
+        },
+        ctx,
+      ),
+    ).rejects.toThrow(/correction/);
+    expect(f.rows[0]!.status).toBe("active");
+  });
+
+  it("gives bulk retirement and purge enough time for a large scope", async () => {
+    const shared = semanticFactNamespace(ctx.spaceId, "shared", "bot-a");
+    const f = fixture([
+      record(),
+      record({
+        id: "shared-history",
+        namespace: shared,
+        scope: "shared",
+        kind: "history",
+        sourceThreadId: "thread-a",
+        sourceGeneration: 3,
+      }),
+    ]);
+    await f.store.retireScope({ spaceId: ctx.spaceId, botId: "bot-a" }, ctx);
+    await f.store.purgeHistory({ botId: "bot-a", threadId: "thread-a", generations: [3] }, ctx);
+    expect(f.db.$transaction).toHaveBeenCalledTimes(2);
+    for (const call of f.db.$transaction.mock.calls)
+      expect(call[1]).toMatchObject({ timeout: 120_000 });
+  });
+
+  it("retires a deleted bot's shared history facts but keeps its shared durable ones", async () => {
+    const shared = semanticFactNamespace(ctx.spaceId, "shared", "bot-a");
+    const f = fixture([
+      record({ id: "isolated" }),
+      record({
+        id: "lesson-a",
+        namespace: lessonFactNamespace(ctx.spaceId, "bot-a"),
+        kind: "lesson",
+      }),
+      record({ id: "shared-durable", namespace: shared, scope: "shared" }),
+      record({
+        id: "shared-history",
+        namespace: shared,
+        scope: "shared",
+        kind: "history",
+        sourceThreadId: "thread-a",
+        sourceGeneration: 3,
+      }),
+      record({
+        id: "peer-shared-history",
+        namespace: shared,
+        scope: "shared",
+        botId: "bot-b",
+        kind: "history",
+        sourceThreadId: "thread-b",
+        sourceGeneration: 3,
+      }),
+    ]);
+    await f.store.retireScope({ spaceId: ctx.spaceId, botId: "bot-a" }, ctx);
+    expect(f.rows.map((row) => [row.id, row.status])).toEqual([
+      ["isolated", "forgotten"],
+      ["lesson-a", "forgotten"],
+      ["shared-durable", "active"],
+      ["shared-history", "forgotten"],
+      ["peer-shared-history", "active"],
+    ]);
+    expect([...f.outbox.keys()]).toEqual(
+      expect.arrayContaining(["sm-delete:shared-history:1", "sm-delete:shared-history:2"]),
+    );
+  });
+
+  it("writes host lessons into a per-bot namespace with run authorization and content dedupe", async () => {
+    const f = fixture();
+    const input = {
+      botId: "bot-a",
+      cue: "A command fails with ENOENT",
+      lesson: "Check the working directory before retrying.",
+      provenance: {
+        kind: "run" as const,
+        runId: "run-a",
+        threadId: "thread-a",
+        observedAt: time.toISOString(),
+        harness: {
+          domainKey: "files",
+          signals: ["tool_error"],
+          autoApplied: false,
+          evidence: { kind: "tool_error" as const, quote: "ENOENT" },
+        },
+      },
+    };
+    expect(lessonFactNamespace(ctx.spaceId, "bot-a")).not.toBe(namespace);
+    const saved = await f.store.saveLesson(input, ctx);
+    expect(saved).toMatchObject({
+      kind: "lesson",
+      scope: "isolated",
+      content:
+        "cue: A command fails with ENOENT\nlesson: Check the working directory before retrying.",
+      revision: 1,
+      status: "active",
+    });
+    expect(saved!.provenance.harness).toMatchObject({ domainKey: "files", autoApplied: false });
+    expect(f.rows[0]!.namespace).toBe(lessonFactNamespace(ctx.spaceId, "bot-a"));
+    // Any space member may confirm a card; the cited run only has to belong to this bot.
+    expect(f.db.run.findFirst).toHaveBeenCalledWith({
+      where: { id: "run-a", spaceId: ctx.spaceId, botId: "bot-a" },
+      select: { id: true },
+    });
+    expect([...f.outbox.values()].map((work) => [work.revision, work.action])).toEqual([
+      [1, "upsert"],
+    ]);
+    await expect(f.store.saveLesson(input, ctx)).resolves.toMatchObject({ id: saved!.id });
+    await expect(
+      f.store.saveLesson({ ...input, provenance: { ...input.provenance, runId: "run-b" } }, ctx),
+    ).resolves.toMatchObject({ id: saved!.id });
+    expect(f.db.semanticFact.create).toHaveBeenCalledTimes(1);
+  });
+
+  it("updates a lesson only at its observed revision and drops a stale replacement", async () => {
+    const f = fixture();
+    const input = {
+      botId: "bot-a",
+      cue: "A command fails",
+      lesson: "Retry after checking the directory.",
+      provenance: {
+        kind: "run" as const,
+        runId: "run-a",
+        observedAt: time.toISOString(),
+        harness: {
+          domainKey: "files",
+          signals: ["run_failed"],
+          autoApplied: true,
+          evidence: { kind: "run_failed" as const, quote: "ENOENT" },
+        },
+      },
+    };
+    const saved = await f.store.saveLesson(input, ctx);
+    const replaced = await f.store.saveLesson(
+      {
+        ...input,
+        lesson: "Check the directory before retrying.",
+        replaces: { id: saved!.id, expectedRevision: 1 },
+      },
+      ctx,
+    );
+    expect(replaced).toMatchObject({ id: saved!.id, revision: 2, status: "active" });
+    expect(replaced!.content).toContain("Check the directory before retrying.");
+    await expect(
+      f.store.saveLesson(
+        {
+          ...input,
+          lesson: "Stale edit.",
+          replaces: { id: saved!.id, expectedRevision: 1 },
+        },
+        ctx,
+      ),
+    ).resolves.toBeNull();
+    expect(f.rows[0]).toMatchObject({ revision: 2, status: "active" });
+  });
+
+  it("retires a lesson to historical and deindexes it, leaving other kinds alone", async () => {
+    const f = fixture([
+      record({
+        id: "lesson-a",
+        namespace: lessonFactNamespace(ctx.spaceId, "bot-a"),
+        kind: "lesson",
+      }),
+    ]);
+    await f.store.retireLesson("lesson-a", ctx);
+    expect(f.rows[0]).toMatchObject({ status: "historical", revision: 2 });
+    expect([...f.outbox.values()].map((work) => [work.revision, work.action])).toEqual([
+      [1, "delete"],
+      [2, "delete"],
+    ]);
+    await f.store.retireLesson("lesson-a", ctx);
+    expect(f.rows[0]!.revision).toBe(2);
+    const durable = fixture([record()]);
+    await durable.store.retireLesson("fact-a", ctx);
+    expect(durable.rows[0]!.status).toBe("active");
+  });
+
+  it("lists, corrects and forgets lessons only from the lesson namespace", async () => {
+    const lessons = lessonFactNamespace(ctx.spaceId, "bot-a");
+    const f = fixture([
+      record({ id: "durable-1" }),
+      record({ id: "lesson-1", namespace: lessons, kind: "lesson", content: "cue: A\nlesson: B" }),
+    ]);
+    const page = await f.store.list({ botId: "bot-a", scope: "isolated", kind: "lesson" }, ctx);
+    expect(page.items.map((item) => item.id)).toEqual(["lesson-1"]);
+    const facts = await f.store.list({ botId: "bot-a", scope: "isolated" }, ctx);
+    expect(facts.items.map((item) => item.id)).toEqual(["durable-1"]);
+    const recalled = await f.store.resolveCandidates(
+      { query: "x", scope: "isolated", botId: "bot-a", limit: 5, kind: "lesson" },
+      [{ id: "lesson-1", revision: 1, score: 1 }],
+      ctx,
+    );
+    expect(recalled.map((item) => item.id)).toEqual(["lesson-1"]);
+    expect(
+      await f.store.resolveCandidates(
+        { query: "x", scope: "isolated", botId: "bot-a", limit: 5 },
+        [{ id: "lesson-1", revision: 1, score: 1 }],
+        ctx,
+      ),
+    ).toEqual([]);
+    await expect(
+      f.store.correct(
+        {
+          id: "lesson-1",
+          botId: "bot-a",
+          scope: "isolated",
+          kind: "lesson",
+          content: "cue: A\nlesson: C",
+          expectedRevision: 1,
+        },
+        ctx,
+      ),
+    ).resolves.toMatchObject({ revision: 2, content: "cue: A\nlesson: C" });
+    await expect(
+      f.store.forget(
+        {
+          id: "lesson-1",
+          botId: "bot-a",
+          scope: "isolated",
+          kind: "lesson",
+          expectedRevision: 2,
+        },
+        ctx,
+      ),
+    ).resolves.toMatchObject({ id: "lesson-1", expired: true });
+    expect(f.rows[1]).toMatchObject({ status: "forgotten", revision: 3 });
+  });
+
+  it("removes an archived fact from a verifiable quote and its observed revision only", async () => {
+    const sources = new Map([
+      [
+        "message-a",
+        {
+          messageId: "message-a",
+          threadId: "thread-a",
+          text: "Forget the console preference.",
+          observedAt: time,
+        },
+      ],
+    ]);
+    const removal = {
+      content: "",
+      sourceMessageId: "message-a",
+      sourceQuote: "Forget the console preference",
+      category: "preference" as const,
+      remove: true as const,
+      replacesId: "fact-a",
+      expectedRevision: 1,
+    };
+    const input = {
+      botId: "bot-a",
+      scope: "isolated" as const,
+      threadId: "thread-a",
+      sources,
+    };
+    const f = fixture([record()]);
+    expect(
+      await f.store.applyArchiveChanges(f.db as never, { ...input, changes: [removal] }, ctx),
+    ).toEqual({ saved: 0, updated: 0, removed: 1, skipped: 0 });
+    expect(f.rows[0]).toMatchObject({
+      status: "forgotten",
+      revision: 2,
+      content: "[forgotten]",
+    });
+    // The source binding makes a replay a no-op instead of a second removal.
+    expect(
+      await f.store.applyArchiveChanges(f.db as never, { ...input, changes: [removal] }, ctx),
+    ).toEqual({ saved: 0, updated: 0, removed: 0, skipped: 1 });
+    const stale = fixture([record()]);
+    expect(
+      await stale.store.applyArchiveChanges(
+        stale.db as never,
+        { ...input, changes: [{ ...removal, expectedRevision: 7 }] },
+        ctx,
+      ),
+    ).toEqual({ saved: 0, updated: 0, removed: 0, skipped: 1 });
+    expect(stale.rows[0]!.status).toBe("active");
+    // A removal names its exact target and needs the user's words.
+    expect(
+      await stale.store.applyArchiveChanges(
+        stale.db as never,
+        {
+          ...input,
+          changes: [{ ...removal, replacesId: undefined, expectedRevision: undefined }],
+        },
+        ctx,
+      ),
+    ).toEqual({ saved: 0, updated: 0, removed: 0, skipped: 1 });
+    expect(
+      await stale.store.applyArchiveChanges(
+        stale.db as never,
+        { ...input, changes: [{ ...removal, sourceQuote: "Never said this" }] },
+        ctx,
+      ),
+    ).toEqual({ saved: 0, updated: 0, removed: 0, skipped: 1 });
+    expect(stale.rows[0]!.status).toBe("active");
   });
 });

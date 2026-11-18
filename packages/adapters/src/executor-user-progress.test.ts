@@ -160,6 +160,10 @@ async function runTurn(
     run: {
       findUnique: vi.fn(async () => run),
       findUniqueOrThrow: vi.fn(async () => run),
+      // No person's run waits for this bot's computer in these turns.
+      findFirst: vi.fn(async (args?: { where?: { status?: unknown } }) =>
+        args?.where?.status === "queued" ? null : { bot: { notifyOnFinish: false } },
+      ),
       updateMany: vi.fn(async ({ data }: { data: Record<string, unknown> }) => {
         Object.assign(run, data);
         return { count: 1 };
@@ -194,6 +198,8 @@ async function runTurn(
     },
     attempt: {
       create: vi.fn(async () => ({ id: "attempt-1" })),
+      // The turn's own row is the first attempt of the run.
+      count: vi.fn(async () => 1),
       update: vi.fn(),
       updateMany: vi.fn(async () => ({ count: 1 })),
     },

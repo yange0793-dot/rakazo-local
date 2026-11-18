@@ -25,14 +25,16 @@ const TERMINAL: RunStatus[] = ["completed", "failed", "cancelled"];
  * Routine and webhook runs are not the conversation, and neither is a wake from another bot:
  * its reply goes back to that bot. The creation intro can only ask what it is for; a message
  * that lands during any of them waits, and the continuation after the turn finishes answers it.
+ * A person's turn is started ahead of these when both wait for a bot's computer.
  */
-const NON_CONVERSATIONAL_RUN_TRIGGERS = new Set([
+export const NON_CONVERSATIONAL_RUN_TRIGGERS = [
   "routine",
   "webhook",
   "created",
   "tickets",
   "bot_message",
-]);
+] as const;
+const NON_CONVERSATIONAL = new Set<string>(NON_CONVERSATIONAL_RUN_TRIGGERS);
 
 /**
  * Background triggers do internal work that must not leak into the chat: the
@@ -142,7 +144,7 @@ export function runReadsThreadHistory(trigger: string | null | undefined): boole
 
 /** Whether a run's turn is part of the thread's conversation and may take user steering. */
 export function isConversationalRun(trigger: string | null | undefined): boolean {
-  return !NON_CONVERSATIONAL_RUN_TRIGGERS.has(trigger ?? "");
+  return !NON_CONVERSATIONAL.has(trigger ?? "");
 }
 
 /**

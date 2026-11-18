@@ -375,17 +375,18 @@ export function Table({
       : { label: column },
   );
   const heads = headings.map((column) => column.label);
+  // Record rows name each column's key. A page that wrote plain column labels still
+  // gets its rows, read by the record's own property order, instead of losing them.
+  const keyedRows =
+    headings.length > 0 && headings.every((column) => typeof column.key === "string");
   const body: TableCell[][] = (Array.isArray(rows) ? rows : [])
-    .flatMap((row) =>
-      Array.isArray(row)
-        ? [row]
-        : row &&
-            typeof row === "object" &&
-            headings.length > 0 &&
-            headings.every((column) => typeof column.key === "string")
-          ? [headings.map((column) => row[column.key!])]
-          : [],
-    )
+    .flatMap((row) => {
+      if (Array.isArray(row)) return [row];
+      if (!row || typeof row !== "object" || headings.length === 0) return [];
+      if (keyedRows) return [headings.map((column) => row[column.key!])];
+      const values = Object.values(row);
+      return [headings.map((_column, index) => values[index])];
+    })
     .map((row) =>
       row.map((cell) =>
         cell && typeof cell === "object" && !isValidElement(cell) && "value" in cell

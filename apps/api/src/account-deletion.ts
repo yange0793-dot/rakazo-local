@@ -340,14 +340,20 @@ async function deleteClaimedSpaces(
   for (const spaceId of input.spaceIds) {
     // Teardown abandoned at a deadline that finishes later leaves the rest to the next attempt.
     input.signal?.throwIfAborted();
-    // Credentials and the content key must survive failed physical index cleanup.
-    await syncSemanticMemorySpace(
-      {
-        prisma: deps.prisma,
-        memoryProviders: deps.memoryProviders ?? { resolve: async () => null },
-      },
-      spaceId,
-    );
+    // Index cleanup is best effort: the account deletion must finish even when the local index
+    // cannot be reached, and recall reads facts from the database, so revisions left in the
+    // index cannot surface text once these rows are gone.
+    try {
+      await syncSemanticMemorySpace(
+        {
+          prisma: deps.prisma,
+          memoryProviders: deps.memoryProviders ?? { resolve: async () => null },
+        },
+        spaceId,
+      );
+    } catch (error) {
+      getLogger().error("space semantic memory cleanup skipped", error);
+    }
     input.signal?.throwIfAborted();
     const deleted = await deleteClaimedSpace(deps.prisma, {
       spaceId,
@@ -356,6 +362,14 @@ async function deleteClaimedSpaces(
       organizationId: input.organizationId,
     });
     if (!deleted) continue;
+    // The Space's memory configuration went with its rows, so index pointers that outlived
+    // the skipped drain above can never run; left in place they would make the index sweep
+    // enqueue a syncing job that fails on every pass.
+    await runAsSystem("drop semantic memory index pointers of a deleted space", () =>
+      deps.prisma.semanticMemoryIndexOutbox.deleteMany({ where: { spaceId } }),
+    ).catch((error) => {
+      getLogger().error("space semantic memory index pointer cleanup", error);
+    });
     const cleanup = await Promise.allSettled(
       deleted.artifactKeys.map((storageKey) => deps.artifacts.remove(storageKey, context(spaceId))),
     );

@@ -38,6 +38,7 @@ import {
   mirrorMessagingProgress,
 } from "./messaging-delivery.js";
 import { pollPurchase } from "./purchase-poll.js";
+import { reflectRun } from "./run-reflection.js";
 import { syncSemanticMemorySpace } from "./semantic-memory-sync.js";
 import { expireTaughtSkillTeaching } from "./teaching-session.js";
 
@@ -267,6 +268,21 @@ export function createBackgroundJobHandlers(deps: {
         botId: payload.botId,
         signal: AbortSignal.timeout(8 * 60_000),
       });
+    }),
+    // Drafts a skill card for the person who asked, and saves lessons the review can cite.
+    "harness.reflect": asOwner(run, async (payload) => {
+      await reflectRun(
+        {
+          prisma: deps.prisma,
+          runtime: deps.runtime,
+          events: deps.events,
+          memoryProviders: deps.memoryProviders,
+          ...(deps.executor.resolveModel ? { resolveModel: deps.executor.resolveModel } : {}),
+          deploymentModelKey: deps.deploymentModelKey,
+          deploymentModelConfigured: deps.deploymentModelConfigured,
+        },
+        payload,
+      );
     }),
     "history.compact": asOwner(thread, async (payload) => {
       // Retrieval policies use stored context without paid message-count compaction.

@@ -3,7 +3,7 @@
 import type { SemanticFact } from "@rakazo/contracts";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import type { ComponentProps, ReactNode } from "react";
-import { act } from "react";
+import { act, createContext, useContext } from "react";
 import type { Root } from "react-dom/client";
 import { createRoot } from "react-dom/client";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
@@ -24,7 +24,9 @@ vi.mock("../lib/rpc", () => {
 vi.mock("../lib/artifact-open", () => ({ downloadArtifactBytes: vi.fn() }));
 vi.mock("@lingui/react/macro", () => ({
   useLingui: () => ({
-    t: (parts: TemplateStringsArray, ...values: unknown[]) => String.raw(parts, ...values),
+    i18n: { locale: "en" },
+    t: (parts: TemplateStringsArray | { id: string; message?: string }, ...values: unknown[]) =>
+      "raw" in parts ? String.raw(parts, ...values) : (parts.message ?? parts.id),
   }),
   Trans: ({ children }: { children?: ReactNode }) => children,
 }));
@@ -37,9 +39,42 @@ vi.mock("@rakazo/ui-web", () => {
   }: ComponentProps<"button"> & { variant?: string; size?: string }) => (
     <button type="button" {...props} />
   );
+  const Category = createContext<{ value: string[]; onValueChange: (next: string[]) => void }>({
+    value: [],
+    onValueChange: () => undefined,
+  });
   return {
     Button,
+    ToggleGroup: ({
+      value,
+      onValueChange,
+      children,
+      spacing: _spacing,
+      ...props
+    }: Omit<ComponentProps<"div">, "onChange"> & {
+      value: string[];
+      onValueChange: (value: string[]) => void;
+      spacing?: number;
+      disabled?: boolean;
+    }) => (
+      <Category.Provider value={{ value, onValueChange }}>
+        <div {...props}>{children}</div>
+      </Category.Provider>
+    ),
+    ToggleGroupItem: ({ value, children }: { value: string; children?: ReactNode }) => {
+      const group = useContext(Category);
+      return (
+        <button
+          type="button"
+          aria-pressed={group.value.includes(value)}
+          onClick={() => group.onValueChange([value])}
+        >
+          {children}
+        </button>
+      );
+    },
     Field: Box,
+    // biome-ignore lint/a11y/noLabelWithoutControl: the mock renders the htmlFor the section sets
     FieldLabel: (props: ComponentProps<"label">) => <label {...props} />,
     Input: (props: ComponentProps<"input">) => <input {...props} />,
     Textarea: (props: ComponentProps<"textarea">) => <textarea {...props} />,
@@ -180,7 +215,11 @@ it("requests no guessed bot, starts isolated, and discloses exact source only on
   const source = container.querySelector("details");
   expect(source?.open).toBe(false);
   expect(source?.textContent).toContain("message-fixture");
-  expect(source?.textContent).toContain(fact.updatedAt);
+  // Times read in the app's locale; the exact ISO value stays in the element's title.
+  const updated = source?.querySelector(`time[datetime="${fact.updatedAt}"]`);
+  expect(updated?.textContent).toBeTruthy();
+  expect(updated?.textContent).not.toBe(fact.updatedAt);
+  expect(source?.textContent).not.toContain(fact.updatedAt);
   expect(source?.textContent).toContain("3");
   expect(container.textContent).not.toContain("Shared memory");
 });
@@ -216,6 +255,30 @@ it("corrects the opened revision and keeps a conflicting draft and error visible
   expect(container.textContent).toContain("Record changed");
   expect(container.textContent).toContain("Revision conflict");
   expect(button("Save correction").disabled).toBe(true);
+});
+
+it("warns before a correction outgrows the 40 KB the server stores", async () => {
+  await openList();
+  await act(async () => button(fact.content).click());
+  await act(async () => button("Correct").click());
+  // Chinese takes three bytes a character, so 14,000 characters stay under the field's
+  // 20,000 cap yet pass the 40 KiB the server stores, which used to fail only on save.
+  await type("textarea", "记".repeat(14_000));
+  expect(container.textContent).toContain("Too long to save");
+  expect(button("Save correction").disabled).toBe(true);
+  await type("textarea", "记".repeat(13_000));
+  expect(container.textContent).not.toContain("Too long to save");
+  expect(button("Save correction").disabled).toBe(false);
+});
+
+it("does not claim nothing is remembered while only history is hidden", async () => {
+  api.memory.facts.mockResolvedValue({ supported: true, items: [], nextCursor: null });
+  await openList();
+  expect(container.textContent).toContain("No current records");
+  expect(container.textContent).not.toContain("Nothing remembered yet");
+  await act(async () => button("Show history").click());
+  await settle();
+  expect(container.textContent).toContain("Nothing remembered yet");
 });
 
 it("forgets only after confirmation with the opened revision", async () => {
@@ -281,5 +344,78 @@ it("uses exact search paging and exports only the selected scope", async () => {
   expect(JSON.parse(new TextDecoder().decode(bytes))).toEqual({
     format: "rakazo-semantic-memory-v1",
     facts: [fact],
+  });
+});
+
+const lesson: SemanticFact = {
+  ...fact,
+  id: "lesson-fixture",
+  kind: "lesson",
+  content: "cue: The build failed twice.\nlesson: Read the whole log before retrying.",
+  provenance: {
+    kind: "run",
+    runId: "run-fixture",
+    threadId: "thread-fixture",
+    messageId: "message-fixture",
+    harness: {
+      domainKey: "files",
+      signals: ["run_failed"],
+      autoApplied: false,
+      evidence: { kind: "run_failed", quote: "build failed" },
+    },
+  },
+};
+
+it("lists experience as lessons in the bot's own scope, with no fact-only controls", async () => {
+  api.memory.facts.mockResolvedValue({ supported: true, items: [lesson], nextCursor: null });
+  await openList();
+  expect(api.memory.facts.mock.calls.at(-1)?.[0]).not.toHaveProperty("kind");
+  await act(async () => button("Experience").click());
+  await settle();
+  expect(api.memory.facts).toHaveBeenCalledWith(
+    expect.objectContaining({ botId: "bot-fixture", scope: "isolated", kind: "lesson" }),
+    expect.anything(),
+  );
+  // Experience is always the bot's own scope, so the Scope field is not shown at all.
+  expect(container.querySelectorAll("select")).toHaveLength(1);
+  expect(container.textContent).toContain(lesson.content);
+  // Export only carries facts, so experience does not offer it.
+  expect(container.textContent).not.toContain("Export");
+  await act(async () => button(lesson.content).click());
+  const source = container.querySelector("details");
+  expect(source?.textContent).toContain("files");
+});
+
+it("corrects and forgets an experience with the lesson kind", async () => {
+  api.memory.facts.mockResolvedValue({ supported: true, items: [lesson], nextCursor: null });
+  await openList();
+  await act(async () => button("Experience").click());
+  await settle();
+  await act(async () => button(lesson.content).click());
+  await act(async () => button("Correct").click());
+  await type("textarea", "cue: The build failed three times.\nlesson: Ask before retrying.");
+  await act(async () => button("Save correction").click());
+  expect(api.memory.correctFact).toHaveBeenCalledWith({
+    id: lesson.id,
+    botId: "bot-fixture",
+    scope: "isolated",
+    kind: "lesson",
+    content: "cue: The build failed three times.\nlesson: Ask before retrying.",
+    expectedRevision: lesson.revision,
+  });
+  await act(async () => button(lesson.content).click());
+  await act(async () => button("Forget").click());
+  const dialog = container.querySelector('[role="alertdialog"]');
+  await act(async () =>
+    [...dialog!.querySelectorAll<HTMLButtonElement>("button")]
+      .find((entry) => entry.textContent === "Forget")
+      ?.click(),
+  );
+  expect(api.memory.forgetFact).toHaveBeenCalledWith({
+    id: lesson.id,
+    botId: "bot-fixture",
+    scope: "isolated",
+    kind: "lesson",
+    expectedRevision: lesson.revision,
   });
 });

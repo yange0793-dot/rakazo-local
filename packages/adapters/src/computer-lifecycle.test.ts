@@ -308,6 +308,7 @@ describe("computer provisioning", () => {
         findUniqueOrThrow: vi.fn(async () => ({ ...row })),
         updateMany,
       },
+      computerExecutionLease: { findFirst: vi.fn(async () => null) },
       run: {
         findFirst: vi.fn(async () => null),
       },
@@ -420,6 +421,7 @@ describe("computer provisioning", () => {
         findUniqueOrThrow: vi.fn(async () => ({ ...row })),
         updateMany,
       },
+      computerExecutionLease: { findFirst: vi.fn(async () => null) },
       run: {
         findFirst: vi.fn(async () => null),
       },
@@ -448,6 +450,91 @@ describe("computer provisioning", () => {
       expect(claim.where.state).toBe("suspending");
       expect(claim.where.updatedAt).toEqual(observed);
       expect(row.state).toBe("running");
+    } finally {
+      vi.unstubAllGlobals();
+      await rm(dataDir, { recursive: true, force: true });
+    }
+  });
+
+  it("reclaims an abandoned boot past a helper's run lease, but not past a helper using the computer", async () => {
+    const dataDir = await mkdtemp(path.join(tmpdir(), "rakazo-helper-boot-reclaim-"));
+    const observed = new Date("2024-01-01T00:00:00.000Z");
+    const row = {
+      id: "computer-1",
+      homeKey: "bot-1",
+      providerRef: "provider-1" as string | null,
+      kind: "boat",
+      scope: "dedicated",
+      state: "booting",
+      controlLeaseId: null,
+      updatedAt: observed,
+    };
+    const sandbox = new FakeSandboxProvider();
+    const ref = {
+      ...(await sandbox.provision({ botId: "bot-1", homePath: dataDir }, context)),
+      providerRef: "provider-1",
+      kind: "boat" as const,
+      fresh: false,
+    };
+    vi.spyOn(sandbox, "provision").mockResolvedValue(ref);
+    const updateMany = vi.fn(
+      async ({
+        where,
+        data,
+      }: {
+        where: Record<string, unknown>;
+        data: Record<string, unknown>;
+      }) => {
+        const matches = ["id", "state", "providerRef", "kind", "updatedAt"].every(
+          (key) => !(key in where) || where[key] === row[key as keyof typeof row],
+        );
+        if (!matches) return { count: 0 };
+        Object.assign(row, data);
+        return { count: 1 };
+      },
+    );
+    // Only a non-helper run matches, the way Prisma filters the query itself.
+    const runFindFirst = vi.fn(async (args: { where: { trigger?: unknown } }) =>
+      args.where.trigger === undefined ? { id: "running-helper" } : null,
+    );
+    const leaseFindFirst = vi.fn(async () => null as { id: string } | null);
+    const prisma = {
+      computer: {
+        findUniqueOrThrow: vi.fn(async () => ({ ...row })),
+        updateMany,
+      },
+      computerExecutionLease: { findFirst: leaseFindFirst },
+      run: { findFirst: runFindFirst },
+    } as unknown as PrismaClient;
+    const deps = {
+      prisma,
+      sandbox,
+      home: new LocalAgentHomeStore(dataDir),
+      jobs: {} as JobPublisher,
+      events: {} as ThreadEvents,
+      dataDir,
+    };
+    const setTimeoutReal = globalThis.setTimeout;
+    vi.stubGlobal("setTimeout", ((fn: (...args: never[]) => void, _ms?: number, ...args: never[]) =>
+      setTimeoutReal(fn, 0, ...args)) as unknown as typeof setTimeout);
+    const restartBoot = () => {
+      Object.assign(row, { state: "booting", updatedAt: observed });
+    };
+
+    try {
+      // The helper's own liveness is a run lease; only a tool using the computer holds more.
+      await expect(provisionComputer(deps, "computer-1", context)).resolves.toBeTruthy();
+      expect(runFindFirst).toHaveBeenCalledWith(
+        expect.objectContaining({
+          where: expect.objectContaining({ trigger: { not: "helper" } }),
+        }),
+      );
+
+      restartBoot();
+      leaseFindFirst.mockResolvedValue({ id: "helper-tool-lease" });
+      await expect(provisionComputer(deps, "computer-1", context)).rejects.toBeInstanceOf(
+        ComputerBusyError,
+      );
     } finally {
       vi.unstubAllGlobals();
       await rm(dataDir, { recursive: true, force: true });
@@ -697,6 +784,7 @@ describe("computer provisioning", () => {
       executionLease: {
         findFirst: vi.fn(async () => null),
       },
+      computerExecutionLease: { findFirst: vi.fn(async () => null) },
       run: {
         findFirst: vi.fn(async () => null),
       },
@@ -766,6 +854,7 @@ describe("computer provisioning", () => {
       executionLease: {
         findFirst: vi.fn(async () => null),
       },
+      computerExecutionLease: { findFirst: vi.fn(async () => null) },
       run: {
         findFirst: vi.fn(async () => null),
       },
@@ -1402,6 +1491,7 @@ describe("computer provisioning", () => {
               return { count: 1 };
             }),
         },
+        computerExecutionLease: { findFirst: vi.fn(async () => null) },
         run: { findFirst: vi.fn().mockResolvedValue(null) },
       } as unknown as PrismaClient;
 
@@ -3139,6 +3229,97 @@ describe("computer replacement", () => {
       },
       computerExecutionLease: { findFirst: vi.fn().mockResolvedValue(null) },
       run: { findFirst: vi.fn().mockResolvedValue({ id: "live-run" }) },
+    } as unknown as PrismaClient;
+
+    await expect(
+      replaceComputer(
+        {
+          prisma,
+          sandbox: new FakeSandboxProvider(),
+          home: {} as AgentHomeStore,
+          jobs: {} as JobPublisher,
+          events: {} as ThreadEvents,
+        },
+        "computer-1",
+        "reset",
+        context,
+      ),
+    ).rejects.toBeInstanceOf(ComputerBusyError);
+    expect(updateMany).not.toHaveBeenCalled();
+  });
+
+  it("resets a stale suspending computer whose only run is a helper waiting on the user", async () => {
+    const updateMany = vi.fn().mockResolvedValue({ count: 0 });
+    // Only a non-helper run would match: the helper row is filtered out by the query itself.
+    const runFindFirst = vi.fn(async (args: { where?: { trigger?: unknown } }) =>
+      args.where?.trigger === undefined ? { id: "waiting-helper" } : null,
+    );
+    const prisma = {
+      $transaction: vi.fn(async (fn: (tx: unknown) => unknown) => fn(prisma)),
+      $queryRaw: vi.fn(async () => []),
+      space: { findUnique: vi.fn(async () => null) },
+      computer: {
+        findUniqueOrThrow: vi.fn().mockResolvedValue({
+          id: "computer-1",
+          homeKey: "bot-1",
+          providerRef: "provider-1",
+          kind: "fake",
+          scope: "team",
+          state: "suspending",
+          controlLeaseId: null,
+          updatedAt: new Date("2024-01-01T00:00:00.000Z"),
+        }),
+        updateMany,
+      },
+      computerExecutionLease: { findFirst: vi.fn().mockResolvedValue(null) },
+      run: { findFirst: runFindFirst },
+    } as unknown as PrismaClient;
+
+    // The claim is reached (and fails on its own CAS here) instead of refusing at the pre-check.
+    await expect(
+      replaceComputer(
+        {
+          prisma,
+          sandbox: new FakeSandboxProvider(),
+          home: {} as AgentHomeStore,
+          jobs: {} as JobPublisher,
+          events: {} as ThreadEvents,
+        },
+        "computer-1",
+        "reset",
+        context,
+      ),
+    ).rejects.toBeInstanceOf(ComputerBusyError);
+    expect(runFindFirst).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: expect.objectContaining({ trigger: { not: "helper" } }),
+      }),
+    );
+    expect(updateMany).toHaveBeenCalled();
+  });
+
+  it("keeps Reset refused while that helper holds a live execution lease", async () => {
+    const updateMany = vi.fn().mockResolvedValue({ count: 0 });
+    const prisma = {
+      $transaction: vi.fn(async (fn: (tx: unknown) => unknown) => fn(prisma)),
+      $queryRaw: vi.fn(async () => []),
+      space: { findUnique: vi.fn(async () => null) },
+      computer: {
+        findUniqueOrThrow: vi.fn().mockResolvedValue({
+          id: "computer-1",
+          homeKey: "bot-1",
+          providerRef: "provider-1",
+          kind: "fake",
+          scope: "team",
+          state: "suspending",
+          controlLeaseId: null,
+          updatedAt: new Date("2024-01-01T00:00:00.000Z"),
+        }),
+        updateMany,
+      },
+      // Only the helper's own live lease: no foreign bot holds one.
+      computerExecutionLease: { findFirst: vi.fn().mockResolvedValue({ id: "helper-lease" }) },
+      run: { findFirst: vi.fn().mockResolvedValue(null) },
     } as unknown as PrismaClient;
 
     await expect(

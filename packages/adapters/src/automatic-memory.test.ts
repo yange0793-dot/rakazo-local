@@ -10,7 +10,7 @@ import type {
   SemanticMemoryRecallRequest,
   SemanticMemoryResult,
 } from "@rakazo/adapter-kit";
-import type { MemoryArchiveBatch, PrismaClient } from "@rakazo/db";
+import type { MemoryArchiveApplyCounts, MemoryArchiveBatch, PrismaClient } from "@rakazo/db";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { AutomaticMemoryDeps } from "./automatic-memory.js";
 import { archiveConversationMemory, reconcileAutomaticMemory } from "./automatic-memory.js";
@@ -20,13 +20,16 @@ const store = vi.hoisted(() => ({
   loadBatch: vi.fn(),
   applyBatch: vi.fn(),
   pending: vi.fn(),
+  pause: vi.fn(),
 }));
 
 vi.mock("@rakazo/db", () => ({
+  FORCE_BATCH_MESSAGES: 200,
   MemoryArchiveStore: class {
     loadBatch = store.loadBatch;
     applyBatch = store.applyBatch;
     pending = store.pending;
+    pause = store.pause;
   },
 }));
 
@@ -34,6 +37,8 @@ beforeEach(() => {
   store.loadBatch.mockReset();
   store.applyBatch.mockReset();
   store.pending.mockReset();
+  store.pause.mockReset();
+  store.pause.mockResolvedValue(undefined);
 });
 
 const context: AdapterContext = {
@@ -82,7 +87,7 @@ function makeBatch(overrides: Partial<MemoryArchiveBatch> = {}): MemoryArchiveBa
 interface SetupOptions {
   batches?: Array<MemoryArchiveBatch | null>;
   changes?: MemoryExtractionChange[];
-  applied?: { saved: number; updated: number; skipped: number };
+  applied?: MemoryArchiveApplyCounts;
   recalled?: SemanticMemoryResult[];
   recall?: { ok: true; value: SemanticMemoryResult[] } | { ok: false; error: string };
   secrets?: readonly string[];
@@ -93,7 +98,9 @@ interface SetupOptions {
 function setup(options: SetupOptions = {}) {
   const queue = [...(options.batches ?? [null])];
   store.loadBatch.mockImplementation(async () => queue.shift() ?? null);
-  store.applyBatch.mockResolvedValue(options.applied ?? { saved: 1, updated: 0, skipped: 0 });
+  store.applyBatch.mockResolvedValue(
+    options.applied ?? { saved: 1, updated: 0, skipped: 0, removed: 0 },
+  );
   store.pending.mockResolvedValue([]);
 
   const extract = vi.fn(async (_request: MemoryExtractionRequest) => options.changes ?? []);
@@ -206,6 +213,44 @@ describe("archiveConversationMemory", () => {
     });
   });
 
+  it("passes a removal through only when the user's words ask for it", async () => {
+    const text = "别再记我的地址了";
+    const batch = makeBatch({
+      messages: [
+        {
+          id: "message-a",
+          role: "user",
+          content: text,
+          createdAt: "2026-11-17T09:00:00.000Z",
+          isNew: true,
+        },
+      ],
+      newSources: [{ id: "message-a", text, createdAt: "2026-11-17T09:00:00.000Z" }],
+    });
+    const removal: MemoryExtractionChange = {
+      content: "用户住在北京",
+      sourceMessageId: "message-a",
+      sourceQuote: "别再记我的地址了",
+      category: "preference",
+      replacesId: "fact-1",
+      expectedRevision: 3,
+      remove: true,
+    };
+    const unquoted: MemoryExtractionChange = { ...removal, sourceQuote: "忘掉所有记忆" };
+    const { deps, enqueue } = setup({
+      batches: [batch, null],
+      changes: [removal, unquoted],
+      applied: { saved: 0, updated: 0, skipped: 0, removed: 1 },
+    });
+
+    await archiveConversationMemory(deps, target, context);
+
+    expect(store.applyBatch).toHaveBeenCalledWith(batch, [removal], context);
+    // A tombstone changes the index too, so the sync job is still enqueued.
+    expect(enqueue).toHaveBeenCalledTimes(1);
+    expect(enqueue.mock.calls[0]?.[0]).toMatchObject({ name: "memory.sync" });
+  });
+
   it("keeps only literal new-source quotes and drops secret or placeholder content", async () => {
     const secret = "sk-live-1234567890";
     const batch = makeBatch({
@@ -313,7 +358,7 @@ describe("archiveConversationMemory", () => {
     );
     const { deps, enqueue } = setup({
       batches,
-      applied: { saved: 0, updated: 0, skipped: 0 },
+      applied: { saved: 0, updated: 0, skipped: 0, removed: 0 },
     });
 
     await archiveConversationMemory(deps, target, context);
@@ -332,7 +377,7 @@ describe("archiveConversationMemory", () => {
   it("fails explicitly when a forced drain reaches its ceiling", async () => {
     const { deps, enqueue } = setup({
       batches: [makeBatch(), makeBatch(), makeBatch()],
-      applied: { saved: 0, updated: 0, skipped: 0 },
+      applied: { saved: 0, updated: 0, skipped: 0, removed: 0 },
     });
 
     await expect(
@@ -348,25 +393,113 @@ describe("archiveConversationMemory", () => {
     );
     const { deps, enqueue } = setup({
       batches: [...batches, null],
-      applied: { saved: 0, updated: 0, skipped: 0 },
+      applied: { saved: 0, updated: 0, skipped: 0, removed: 0 },
     });
 
     await archiveConversationMemory(deps, target, context, { force: true });
 
+    // A clear covers as much of the conversation per call as one request allows.
+    expect(store.loadBatch).toHaveBeenCalledWith({ ...target, limit: 200 }, context);
     expect(store.applyBatch).toHaveBeenCalledTimes(6);
     expect(enqueue).not.toHaveBeenCalled();
   });
 
-  it("keeps recall failures visible instead of applying an empty batch", async () => {
-    const { deps } = setup({
+  it("archives without candidates when recall is down instead of failing the batch", async () => {
+    const change: MemoryExtractionChange = {
+      content: "用户偏好先写测试",
+      sourceMessageId: "message-a",
+      sourceQuote: "先把测试写出来",
+      category: "preference",
+    };
+    const { deps, extract } = setup({
       batches: [makeBatch(), null],
+      changes: [change],
       recall: { ok: false, error: "synthetic recall down" },
     });
 
+    await expect(archiveConversationMemory(deps, target, context)).resolves.toBeUndefined();
+    expect(extract.mock.calls[0]?.[0]).toMatchObject({ existing: [] });
+    expect(store.applyBatch).toHaveBeenCalledWith(expect.any(Object), [change], context);
+  });
+
+  it("does not spend a model call on an acknowledgement-only turn", async () => {
+    const batch = makeBatch({
+      messages: [
+        {
+          id: "message-a",
+          role: "user",
+          content: "谢谢",
+          createdAt: "2026-11-17T09:00:00.000Z",
+          isNew: true,
+        },
+      ],
+      newSources: [{ id: "message-a", text: "谢谢", createdAt: "2026-11-17T09:00:00.000Z" }],
+    });
+    const { deps, extract } = setup({ batches: [batch, null] });
+
+    await archiveConversationMemory(deps, target, context);
+
+    expect(extract).not.toHaveBeenCalled();
+    expect(store.applyBatch).toHaveBeenCalledWith(batch, [], context);
+  });
+
+  it("queries recall with the tail of a message longer than the index accepts", async () => {
+    const long = `${"前缀".repeat(10_000)}最后的偏好`;
+    const batch = makeBatch({
+      messages: [
+        {
+          id: "message-a",
+          role: "user",
+          content: long,
+          createdAt: "2026-11-17T09:00:00.000Z",
+          isNew: true,
+        },
+      ],
+      newSources: [{ id: "message-a", text: long, createdAt: "2026-11-17T09:00:00.000Z" }],
+    });
+    const { deps, recall } = setup({ batches: [batch, null] });
+
+    await archiveConversationMemory(deps, target, context);
+
+    const request = recall.mock.calls[0]?.[0] as { query: string } | undefined;
+    expect(Buffer.byteLength(request?.query ?? "")).toBeLessThanOrEqual(8 * 1024);
+    expect(request?.query.endsWith("最后的偏好")).toBe(true);
+  });
+
+  it("leaves short configured values out of redaction so ordinary words survive", async () => {
+    const batch = makeBatch({
+      messages: [
+        {
+          id: "message-a",
+          role: "user",
+          content: "记住 MODE 是 on 的意思",
+          createdAt: "2026-11-17T09:00:00.000Z",
+          isNew: true,
+        },
+      ],
+      newSources: [
+        { id: "message-a", text: "记住 MODE 是 on 的意思", createdAt: "2026-11-17T09:00:00.000Z" },
+      ],
+    });
+    const { deps, extract } = setup({ batches: [batch, null], secrets: ["on"] });
+
+    await archiveConversationMemory(deps, target, context);
+
+    const request = extract.mock.calls[0]?.[0] as MemoryExtractionRequest;
+    expect(request.messages[0]?.content).toBe("记住 MODE 是 on 的意思");
+  });
+
+  it("stops automatic retries when a batch keeps failing", async () => {
+    const { deps } = setup({
+      batches: [makeBatch(), null],
+      recall: { ok: true, value: [] },
+    });
+    store.applyBatch.mockRejectedValue(new Error("synthetic store failure"));
+
     await expect(archiveConversationMemory(deps, target, context)).rejects.toThrow(
-      "synthetic recall down",
+      "synthetic store failure",
     );
-    expect(store.applyBatch).not.toHaveBeenCalled();
+    expect(store.pause).toHaveBeenCalledWith(target, context);
   });
 
   it("fails explicitly instead of truncating a source over the extractor limit", async () => {
@@ -389,6 +522,25 @@ describe("archiveConversationMemory", () => {
       /extractor limit/,
     );
     expect(store.applyBatch).not.toHaveBeenCalled();
+  });
+
+  it("steps over an unextractable range during a forced clear instead of blocking it", async () => {
+    const bad = makeBatch({ fromSeq: 1, throughSeq: 2 });
+    const good = makeBatch({ fromSeq: 3, throughSeq: 4 });
+    const { deps, extract } = setup({
+      batches: [bad, good, null],
+      applied: { saved: 0, updated: 0, skipped: 0, removed: 0 },
+    });
+    extract.mockRejectedValueOnce(new Error("synthetic model failure"));
+
+    await expect(
+      archiveConversationMemory(deps, target, context, { force: true }),
+    ).resolves.toBeUndefined();
+
+    expect(store.pause).not.toHaveBeenCalled();
+    // The failed range is checkpointed empty so the clear can delete the conversation.
+    expect(store.applyBatch).toHaveBeenCalledWith(bad, [], context);
+    expect(store.applyBatch).toHaveBeenCalledWith(good, [], context);
   });
 
   it("keeps saved memory when the index sync publisher fails", async () => {
@@ -426,6 +578,8 @@ describe("reconcileAutomaticMemory", () => {
       payload: target,
       availableAt,
       keepExisting: true,
+      // A worker that died mid-extraction never unlocks its job.
+      replaceLockedBefore: expect.any(Date),
     });
   });
 });

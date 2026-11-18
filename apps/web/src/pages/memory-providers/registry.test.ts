@@ -1,4 +1,7 @@
-import { describe, expect, it } from "vitest";
+import { i18n } from "@lingui/core";
+import type { SpaceMemoryConfig } from "@rakazo/contracts";
+import { afterEach, describe, expect, it } from "vitest";
+import { memoryProviderSettings } from "./registry";
 import {
   SERENITY_ENDPOINT_PLACEHOLDER,
   serenityConnectionDraft,
@@ -57,5 +60,51 @@ describe("Serenity memory provider settings", () => {
         credentials: { token: "sk_live_example" },
       },
     });
+  });
+});
+
+describe("Memory provider labels", () => {
+  function config(settings: Record<string, string>): SpaceMemoryConfig {
+    return {
+      provider: "fixture",
+      settings,
+      defaultMemoryScope: "isolated",
+      updatedAt: "",
+    } as SpaceMemoryConfig;
+  }
+
+  afterEach(() => {
+    i18n.load("en", {});
+    i18n.activate("en");
+  });
+
+  it("reads provider names and connection descriptions through the shared catalog", () => {
+    i18n.load("zh-CN", {
+      "Local memory": "本地记忆",
+      "read/write": "读写",
+      "recall only": "仅召回",
+      "Self-hosted ({baseUrl})": "自托管（{baseUrl}）",
+      "Honcho Cloud": "Honcho 云端",
+    });
+    i18n.activate("zh-CN");
+    expect(memoryProviderSettings("local")?.name).toBe("本地记忆");
+    expect(
+      memoryProviderSettings("serenity")?.connectedLabel(
+        config({ endpoint: "http://brain", allowWrites: "false" }),
+      ),
+    ).toBe("http://brain, 仅召回");
+    expect(
+      memoryProviderSettings("serenity")?.connectedLabel(
+        config({ endpoint: "http://brain", allowWrites: "true" }),
+      ),
+    ).toBe("http://brain, 读写");
+    expect(memoryProviderSettings("honcho")?.connectedLabel(config({ mode: "cloud" }))).toBe(
+      "Honcho 云端",
+    );
+    expect(
+      memoryProviderSettings("honcho")?.connectedLabel(
+        config({ mode: "local", baseUrl: "http://h" }),
+      ),
+    ).toBe("自托管（http://h）");
   });
 });

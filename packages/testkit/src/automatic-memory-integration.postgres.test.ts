@@ -663,15 +663,14 @@ postgres("automatic memory synthetic integration (isolated PostgreSQL)", () => {
     enqueued.length = 0;
     await archiveConversationMemory(deps, target, ctx);
     expect(stageCursor).toBe(1);
-    const afterRestatement = (await listFacts(true)).filter(
-      (fact) => fact.content === content.reference,
-    );
-    expect(afterRestatement).toHaveLength(1);
-    expect(afterRestatement[0]).toMatchObject({
-      id: reference!.id,
+    const afterRestatement = await listFacts(true);
+    expect(afterRestatement.find((fact) => fact.id === reference!.id)).toMatchObject({
+      content: "[forgotten]",
       revision: 2,
       status: "forgotten",
     });
+    // Forgetting erases the stored body, and the restatement must not have re-created it.
+    expect(afterRestatement.some((fact) => fact.content === content.reference)).toBe(false);
     expect(enqueued).toHaveLength(0);
     const recalledForgotten = await recall("AM-K3V");
     expect(recalledForgotten.filter((result) => result.id === reference!.id)).toEqual([]);
@@ -775,9 +774,11 @@ postgres("automatic memory synthetic integration (isolated PostgreSQL)", () => {
       revision: 1,
       status: "active",
     });
-    expect(afterClear.filter((fact) => fact.content === content.reference)).toEqual([
-      expect.objectContaining({ id: reference!.id, revision: 2, status: "forgotten" }),
-    ]);
+    expect(afterClear.find((fact) => fact.id === reference!.id)).toMatchObject({
+      content: "[forgotten]",
+      revision: 2,
+      status: "forgotten",
+    });
     const recalledAfterClear = await recall("AM-J7Q");
     expect(recalledAfterClear.find((result) => result.id === f1.id)).toMatchObject({
       revision: 2,
@@ -797,6 +798,7 @@ postgres("automatic memory synthetic integration (isolated PostgreSQL)", () => {
       saved: 0,
       updated: 0,
       skipped: 1,
+      removed: 0,
     });
     expect((await listFacts(true)).filter((fact) => fact.content === content.project)).toHaveLength(
       1,

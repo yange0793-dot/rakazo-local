@@ -275,6 +275,30 @@ describe("semantic fact management routes", () => {
     ]);
   });
 
+  it("leaves forgotten facts out of the export while still paging the history", async () => {
+    const { client, listFacts } = setup();
+    const forgotten: SemanticFact = {
+      ...fact,
+      id: "fact-3",
+      revision: 3,
+      status: "forgotten",
+      content: "[forgotten]",
+    };
+    listFacts.mockResolvedValueOnce({
+      ok: true,
+      value: { supported: true, items: [fact, forgotten], nextCursor: "page-2" },
+    });
+    listFacts.mockResolvedValueOnce({
+      ok: true,
+      value: { supported: true, items: [], nextCursor: null },
+    });
+    await expect(client.memory.exportFacts(target)).resolves.toEqual({
+      format: "rakazo-semantic-memory-v1",
+      facts: [fact],
+    });
+    expect(listFacts).toHaveBeenCalledTimes(2);
+  });
+
   it("does not return a partial export or empty success on provider failure", async () => {
     const { client, listFacts } = setup();
     listFacts.mockResolvedValueOnce({

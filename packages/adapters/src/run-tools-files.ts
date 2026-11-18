@@ -7,7 +7,7 @@ import {
 } from "@rakazo/core";
 import type { Artifact, Prisma } from "@rakazo/db";
 import { getLogger } from "@rakazo/logging";
-import { resolveBotWorkspacePath } from "./computer-support.js";
+import { resolveBotWorkspacePath, resolveBotWorkspaceWritePath } from "./computer-support.js";
 import { desktopGuardApplies, desktopProtectionGuardMessage } from "./desktop-command-guard.js";
 import { protectedActivateScriptWriteRefusal } from "./desktop-guard-words.js";
 import { generateMediaFromTool } from "./media-generation-tools.js";
@@ -107,7 +107,7 @@ export const fileTools: ToolHandlers = {
     try {
       await deps.sandbox.writeFile(
         await ctx.computer.get("tool", name),
-        { path: resolveBotWorkspacePath(ctx.computer.mode, bot.id, filePath), content },
+        { path: resolveBotWorkspaceWritePath(ctx.computer.mode, bot.id, filePath), content },
         context,
       );
     } catch (error) {

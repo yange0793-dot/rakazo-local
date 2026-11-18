@@ -13,6 +13,10 @@ export { deriveMcpSlug } from "@rakazo/core";
 
 const MAX_HEADERS = 32;
 
+/** The setting hint the safe-url check appends; this path does not honour that setting. */
+const PRIVATE_ENDPOINT_HINT =
+  " Set MCP_ALLOW_PRIVATE_ENDPOINT=true on the API and worker to allow it.";
+
 export type ParsedMcpServerArgs = {
   slug: string;
   name: string;
@@ -124,6 +128,16 @@ export function needsOAuthProbe(parsed: {
   return !parsed.secret && Object.keys(env).length === 0 && Object.keys(headers).length === 0;
 }
 
+/**
+ * A request the bot can never carry out, whatever the owner answers: a local server runs on the
+ * deployment's own hosts, so only an admin adds one. The gate refuses it before any card.
+ */
+export function mcpServerPreapprovalRefusal(args: Record<string, unknown>): string | undefined {
+  return args.transport === "stdio"
+    ? "Bots can't add local (stdio) MCP servers. Ask an admin to add it in Settings."
+    : undefined;
+}
+
 /** add_mcp_server: registers the server and, when asked, posts its approval card. */
 export async function addMcpServerFromTool(
   deps: ExecutorDeps,
@@ -133,11 +147,8 @@ export async function addMcpServerFromTool(
   executionId: string,
 ) {
   // A local server runs on the deployment's own hosts, so only an admin adds one.
-  if (args.transport === "stdio") {
-    return {
-      error: "Bots can't add local (stdio) MCP servers. Ask an admin to add it in Settings.",
-    };
-  }
+  const localRefusal = mcpServerPreapprovalRefusal(args);
+  if (localRefusal) return { error: localRefusal };
   const parsed = parseMcpServerToolArgs(args);
   if (!parsed) {
     return {
@@ -146,13 +157,19 @@ export async function addMcpServerFromTool(
     };
   }
   try {
-    await assertSafeRemoteUrl(parsed.endpoint, deps.secretHttp?.resolveHostname, {
-      allowPrivateEndpoint: deps.mcpAllowPrivateEndpoint === true,
-    });
+    // The private-endpoint escape is for an admin adding a server by hand, not for a bot: text a
+    // run read must not be able to register a server on this host or the local network.
+    await assertSafeRemoteUrl(parsed.endpoint, deps.secretHttp?.resolveHostname);
     assertNoMcpEndpointCredential(parsed.endpoint);
   } catch (error) {
+    const message = error instanceof Error ? error.message : "Invalid MCP endpoint";
     return {
-      error: error instanceof Error ? error.message : "Invalid MCP endpoint",
+      // The safe-url check names the deployment setting; here it does not lift the refusal, so
+      // point at the only way a private endpoint gets added.
+      error: message.replace(
+        PRIVATE_ENDPOINT_HINT,
+        " Ask an admin to add a private address in Settings.",
+      ),
     };
   }
   if (!deps.secretStore) {

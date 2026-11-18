@@ -102,6 +102,10 @@ describe("gateway catalog adapter", () => {
     await expect(createMixRouterCatalogSource(config, missing).read()).rejects.toThrow(
       "configured group",
     );
+    const empty = vi
+      .fn<typeof fetch>()
+      .mockResolvedValue(Response.json({ providers: { claude: [] } }));
+    await expect(createMixRouterCatalogSource(config, empty).read()).rejects.toThrow("no channels");
     const failed = vi.fn<typeof fetch>().mockResolvedValue(new Response("", { status: 503 }));
     await expect(createMixRouterCatalogSource(config, failed).read()).rejects.toThrow("HTTP 503");
   });

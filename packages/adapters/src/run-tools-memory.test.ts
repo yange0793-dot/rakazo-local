@@ -110,7 +110,8 @@ describe("semantic save arguments", () => {
     { content: "fact", replaces_id: "fact-1", expected_revision: "1" },
     { content: "fact", source_quote: " " },
     { content: "fact", source_quote: null },
-    { content: " " },
+    { content: "fact", entity: "namespace-1" },
+    { content: "fact", entity: " " },
     { content: 3 },
   ])("rejects malformed save/correction %j", (args) => {
     expect(semanticMemorySaveArguments(args, true)).toHaveProperty("error");
@@ -128,6 +129,25 @@ describe("semantic save arguments", () => {
     });
     expect(semanticMemorySaveArguments({ content: "ordinary fact" }, false)).toEqual({
       content: "ordinary fact",
+    });
+  });
+
+  it("keeps the recall citation's namespace for a correction only", () => {
+    expect(
+      semanticMemorySaveArguments(
+        {
+          content: "corrected fact",
+          replaces_id: "fact-1",
+          expected_revision: 2,
+          entity: "sm1:namespace-1",
+        },
+        true,
+      ),
+    ).toEqual({
+      content: "corrected fact",
+      replacesId: "fact-1",
+      expectedRevision: 2,
+      entity: "sm1:namespace-1",
     });
   });
 });
@@ -308,6 +328,27 @@ describe("source-bound semantic saves", () => {
       ctx.context,
     );
     expect(forget).not.toHaveBeenCalled();
+  });
+
+  it("forwards the recall citation's entity so a cross-scope correction reaches its fact", async () => {
+    const { ctx, save } = semanticToolContext();
+    await memoryTools.save_memory!(
+      ctx,
+      memoryCall("save_memory", {
+        content: "The user now prefers previews.",
+        replaces_id: "fact-1",
+        expected_revision: 4,
+        entity: "sm1:shared-namespace",
+      }),
+    );
+    expect(save).toHaveBeenCalledWith(
+      expect.objectContaining({
+        replacesId: "fact-1",
+        expectedRevision: 4,
+        entity: "sm1:shared-namespace",
+      }),
+      ctx.context,
+    );
   });
 
   it("returns provider conflicts truthfully as failures without retrying a correction", async () => {

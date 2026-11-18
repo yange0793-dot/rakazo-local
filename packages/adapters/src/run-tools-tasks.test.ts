@@ -1,4 +1,4 @@
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { RunContext } from "./run-context.js";
 import type { ToolCall } from "./run-tool-gate.js";
 import { taskTools } from "./run-tools-tasks.js";
@@ -99,5 +99,149 @@ describe("routine tools in a group run", () => {
       ).resolves.toEqual({ error: "Schedule not found." });
     }
     expect(deleteMany).not.toHaveBeenCalled();
+  });
+});
+
+/** This chat's finished runs, filtered like the database would. */
+function reflectionRun(
+  finishedRunIds: string[] = ["run-finished"],
+  skills: unknown[] = [],
+  sourceMessageId: string | null = null,
+) {
+  const findFirst = vi.fn(async ({ where }: { where: Record<string, unknown> }) => {
+    const id = where.id;
+    if (typeof id === "string") return finishedRunIds.includes(id) ? { id } : null;
+    return finishedRunIds.length ? { id: finishedRunIds[finishedRunIds.length - 1] } : null;
+  });
+  const skillFindFirst = vi.fn(async () => skills[0] ?? null);
+  const enqueue = vi.fn(async () => undefined);
+  const ctx = {
+    deps: {
+      prisma: { run: { findFirst }, taughtSkill: { findFirst: skillFindFirst } },
+      jobs: { enqueue },
+    },
+    run: { id: "run-current", spaceId: "space-1", userId: "user-1", sourceMessageId },
+    runId: "run-current",
+    bot: { id: "bot-1", name: "Bot" },
+    thread: { id: "thread-1", groupId: null },
+    source: { ownerStartedRun: true },
+    tools: { offered: [] },
+  } as unknown as RunContext;
+  const call = (args: Record<string, unknown> = {}) =>
+    ({
+      name: "reflect_on_run",
+      args,
+      finish: async (result: unknown) => result,
+    }) as unknown as ToolCall;
+  return { ctx, call, findFirst, skillFindFirst, enqueue };
+}
+
+describe("reflect_on_run", () => {
+  const savedSelfEvolution = process.env.SELF_EVOLUTION;
+  beforeEach(() => {
+    process.env.SELF_EVOLUTION = "1";
+  });
+  afterEach(() => {
+    if (savedSelfEvolution === undefined) delete process.env.SELF_EVOLUTION;
+    else process.env.SELF_EVOLUTION = savedSelfEvolution;
+  });
+
+  it("queues a review of the finished run it was asked for", async () => {
+    const { ctx, call, enqueue } = reflectionRun();
+    await expect(taskTools.reflect_on_run!(ctx, call({ runId: "run-finished" }))).resolves.toEqual({
+      ok: true,
+      runId: "run-finished",
+      hint: "Short lessons the review saves appear on this bot's memory page under Experience; a draft skill card appears in this chat only if something reusable turns up, and the user must review and save it.",
+    });
+    expect(enqueue).toHaveBeenCalledTimes(1);
+    expect(enqueue).toHaveBeenCalledWith({
+      name: "harness.reflect",
+      payload: { runId: "run-finished" },
+      replaceKey: "harness.reflect:run-finished",
+      maxAttempts: 2,
+    });
+  });
+
+  it("leaves the asking message out of the review's follow-up reading", async () => {
+    const { ctx, call, enqueue } = reflectionRun(["run-finished"], [], "message-that-asked");
+    await taskTools.reflect_on_run!(ctx, call({ runId: "run-finished" }));
+    expect(enqueue).toHaveBeenCalledWith(
+      expect.objectContaining({
+        payload: { runId: "run-finished", exceptMessageId: "message-that-asked" },
+      }),
+    );
+  });
+
+  it("refuses when reviewing runs is turned off, without queueing", async () => {
+    const { ctx, call, enqueue } = reflectionRun();
+    delete process.env.SELF_EVOLUTION;
+    try {
+      await expect(taskTools.reflect_on_run!(ctx, call())).resolves.toEqual({
+        error: "Reviewing a run is turned off in this deployment.",
+      });
+    } finally {
+      if (savedSelfEvolution === undefined) delete process.env.SELF_EVOLUTION;
+      else process.env.SELF_EVOLUTION = savedSelfEvolution;
+    }
+    expect(enqueue).not.toHaveBeenCalled();
+  });
+
+  it("reports an unknown run id as not a finished run here, without queueing", async () => {
+    const { ctx, call, enqueue } = reflectionRun();
+    await expect(taskTools.reflect_on_run!(ctx, call({ runId: "run-elsewhere" }))).resolves.toEqual(
+      { error: "That run is not a finished run in this chat." },
+    );
+    expect(enqueue).not.toHaveBeenCalled();
+  });
+
+  it("reports the run's existing skill instead of queueing a second review", async () => {
+    const { ctx, call, enqueue } = reflectionRun(
+      ["run-finished"],
+      [
+        {
+          id: "skill-9",
+          name: "Daily Notes",
+          status: "saved",
+          recording: { evidence: { runIds: ["run-finished"] } },
+        },
+      ],
+    );
+    await expect(taskTools.reflect_on_run!(ctx, call({ runId: "run-finished" }))).resolves.toEqual({
+      ok: true,
+      runId: "run-finished",
+      alreadyReviewed: true,
+      skill: { id: "skill-9", name: "Daily Notes", status: "saved" },
+      hint: 'This run already produced the skill "Daily Notes" (saved); no new draft will be created. Edit that skill instead, or delete it first to review this run again.',
+    });
+    expect(enqueue).not.toHaveBeenCalled();
+  });
+
+  it("reviews the latest finished run when none was named", async () => {
+    const { ctx, call, findFirst, enqueue } = reflectionRun();
+    await expect(taskTools.reflect_on_run!(ctx, call())).resolves.toMatchObject({
+      ok: true,
+      runId: "run-finished",
+    });
+    expect(findFirst).toHaveBeenCalledWith({
+      where: {
+        spaceId: "space-1",
+        botId: "bot-1",
+        threadId: "thread-1",
+        status: { in: ["completed", "failed", "cancelled"] },
+        id: { not: "run-current" },
+      },
+      orderBy: { createdAt: "desc" },
+      select: { id: true },
+    });
+    expect(enqueue).toHaveBeenCalledTimes(1);
+  });
+
+  it("refuses in a group, where the card would land in another chat", async () => {
+    const { ctx, call, enqueue } = reflectionRun();
+    (ctx.thread as { groupId: string | null }).groupId = "group-1";
+    await expect(taskTools.reflect_on_run!(ctx, call())).resolves.toEqual({
+      error: "Run reviews happen in the bot's own chat.",
+    });
+    expect(enqueue).not.toHaveBeenCalled();
   });
 });

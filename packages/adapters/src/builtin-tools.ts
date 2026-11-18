@@ -50,7 +50,7 @@ function secretAskToolSurface() {
       allowPrivateHttpOrigins
         ? "HTTPS origin, or an HTTP origin on a private LAN host"
         : "HTTPS origin"
-    }, or connectionId for a one-use connector code. Credential names must start with a lowercase letter and use only lowercase letters, digits, hyphens, or underscores (max 64 characters). For a website login the user wants saved, use auth {type:"login"} with the HTTPS origin of the sign-in form's page or frame, and fields with the labels the site signs in with (default Username and Password); the card asks for each, and browser_act fill_secret types one by its label. The user decides which fields are hidden: a hidden field is typed only into a password field. A field whose label is an ID, phone, email or username starts visible on the card and any other starts hidden, so label each field by what the site calls it. If one is refused in another field, ask again with replace true so the user can make it visible. The user may choose not to save a login: the result then says saved false, the login works only until this run ends, and a later run must ask again, so never say it was saved. For a value this bot's shell commands need, use auth {type:"command"} with no origin; it is exported to them as an environment variable named after the credential in upper case with hyphens as underscores (netbird-setup-key becomes $NETBIRD_SETUP_KEY). Use auth {type:"card"} for a payment card, which you see only as brand, last four and expiry, and {type:"contact"} for an address, phone or email named for who or where (home, mom); neither has an origin. Existing named credentials are reused unless replace is true, as is a site's saved login. A sign-in without a password, such as fields ["ID number","Phone"], still uses auth {type:"login"}; never ask for those in chat or on the screen. For a code the site texted or emailed, use oneTimeCode {origin} with the page's HTTPS origin: you never see the code, browser_act fill_code types it, and a wrong or new code needs a new request. Never ask for a code in chat. For CAPTCHA, passkeys, or anything else that needs the live desktop, call request_takeover.`,
+    }, or connectionId for a one-use connector code. Names start with a lowercase letter and use only lowercase letters, digits, hyphens or underscores (max 64). For a saved website login use auth {type:"login"} with the sign-in form's HTTPS origin and the labels the site signs in with (default Username and Password); the card asks for each and browser_act fill_secret types one by its label. Hidden fields take text only in a password field; a field labelled ID, phone, email or username starts visible and any other hidden, so label each by what the site calls it. If one is refused, ask again with replace true so the user can make it visible. A login the user does not save works only until this run ends; the result says saved false, so never say it was saved. For a value this bot's shell commands need, use auth {type:"command"} with no origin; it reaches them as an environment variable named after the credential in upper case with hyphens as underscores (netbird-setup-key becomes $NETBIRD_SETUP_KEY). Use auth {type:"card"} for a payment card, seen only as brand, last four and expiry, and {type:"contact"} for an address, phone or email named for who or where (home, mom); neither has an origin. Existing credentials and a site's saved login are reused unless replace is true. A sign-in without a password, such as fields ["ID number","Phone"], still uses auth {type:"login"}; never ask for those in chat or on the screen. For a code the site texted or emailed, use oneTimeCode {origin} with the page's origin: you never see it, browser_act fill_code types it, and a wrong or new code needs a new request. Never ask for a code in chat. For CAPTCHA, passkeys or anything else needing the live desktop, call request_takeover.`,
     inputSchema: {
       oneOf: [
         {
@@ -462,7 +462,7 @@ export const builtinAgentTools: ConnectorTool[] = [
   {
     name: "attach_file",
     description:
-      "Attach a workspace file from this bot's home to the chat thread as an image or common file. The user sees it; you do not. The file stays in place; users can open it from the message and from the Artifacts tab. For a self-contained HTML page, document, or anything else meant to be viewed on its own — give it name and description: a title and a one-line summary. Skip them for an ordinary attachment like a log file or export. To UPDATE something you already made, call this again with the exact same name — it becomes a new version of that same artifact instead of a separate one; a different name always starts a new artifact.",
+      "Attach a file from this bot's home to the chat as an image or common file. The user sees it; you do not, and it stays in place, openable from the message and the Artifacts tab. Use it for images, screenshots, logs and exports the user asked for. A page to view on its own — a dashboard, report, tracker, comparison, game or animation — belongs in save_page, not here as .html. For a document viewed on its own, such as a PDF, give name and description (a title and one-line summary); skip them for a log or export. To update something you already made, call this again with the exact same name — it becomes a new version of that artifact, while a different name starts a new one.",
     inputSchema: {
       type: "object",
       properties: {
@@ -476,7 +476,7 @@ export const builtinAgentTools: ConnectorTool[] = [
   {
     name: "shell",
     description:
-      "Run a command inside this bot's computer. cwd defaults to the bot's folder on a Team Computer and the workspace root on a Private Computer. Output can arrive while the command is still running; tell the user any one-time code or sign-in URL in that output. A command is stopped after a few minutes, so on Linux or macOS start longer work, such as a coding agent CLI, as its own statement `nohup <command> < /dev/null > <log> 2>&1 &`, never after `&&`, and read the log to follow it.",
+      "Run a command in this bot's computer. cwd defaults to the bot's folder on a Team Computer and the workspace root on a Private Computer. Output can arrive while the command runs; tell the user any one-time code or sign-in URL in it. A command is stopped after a few minutes, so on Linux or macOS start longer work, such as a coding agent CLI, as its own statement `nohup <command> < /dev/null > <log> 2>&1 &`, never after `&&`, and read the log to follow it.",
     inputSchema: {
       type: "object",
       properties: {
@@ -623,7 +623,7 @@ export const builtinAgentTools: ConnectorTool[] = [
     name: "message_user",
     // Read lazily: the cap comes from process.env, which may be filled after import.
     get description() {
-      return `Post a short progress update to the user in this chat immediately, in the same language as their request. Does not end your turn. Use sparingly during long work for high-signal beats (what you are checking, then a result). Do not dump tool logs, thinking, or a play-by-play of every call. HARD LIMIT: cut off silently at ${messageUserMaxLength()} characters, so never put your final answer, a report, or any long-form content here \u2014 it will arrive mangled and the user will never see the rest. Always write your complete final answer in your normal reply, not here.`;
+      return `Post a short progress update in this chat immediately, in their language. Does not end your turn. Use sparingly during long work for high-signal beats (what you are checking, then a result). Do not dump tool logs, thinking, or a play-by-play of every call. HARD LIMIT: cut off silently at ${messageUserMaxLength()} characters, so never put your final answer, a report, or any long-form content here \u2014 it will arrive mangled and the user will never see the rest. Always write your complete final answer in your normal reply, not here.`;
     },
     get inputSchema() {
       return {
@@ -719,7 +719,7 @@ export const builtinAgentTools: ConnectorTool[] = [
   {
     name: "save_page",
     description:
-      'Save a page the user opens from the chat: a dashboard, report, tracker or comparison. Pass the page as JSX source written against the Rakazo page kit; call with {"help": true} first for the kit guide. Problems come back with line numbers and nothing is saved. To change a page, pass its pageId with edits (applied together, or not at all) or full source; pass only pageId to read its current source. A result with sharedByLink is a page the user shared: anyone with its link sees each save at once.',
+      'Make a page the user opens from the chat: a dashboard, report, tracker, comparison, game, animation or any other self-contained visual. Pass the page as JSX source written against the Rakazo page kit; plain HTML and SVG elements are allowed for custom visuals, and an attached .html file is not a substitute. Call with {"help": true} first for the kit guide. Problems come back with line numbers and nothing is saved. To change a page, pass its pageId with edits (applied together, or not at all) or full source; pass only pageId to read its current source. A result with sharedByLink is a page the user shared: anyone with its link sees each save at once.',
     inputSchema: {
       type: "object",
       properties: {
@@ -1005,7 +1005,7 @@ export const builtinAgentTools: ConnectorTool[] = [
   {
     name: "search_history",
     description:
-      "Search literal keywords in earlier messages and their file names (default this_chat); every word of a query must match the same message. To find an earlier conversation, fan out 2–4 keyword variants via queries with scope my_chats; narrow by date or botId when hinted. my_chats requires a direct human app run. Returns at most five matches, newest first, grouped by chat; matchedQueryIndexes are zero-based indexes into queries. Then read_history around the best hits using their threadId. When nextSearch is present, call search_history with those arguments to continue. Coverage applies only to the requested literal query and range; an empty narrower query does not exhaust an unfinished broader query. Use read_history to check surrounding messages and corrections. Read a listed attachment at its path and name it in your answer.",
+      "Search literal keywords in earlier messages and their file names (default this_chat); every word must match the same message. To find an earlier conversation, fan out 2–4 variants via queries with scope my_chats (which requires a direct human app run); narrow by date or botId when hinted. Returns at most five matches, newest first, grouped by chat; matchedQueryIndexes index into queries. Then read_history around the best hits using their threadId. When nextSearch is present, call again with those arguments. Coverage applies only to the requested literal query and range, so an empty narrower query does not exhaust an unfinished broader one. Read a listed attachment at its path and name it.",
     inputSchema: {
       type: "object",
       properties: {
@@ -1220,6 +1220,12 @@ export const builtinAgentTools: ConnectorTool[] = [
           type: "integer",
           minimum: 1,
           description: "Revision from the existing fact's recall citation; requires replaces_id.",
+        },
+        entity: {
+          type: "string",
+          minLength: 1,
+          description:
+            "Namespace from a recall citation; required to correct a fact recalled from another scope.",
         },
       },
       required: ["content"],
@@ -1586,9 +1592,23 @@ export const builtinAgentTools: ConnectorTool[] = [
     },
   },
   {
+    name: "reflect_on_run",
+    description:
+      "Review one finished run in this chat and keep what it teaches: short private lessons for later runs, plus a skill draft when something reusable turns up. Use it when the user says a run went wrong or asks to learn from it. The draft changes nothing until the user saves it.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        runId: {
+          type: "string",
+          description: "Optional run id. Omit to review the most recent finished run in this chat.",
+        },
+      },
+    },
+  },
+  {
     name: "run_subagent",
     description:
-      "A helper, not a bot: no thread, no list entry, and it works on this bot's computer, including the page browser. It reads and writes files and runs commands; a tool that needs the owner's approval shows its card in this chat, and it cannot ask the user, buy anything, type saved logins or cards, or change memory, skills or routines. It always works in the background, and its result comes back to you later as a new message, so end your turn instead of waiting for it. Never call this because the user asked to create a bot — that is spawn_bot, and spawn_bot alone.",
+      "A helper, not a bot: no thread, no list entry, and it works on this bot's computer, including the page browser. It reads and writes files and runs commands; a tool needing the owner's approval shows its card in this chat, and it cannot ask the user, buy anything, type saved logins or cards, or change memory, skills or routines. It works in the background and its result arrives later as a new message, so end your turn instead of waiting. Never call it to create a bot — that is spawn_bot alone.",
     inputSchema: {
       type: "object",
       properties: {

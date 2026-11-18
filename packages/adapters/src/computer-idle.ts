@@ -14,7 +14,12 @@ import {
   WorkspaceTooLargeError,
 } from "@rakazo/adapter-kit";
 import { COMPUTER_ALLOWANCE_USED_ERROR } from "@rakazo/contracts";
-import { COMPUTER_USING_RUNS, QUEUE_HOLDING_RUN_STATUSES, withAbort } from "@rakazo/core";
+import {
+  BACKGROUND_HELPER_TRIGGER,
+  COMPUTER_USING_RUNS,
+  QUEUE_HOLDING_RUN_STATUSES,
+  withAbort,
+} from "@rakazo/core";
 import type { PrismaClient, ThreadEvents } from "@rakazo/db";
 import {
   appendEventInTransaction,
@@ -1012,6 +1017,11 @@ function loadComputer(prisma: PrismaClient, computerId: string) {
   });
 }
 
+/**
+ * A run of this bot that is about to need the computer. Helpers are left out: one that is only
+ * reasoning holds nothing, and one that runs a computer tool holds a live execution lease, which
+ * the sleep claim itself refuses to pass.
+ */
 function findActiveRun(
   prisma: PrismaClient,
   computerId: string,
@@ -1022,6 +1032,7 @@ function findActiveRun(
     where: {
       bot: { computerId },
       ...COMPUTER_USING_RUNS,
+      trigger: { not: BACKGROUND_HELPER_TRIGGER },
       status: { in: statuses as (typeof QUEUE_HOLDING_RUN_STATUSES)[number][] },
       ...(liveLeaseOnly ? { leaseExpiresAt: { gt: new Date(Date.now()) } } : {}),
     },

@@ -206,6 +206,14 @@ export function buildPlaybookFromRecording(
 
 const SKILL_RUN_PROMPT_PREFIX = "run taught skill:";
 const SKILL_INVOCATION_VERB = /\b(run|use|do|repeat|perform|execute)\b/;
+// Chinese has no spaces before the name, so the English word boundary never fires. A CJK name is
+// matched as a substring instead, and counts only with an invocation verb ending right before it
+// ("用 X 技能", "按 X 做") or a skill noun right after it ("X 技能…").
+const CJK_CHARACTER = /\p{Script=Han}|[぀-ヿ]/u;
+const CJK_VERB_BEFORE =
+  /(?:用|使用|运行|执行|跑|按|按照|依照|照着|照|套用|走)\s*(?:一下|一遍|下)?\s*(?:技能)?\s*[「“"']?\s*$/u;
+const CJK_SKILL_SUFFIX =
+  /^\s*(?:这个|那个)?\s*(?:技能|流程|模板|格式|步骤|方法|方案|指南|清单|规则)/u;
 
 function escapeRegExp(value: string): string {
   return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
@@ -219,10 +227,30 @@ function escapeRegExp(value: string): string {
 export function promptInvokesSkill(prompt: string, name: string): boolean {
   const skill = name.trim().toLowerCase();
   const text = prompt.toLowerCase();
-  if (skill.length < 3) return false;
   if (text.startsWith(SKILL_RUN_PROMPT_PREFIX)) return false;
-  if (!SKILL_INVOCATION_VERB.test(text)) return false;
-  return new RegExp(`(^|[^\\p{L}\\p{N}])${escapeRegExp(skill)}([^\\p{L}\\p{N}]|$)`, "u").test(text);
+  // Two-character names are ordinary in Chinese, so CJK names take the shorter floor.
+  if (CJK_CHARACTER.test(skill)) return cjkNameInvoked(text, skill);
+  if (skill.length < 3) return false;
+  const match = new RegExp(
+    `(^|[^\\p{L}\\p{N}])(${escapeRegExp(skill)})([^\\p{L}\\p{N}]|$)`,
+    "u",
+  ).exec(text);
+  if (!match) return false;
+  if (SKILL_INVOCATION_VERB.test(text)) return true;
+  const nameStart = match.index + (match[1]?.length ?? 0);
+  const before = text.slice(0, nameStart);
+  const after = text.slice(nameStart + (match[2]?.length ?? skill.length));
+  return CJK_VERB_BEFORE.test(before) || CJK_SKILL_SUFFIX.test(after);
+}
+
+function cjkNameInvoked(text: string, skill: string): boolean {
+  if ([...skill].length < 2) return false;
+  for (let index = text.indexOf(skill); index >= 0; index = text.indexOf(skill, index + 1)) {
+    const before = text.slice(0, index);
+    const after = text.slice(index + skill.length);
+    if (CJK_VERB_BEFORE.test(before) || CJK_SKILL_SUFFIX.test(after)) return true;
+  }
+  return false;
 }
 
 export function formatSkillRunPrompt(name: string, playbook: SkillPlaybook, test = false): string {

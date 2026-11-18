@@ -7,6 +7,7 @@ import type {
 import type { PrismaClient } from "@rakazo/db";
 import { currentDbContext } from "@rakazo/db";
 import { beforeEach, describe, expect, it, vi } from "vitest";
+import { LOCAL_MEMORY_PROVIDER_ID } from "./local-memory-index.js";
 import { reconcileSemanticMemoryIndex, syncSemanticMemorySpace } from "./semantic-memory-sync.js";
 
 const pendingIndexWork = vi.hoisted(() => vi.fn());
@@ -102,13 +103,38 @@ describe("semantic index synchronization", () => {
       { ...pointer, id: "work-b" },
       { id: "work-c", spaceId: "space-b", userId: "user-b" },
     ]);
+    const configured = {
+      spaceMemoryConfig: {
+        findMany: vi.fn(async () => [{ spaceId: "space-a" }, { spaceId: "space-b" }]),
+      },
+    } as unknown as PrismaClient;
     const enqueue = vi.fn(async (_job: BackgroundJob) => undefined);
-    await reconcileSemanticMemoryIndex({ prisma, jobs: { enqueue } as unknown as JobPublisher });
+    await reconcileSemanticMemoryIndex({
+      prisma: configured,
+      jobs: { enqueue } as unknown as JobPublisher,
+    });
+    expect(configured.spaceMemoryConfig.findMany).toHaveBeenCalledWith({
+      where: { spaceId: { in: ["space-a", "space-b"] }, provider: LOCAL_MEMORY_PROVIDER_ID },
+      select: { spaceId: true },
+    });
     expect(enqueue).toHaveBeenCalledTimes(2);
     expect(enqueue.mock.calls.map(([job]) => job.payload)).toEqual([
       { spaceId: "space-a" },
       { spaceId: "space-b" },
     ]);
     expect(enqueue.mock.calls.every(([job]) => job.keepExisting === true)).toBe(true);
+  });
+
+  it("does not re-enqueue a space whose memory provider is disconnected", async () => {
+    pendingIndexWork.mockResolvedValue([pointer]);
+    const disconnected = {
+      spaceMemoryConfig: { findMany: vi.fn(async () => []) },
+    } as unknown as PrismaClient;
+    const enqueue = vi.fn(async (_job: BackgroundJob) => undefined);
+    await reconcileSemanticMemoryIndex({
+      prisma: disconnected,
+      jobs: { enqueue } as unknown as JobPublisher,
+    });
+    expect(enqueue).not.toHaveBeenCalled();
   });
 });

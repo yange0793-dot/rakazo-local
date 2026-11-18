@@ -32,6 +32,22 @@ export function projectCatalogChannel(
     aliases[`${channel!.label}/${model.label}`] = model.id;
     aliases[`${label}/${model.label}`] = model.id;
   }
+  // A channel deleted and recreated upstream keeps its selections: the old
+  // `<providerId>/<model>` ids still route to the same models under the new id.
+  const previousProviderId = previous.managedCatalog?.providerId;
+  const replacedProviderId =
+    previousProviderId !== undefined && previousProviderId !== providerId
+      ? previousProviderId
+      : undefined;
+  if (replacedProviderId !== undefined)
+    for (const model of channel?.models ?? []) {
+      aliases[`${replacedProviderId}/${model.label}`] = model.id;
+    }
+  const previousCapabilities = (model: { id: string; label: string }) =>
+    previous.managedCatalog?.capabilities[model.id] ??
+    (replacedProviderId !== undefined
+      ? previous.managedCatalog?.capabilities[`${replacedProviderId}/${model.label}`]
+      : undefined);
   const unavailableModelIds = [
     ...new Set([
       ...(previous.managedCatalog?.unavailableModelIds ?? []),
@@ -47,11 +63,21 @@ export function projectCatalogChannel(
     availableModelIds,
     unavailableModelIds,
     ...(previous.managedCatalog?.disabledModelIds
-      ? { disabledModelIds: previous.managedCatalog.disabledModelIds }
+      ? {
+          disabledModelIds: previous.managedCatalog.disabledModelIds.map((id) => aliases[id] ?? id),
+        }
       : {}),
     aliases,
     capabilities: Object.fromEntries(
-      (channel?.models ?? []).map((model) => [model.id, model.capabilities]),
+      (channel?.models ?? []).map((model) => {
+        // A source that reports no capabilities keeps the last declared ones instead
+        // of silently dropping a known context window or thinking levels.
+        const kept = previousCapabilities(model);
+        return [
+          model.id,
+          model.capabilities.source === "unknown" && kept ? kept : model.capabilities,
+        ];
+      }),
     ),
   };
   return {
@@ -287,8 +313,11 @@ export class ModelCatalogSync {
         (item) => item.catalogSourceId === source.id && item.catalogProviderId === channel.id,
       );
       if (!row) {
+        // A channel re-created under a new id keeps the connection saved for its previous
+        // id when exactly one connection under this source (or an unmanaged one on the same
+        // endpoint) carries the same label.
         const matches = rows.filter(
-          (item) => !item.catalogSourceId && saved.has(item.id) && item.label === channel.label,
+          (item) => !consumed.has(item.id) && saved.has(item.id) && item.label === channel.label,
         );
         if (matches.length === 1) row = matches[0];
       }

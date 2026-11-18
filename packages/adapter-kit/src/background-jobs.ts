@@ -35,7 +35,15 @@ const payloadSchemas = {
       userId: z.string().min(1),
     })
     .strict(),
-  "harness.reflect": z.object({ runId: z.string().min(1) }).strict(),
+  "harness.reflect": z
+    .object({
+      runId: z.string().min(1),
+      /** A signal-triggered review writes lessons only; a person-asked one may draft a skill. */
+      auto: z.literal(true).optional(),
+      /** The message that asked for the review, excluded from the run's follow-up reading. */
+      exceptMessageId: z.string().min(1).optional(),
+    })
+    .strict(),
   "messaging.deliver": z.object({ runId: z.string().min(1).optional() }),
   "messaging.progress": z.object({ runId: z.string().min(1) }),
   "messaging.credential-cleanup": z.object({
@@ -113,10 +121,13 @@ export function automaticMemoryJob(
  * One reflection over a finished run. It drafts a skill card for the user to review, so a
  * repeated request for the same run collapses into the queued job instead of a second draft.
  */
-export function reflectRunJob(runId: string): BackgroundJob {
+export function reflectRunJob(
+  runId: string,
+  options: { auto?: true; exceptMessageId?: string } = {},
+): BackgroundJob {
   return {
     name: "harness.reflect",
-    payload: { runId },
+    payload: { runId, ...options },
     replaceKey: `harness.reflect:${runId}`,
     maxAttempts: 2,
   };

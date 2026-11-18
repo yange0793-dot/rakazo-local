@@ -245,17 +245,6 @@ export function cardOutputCeiling(model: Model<Api>): number | undefined {
   return model.provider === OPENAI_COMPATIBLE_PROVIDER_ID ? undefined : model.maxTokens;
 }
 
-export function withOutputBudget(
-  target: RuntimeModelTarget,
-  maxTokens: number,
-): RuntimeModelTarget {
-  return {
-    ...target,
-    config: { ...target.config, maxTokens },
-    model: { ...target.model, maxTokens },
-  };
-}
-
 /** "Unsupported reasoning effort", "invalid reasoning_effort", "reasoning effort is not supported". */
 const UNSUPPORTED_REASONING_EFFORT =
   /\b(?:unsupported|invalid) reasoning[ _]effort\b|\breasoning[ _]effort\b[^.;:\n]{0,30}?\b(?:not supported|unsupported|invalid)\b/i;

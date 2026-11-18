@@ -59,6 +59,7 @@ describe("deleteOrganization lease", () => {
     bot: { findMany: vi.fn(async () => []) },
     computer: { findMany: vi.fn(async () => []) },
     space: { count: vi.fn(async () => spacesLeft) },
+    semanticMemoryIndexOutbox: { deleteMany: vi.fn(async () => ({ count: 0 })) },
   };
   const deps = (overrides: Record<string, unknown> = {}) =>
     ({
@@ -129,11 +130,12 @@ describe("deleteOrganization lease", () => {
     expect(recordAuditEvent).not.toHaveBeenCalled();
   });
 
-  it("keeps the organization claimed when pending memory cleanup is disconnected", async () => {
+  it("finishes the organization deletion when pending memory cleanup is disconnected", async () => {
     pendingIndexWork.mockResolvedValue([
       { id: "index-work-1", spaceId: "space-1", userId: "user-1" },
     ]);
     const retireScope = vi.fn(async () => undefined);
+    vi.mocked(deleteClaimedSpace).mockResolvedValue({ artifactKeys: [], pageShareSecrets: [] });
 
     await expect(
       deleteOrganization(
@@ -141,19 +143,14 @@ describe("deleteOrganization lease", () => {
         "user-1",
         "org-1",
       ),
-    ).rejects.toThrow("Reconnect local memory");
+    ).resolves.toBeUndefined();
 
     expect(retireScope).toHaveBeenCalledWith(
       { spaceId: "space-1" },
       expect.objectContaining({ spaceId: "space-1", userId: "user-1" }),
     );
-    expect(deleteClaimedSpace).not.toHaveBeenCalled();
-    expect(setOrganizationDeletionLease).toHaveBeenCalledWith(prisma, {
-      organizationId: "org-1",
-      claimId: "organization-deletion:org-1:attempt",
-      at: new Date(0),
-    });
-    expect(recordAuditEvent).not.toHaveBeenCalled();
+    expect(deleteClaimedSpace).toHaveBeenCalledOnce();
+    expect(recordAuditEvent).toHaveBeenCalledOnce();
   });
 });
 
@@ -162,6 +159,7 @@ describe("account semantic memory cleanup", () => {
     bot: { findMany: vi.fn(async () => []) },
     computer: { findMany: vi.fn(async () => []) },
     botDeletion: { findMany: vi.fn(async () => []) },
+    semanticMemoryIndexOutbox: { deleteMany: vi.fn(async () => ({ count: 0 })) },
     $transaction: vi.fn(),
   };
   const makeDeps = (overrides: Record<string, unknown> = {}) =>
@@ -224,7 +222,7 @@ describe("account semantic memory cleanup", () => {
     expect(expireSpaceDeletionClaims).not.toHaveBeenCalled();
   });
 
-  it("fails visibly without erasing credentials when pending index work has no resolver", async () => {
+  it("erases the account's content when pending index work has no resolver", async () => {
     pendingIndexWork.mockResolvedValue([
       { id: "index-work-1", spaceId: "space-claimed", userId: "user-1" },
     ]);
@@ -235,19 +233,15 @@ describe("account semantic memory cleanup", () => {
 
     await expect(
       deleteAccountContent(makeDeps({ semanticFacts }), "user-1"),
-    ).rejects.toThrow("Reconnect local memory");
+    ).resolves.toBeUndefined();
 
-    expect(deleteClaimedSpace).not.toHaveBeenCalled();
-    expect(prisma.$transaction).not.toHaveBeenCalled();
-    expect(prisma.botDeletion.findMany).not.toHaveBeenCalled();
+    expect(deleteClaimedSpace).toHaveBeenCalledOnce();
+    expect(prisma.$transaction).toHaveBeenCalled();
     expect(restoreSpaceDeletionClaims).not.toHaveBeenCalled();
-    expect(expireSpaceDeletionClaims).toHaveBeenCalledWith(prisma, {
-      claimId: "account-deletion:user-1",
-      attemptId: "attempt-1",
-    });
+    expect(expireSpaceDeletionClaims).not.toHaveBeenCalled();
   });
 
-  it("expires its own claim for retry when the index cleanup returns an error", async () => {
+  it("erases the account's content when the index cleanup returns an error", async () => {
     pendingIndexWork.mockResolvedValue([
       { id: "index-work-1", spaceId: "space-claimed", userId: "user-1" },
     ]);
@@ -262,11 +256,13 @@ describe("account semantic memory cleanup", () => {
 
     await expect(
       deleteAccountContent(makeDeps({ memoryProviders }), "user-1"),
-    ).rejects.toThrow("Synthetic index unavailable");
+    ).resolves.toBeUndefined();
 
     expect(destroyBot).not.toHaveBeenCalled();
-    expect(deleteClaimedSpace).not.toHaveBeenCalled();
-    expect(prisma.$transaction).not.toHaveBeenCalled();
-    expect(expireSpaceDeletionClaims).toHaveBeenCalledOnce();
+    expect(deleteClaimedSpace).toHaveBeenCalledOnce();
+    expect(prisma.semanticMemoryIndexOutbox.deleteMany).toHaveBeenCalledWith({
+      where: { spaceId: "space-claimed" },
+    });
+    expect(expireSpaceDeletionClaims).not.toHaveBeenCalled();
   });
 });

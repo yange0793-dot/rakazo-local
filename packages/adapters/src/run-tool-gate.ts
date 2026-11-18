@@ -28,6 +28,8 @@ import {
   repeatsDeniedAction,
   resolveActionApprovalForTools,
   SITE_SENDING_TOOLS,
+  TAINT_GATED_BUILTIN_TOOLS,
+  toolNeedsPersonApproval,
   toolRequiresApproval,
   toolRequiresExplicitApproval,
 } from "@rakazo/core";
@@ -35,7 +37,7 @@ import { normalizedHttpUrl, urlSite } from "@rakazo/core/egress";
 import { approvalEffectKey, toolEffectIdempotencyKey } from "@rakazo/core/node/approval-effect-key";
 import type { AuditEventInput } from "@rakazo/db";
 import { recordAuditEvent, runSecretKind } from "@rakazo/db";
-import type { FleetCardSummary } from "./approval-ask.js";
+import type { ApprovalBrowserAction, FleetCardSummary } from "./approval-ask.js";
 import { buildApprovalAskBlock, MAX_FETCH_URL_LENGTH } from "./approval-ask.js";
 import {
   boundDirectApprovalDetails,
@@ -56,6 +58,7 @@ import { toComputerRef } from "./computer-support.js";
 import { redactConnectorPayload } from "./connector-safety.js";
 import type { ExecutorDeps } from "./executor-deps.js";
 import { CATALOG_LOAD, CATALOG_SEARCH } from "./lazy-tool-catalog.js";
+import { mcpServerPreapprovalRefusal } from "./mcp-server-tool.js";
 import { findConnectedModelCredential } from "./model-selection.js";
 import { paidRequestEffect } from "./paid-request.js";
 import type { PurchaseApproval } from "./purchase-gate.js";
@@ -108,7 +111,7 @@ type ApprovalCard = {
   /** The chat that started this helper: its approval card is shown there. */
   cardThreadId?: string;
   /** The page a browser action would act on, read from the browser's last observation. */
-  browserAction?: BrowserActionDescription;
+  browserAction?: ApprovalBrowserAction;
 };
 
 /** A tool call that passed its approval gate, as tool handlers receive it. */
@@ -222,9 +225,14 @@ export async function gateToolCall(
   const connectorKind = connectorKindFromToolName(approvalName, connectorProviders);
   const watch = name === "schedule_create" ? watchFromTool(args.watch) : undefined;
   const httpWatch = watch?.kind === "http";
-  // paid_request with only a purchase id sends the request its approval already named.
+  // paid_request with only a purchase id sends the request its approval already named. A page
+  // action is in SITE_SENDING_TOOLS so its card's "Always allow" saves the page's site; it never
+  // sends a url itself, so the fetch checks below skip it.
   const sendsToSite =
-    httpWatch || (SITE_SENDING_TOOLS.has(name) && (name === "web_fetch" || args.url !== undefined));
+    httpWatch ||
+    (SITE_SENDING_TOOLS.has(name) &&
+      name !== "browser_act" &&
+      (name === "web_fetch" || args.url !== undefined));
   const fetchUrl = sendsToSite
     ? normalizedHttpUrl(String(httpWatch ? watch.url : (args.url ?? "")))
     : undefined;
@@ -242,6 +250,14 @@ export async function gateToolCall(
   if (fetchUrl) {
     args = httpWatch ? { ...args, watch: { ...watch, url: fetchUrl } } : { ...args, url: fetchUrl };
     effectRequest = name === "paid_request" ? paidRequestEffect(args) : args;
+  }
+  // A page action's site comes from the browser's last observation, and its card names it: the
+  // same site is what a saved rule allows, and what an "Always allow" answer on the card stores.
+  const browserAction = name === "browser_act" ? describeBrowserAction(ctx, args) : undefined;
+  const browserSite = browserAction ? urlSite(browserAction.url) : undefined;
+  if (browserSite && browserAction) {
+    // The stored request carries the approved page so the "Always" answer can allow its site.
+    effectRequest = { ...args, url: browserAction.url };
   }
   const connectorTrusts = connectorTrustKeys(
     batch?.actions,
@@ -321,6 +337,11 @@ export async function gateToolCall(
       ),
     };
   }
+  // A local (stdio) server is refused before the card: no answer could let it run.
+  if (name === "add_mcp_server") {
+    const uncreatable = mcpServerPreapprovalRefusal(args);
+    if (uncreatable) return { result: refusal("mcp_server_unavailable", uncreatable) };
+  }
   // A provider can make ordinary page actions consequential, but cannot override the owner's
   // Ask/Auto/Never policy. Purchases and saved cards retain their separate mandatory checks.
   const browserApprovalRequired =
@@ -328,6 +349,28 @@ export async function gateToolCall(
     ctx.providers.browser.describe().capabilities.requiresActionApproval === true;
   // Typing a saved card is approved like a purchase: every time, by a person.
   const paying = Boolean(purchase) || Boolean(cardUse);
+  // A built-in that needs a person because of who started this run or what it has read, never
+  // the approval model: outside text that reached the run could otherwise run a shell command,
+  // save a routine, spawn a bot, rewrite shared memory or add an MCP server. Taint is read only
+  // when it can change the answer: a shell command in the owner's own run never depends on it.
+  const taintDecidesPersonApproval =
+    !viaConnector &&
+    approvalToolNames.some(
+      (toolName) =>
+        TAINT_GATED_BUILTIN_TOOLS.has(toolName) &&
+        !(toolName === "shell" && ctx.source.ownerStartedRun),
+    );
+  const personApprovalTainted = taintDecidesPersonApproval ? await isRunTainted(ctx) : false;
+  const personApproval =
+    !viaConnector &&
+    approvalToolNames.some((toolName) =>
+      toolNeedsPersonApproval({
+        toolName,
+        ownerStartedRun: ctx.source.ownerStartedRun,
+        messagingChannelRun: ctx.source.messagingChannelRun,
+        tainted: personApprovalTainted,
+      }),
+    );
   const requiresApprovalByDefault =
     request.heldForApproval ||
     browserApprovalRequired ||
@@ -335,6 +378,7 @@ export async function gateToolCall(
     unattendedWatch ||
     siteGate === "new" ||
     unidentifiedAction ||
+    personApproval ||
     (!catalogControlRead &&
       approvalToolNames.some(
         (toolName) =>
@@ -363,7 +407,7 @@ export async function gateToolCall(
       readOnly: declaredReadOnlyFor(toolName),
     })),
     wrapper: batch ? { name, connectorKind } : undefined,
-    site: fetchSite,
+    site: fetchSite ?? browserSite,
     rules: await ctx.trust.loadApprovalRules(),
   });
   const approvalResolved =
@@ -382,7 +426,9 @@ export async function gateToolCall(
       approvalToolNames.some((toolName) =>
         connectorToolRequiresApproval(toolName, declaredReadOnlyFor(toolName)),
       ));
-  const reviewable = mode === "auto" && !mandatoryInAnyRun && !helperWriteNeedsPerson;
+  // A person approves the person-approval tools above: the approval model never sees them.
+  const reviewable =
+    mode === "auto" && !mandatoryInAnyRun && !helperWriteNeedsPerson && !personApproval;
   const injectedReview = reviewable ? deps.autoReview : undefined;
   const reviewSettings = !reviewable || injectedReview ? null : await ctx.trust.loadApprovalModel();
   const memberChecker = reviewSettings?.primarySource === "member";
@@ -651,10 +697,7 @@ export async function gateToolCall(
       ),
     };
   }
-  const browserAction =
-    needsApproval && asksPersonNow && name === "browser_act"
-      ? describeBrowserAction(ctx, args)
-      : undefined;
+  const browserCardAction = needsApproval && asksPersonNow ? browserAction : undefined;
   const call = createToolCall(ctx, {
     name,
     args,
@@ -673,7 +716,7 @@ export async function gateToolCall(
     batch: connectorTool?.batch,
     onceOnly: asksEveryTime,
     ...(helperApproval ?? {}),
-    ...(browserAction ? { browserAction } : {}),
+    ...(browserCardAction ? { browserAction: browserCardAction } : {}),
   };
 
   if (applied?.duplicate) {
@@ -971,17 +1014,41 @@ async function helperApprovalTarget(
 function describeBrowserAction(
   ctx: RunContext,
   args: Record<string, unknown>,
-): BrowserActionDescription | undefined {
+): ApprovalBrowserAction | undefined {
   const browser = ctx.providers.browser;
   const request = browserActRequest(args);
   const stored = ctx.computer.stored;
   if (!browser.describeAction || !request || !stored.providerRef) return undefined;
   try {
-    return browser.describeAction(toComputerRef(stored), request, ctx.context);
+    const described = browser.describeAction(toComputerRef(stored), request, ctx.context);
+    return described ? withTypedText(described, args) : undefined;
   } catch {
     // The description is card context only; the raw-argument card still asks the same person.
     return undefined;
   }
+}
+
+/**
+ * The text each fill or type step would enter, paired with the element the browser described.
+ * The browser describes the actions in the order it was asked to run them and refuses anything
+ * it cannot describe, so the two lists line up. A protected step never gets here.
+ */
+function withTypedText(
+  description: BrowserActionDescription,
+  args: Record<string, unknown>,
+): ApprovalBrowserAction {
+  const actions = Array.isArray(args.actions) ? args.actions : [];
+  return {
+    ...description,
+    steps: description.steps.map((step, index) => {
+      const text = (actions[index] as { text?: unknown } | undefined)?.text;
+      return (step.kind === "fill" || step.kind === "type") &&
+        typeof text === "string" &&
+        text.trim()
+        ? { ...step, text }
+        : step;
+    }),
+  };
 }
 
 /**
@@ -1021,9 +1088,11 @@ async function reviewToolCall(
   if (!injectedReview && !checker && !reviewSettings?.backups.length) return;
   try {
     const botDescription = redactSecrets(`${bot.name}\n${bot.description}`, ctx.secrets);
-    // A webhook run's task prompt carries the delivery, which someone else wrote, so the checker
-    // gets only the owner's routine. With no routine to judge against, a person decides.
-    const outsideRun = run.trigger === "webhook";
+    // A run the owner did not start carries someone else's words in its task prompt: another
+    // bot's message, a helper's result, a channel message. The checker gets only the owner's own
+    // words for it, the message they sent or the routine they wrote. With none to judge against,
+    // a person decides.
+    const outsideRun = !ctx.source.ownerStartedRun;
     const ownerWords = outsideRun ? await ctx.trust.loadOwnerWords() : "";
     if (outsideRun && !ownerWords.trim()) return { reason: undefined, decision: "ask" };
     // A new site is judged on the full URL and the owner's own words only: the task

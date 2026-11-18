@@ -44,70 +44,118 @@ vi.mock("@lingui/react/macro", () => {
     parts.reduce((text, part, index) => `${text}${index > 0 ? values[index - 1] : ""}${part}`, "");
   return { useLingui: () => ({ t }), Trans: ({ children }: { children: ReactNode }) => children };
 });
-vi.mock("@rakazo/ui-web", () => ({
-  useCopyText: () => [false, () => {}],
-  SectionHeading: ({
-    variant: _variant,
-    ...props
-  }: ComponentProps<"h3"> & { variant?: string }) => <h3 {...props} />,
-  Button: ({
-    variant: _variant,
-    size: _size,
-    ...props
-  }: ComponentProps<"button"> & { variant?: string; size?: string }) => (
-    <button type="button" {...props} />
-  ),
-  Input: (props: ComponentProps<"input">) => <input {...props} />,
-  Textarea: (props: ComponentProps<"textarea">) => <textarea {...props} />,
-  NativeSelect: (props: ComponentProps<"select">) => <select {...props} />,
-  NativeSelectOption: (props: ComponentProps<"option">) => <option {...props} />,
-  Switch: ({
-    onCheckedChange,
-    checked,
-    ...props
-  }: ComponentProps<"button"> & {
-    checked?: boolean;
-    onCheckedChange?: (checked: boolean) => void;
-  }) => (
-    <button
-      type="button"
-      role="switch"
-      aria-checked={checked}
-      onClick={() => onCheckedChange?.(!checked)}
-      {...props}
-    />
-  ),
-  Toggle: ({
-    onPressedChange: _onPressedChange,
-    pressed,
-    variant: _variant,
-    size: _size,
-    ...props
-  }: ComponentProps<"button"> & {
-    variant?: string;
-    size?: string;
-    pressed?: boolean;
-    onPressedChange?: (pressed: boolean) => void;
-  }) => (
-    <button type="button" aria-pressed={pressed} {...props}>
-      {props.children}
-    </button>
-  ),
-  Tabs: ({
-    value: _value,
-    onValueChange: _onValueChange,
-    ...props
-  }: ComponentProps<"div"> & { value?: string; onValueChange?: (value: string) => void }) => (
-    <div {...props} />
-  ),
-  TabsList: (props: ComponentProps<"div">) => <div role="tablist" {...props} />,
-  TabsTrigger: ({ value: _value, ...props }: ComponentProps<"button"> & { value: string }) => (
-    <button type="button" role="tab" {...props} />
-  ),
-  TabsContent: ({ value: _value, ...props }: ComponentProps<"div"> & { value: string }) => (
-    <div {...props} />
-  ),
-}));
+vi.mock("@rakazo/ui-web", async () => {
+  const { createContext, useContext } = await import("react");
+  const PopoverState = createContext<{ open?: boolean; setOpen?: (open: boolean) => void }>({});
+  return {
+    useCopyText: () => [false, () => {}],
+    SectionHeading: ({
+      variant: _variant,
+      ...props
+    }: ComponentProps<"h3"> & { variant?: string }) => <h3 {...props} />,
+    Button: ({
+      variant: _variant,
+      size: _size,
+      ...props
+    }: ComponentProps<"button"> & { variant?: string; size?: string }) => (
+      <button type="button" {...props} />
+    ),
+    Input: (props: ComponentProps<"input">) => <input {...props} />,
+    Textarea: (props: ComponentProps<"textarea">) => <textarea {...props} />,
+    NativeSelect: (props: ComponentProps<"select">) => <select {...props} />,
+    NativeSelectOption: (props: ComponentProps<"option">) => <option {...props} />,
+    Switch: ({
+      onCheckedChange,
+      checked,
+      ...props
+    }: ComponentProps<"button"> & {
+      checked?: boolean;
+      onCheckedChange?: (checked: boolean) => void;
+    }) => (
+      <button
+        type="button"
+        role="switch"
+        aria-checked={checked}
+        onClick={() => onCheckedChange?.(!checked)}
+        {...props}
+      />
+    ),
+    Toggle: ({
+      onPressedChange: _onPressedChange,
+      pressed,
+      variant: _variant,
+      size: _size,
+      ...props
+    }: ComponentProps<"button"> & {
+      variant?: string;
+      size?: string;
+      pressed?: boolean;
+      onPressedChange?: (pressed: boolean) => void;
+    }) => (
+      <button type="button" aria-pressed={pressed} {...props}>
+        {props.children}
+      </button>
+    ),
+    Tabs: ({
+      value: _value,
+      onValueChange: _onValueChange,
+      ...props
+    }: ComponentProps<"div"> & { value?: string; onValueChange?: (value: string) => void }) => (
+      <div {...props} />
+    ),
+    TabsList: (props: ComponentProps<"div">) => <div role="tablist" {...props} />,
+    TabsTrigger: ({ value: _value, ...props }: ComponentProps<"button"> & { value: string }) => (
+      <button type="button" role="tab" {...props} />
+    ),
+    TabsContent: ({ value: _value, ...props }: ComponentProps<"div"> & { value: string }) => (
+      <div {...props} />
+    ),
+    Popover: ({
+      open,
+      onOpenChange,
+      children,
+    }: {
+      open?: boolean;
+      onOpenChange?: (open: boolean) => void;
+      children?: ReactNode;
+    }) => (
+      <PopoverState.Provider value={{ open, setOpen: onOpenChange }}>
+        <div>{children}</div>
+      </PopoverState.Provider>
+    ),
+    PopoverTrigger: ({ children, ...props }: ComponentProps<"button">) => {
+      const state = useContext(PopoverState);
+      return (
+        <button type="button" onClick={() => state.setOpen?.(!state.open)} {...props}>
+          {children}
+        </button>
+      );
+    },
+    PopoverContent: ({ children }: { children?: ReactNode }) => <div>{children}</div>,
+    Command: ({ children }: { children?: ReactNode }) => <div>{children}</div>,
+    CommandList: ({ children }: { children?: ReactNode }) => <div>{children}</div>,
+    CommandGroup: ({ children }: { children?: ReactNode }) => <div>{children}</div>,
+    CommandEmpty: ({ children }: { children?: ReactNode }) => <div>{children}</div>,
+    CommandItem: ({
+      onSelect,
+      children,
+      ...props
+    }: ComponentProps<"button"> & { onSelect?: () => void }) => (
+      <button type="button" onClick={() => onSelect?.()} {...props}>
+        {children}
+      </button>
+    ),
+    ListSearchInput: ({
+      query,
+      setQuery,
+      label,
+    }: {
+      query: string;
+      setQuery: (query: string) => void;
+      label: string;
+    }) => <input aria-label={label} value={query} onChange={(e) => setQuery(e.target.value)} />,
+  };
+});
 vi.mock("./avatar-studio-popover", () => ({
   AvatarStudioPopover: ({
     value,
@@ -482,6 +530,75 @@ describe("BotSettings model choices", () => {
     expect(values).not.toContain("deepseek::DeepSeek-V4.1-Flash");
     expect(values.some((value) => value.includes("DeepSeek"))).toBe(false);
   });
+
+  function manyModels() {
+    const ids = Array.from({ length: 11 }, (_, index) => `model-${index + 1}`);
+    vi.mocked(rpc.models.credentials).mockResolvedValue([
+      {
+        id: "connection",
+        provider: "openai-compatible",
+        label: "Test server",
+        hasKey: false,
+        isDefault: true,
+        modelId: "model-1",
+        enabledModelIds: ids,
+        baseUrl: "https://models.example/v1",
+        reasoning: true,
+      },
+    ]);
+    vi.mocked(rpc.models.list).mockResolvedValue(
+      ids.map((id) => ({
+        provider: "openai-compatible",
+        providerName: "Test server",
+        id,
+        label: id,
+        billing: "",
+        thinkingLevels: ["low", "high"] as const,
+      })),
+    );
+  }
+
+  async function openStarredPicker() {
+    vi.mocked(rpc.me).mockResolvedValue({
+      userId: "user-1",
+      defaultProvider: "openai-compatible",
+      defaultModel: "model-1",
+    } as Me);
+    vi.mocked(rpc.models.role).mockResolvedValue({
+      primary: { provider: "openai-compatible", modelId: "model-1", thinkingLevel: "high" },
+      backups: [],
+    });
+    await render("Billing", {}, false, 0, "computer");
+    await act(async () =>
+      container.querySelector<HTMLButtonElement>('button[id$="-model"]')!.click(),
+    );
+    return container.querySelectorAll<HTMLButtonElement>(
+      'button[aria-label="Default model for all bots"]',
+    );
+  }
+
+  it("stars a model as the Space's main model and refreshes the role that runs it", async () => {
+    manyModels();
+    const stars = await openStarredPicker();
+    expect(stars).toHaveLength(11);
+    await act(async () => stars[1]!.click());
+    expect(rpc.models.setRole).toHaveBeenCalledExactlyOnceWith({
+      role: "main",
+      expectedUserId: "user-1",
+      primary: { provider: "openai-compatible", modelId: "model-2" },
+    });
+    // The role and me reads both moved: the panel must not keep painting the replaced model.
+    expect(vi.mocked(rpc.models.role).mock.calls).toHaveLength(2);
+    expect(vi.mocked(rpc.me).mock.calls).toHaveLength(2);
+  });
+
+  it("shows a failed star save instead of leaving it unhandled", async () => {
+    manyModels();
+    const stars = await openStarredPicker();
+    vi.mocked(rpc.models.setRole).mockRejectedValueOnce(new Error("Connection lost"));
+    await act(async () => stars[1]!.click());
+    expect(container.querySelector('[role="alert"]')?.textContent).toContain("Connection lost");
+  });
 });
 
 describe("BotSettings thinking options", () => {
@@ -529,9 +646,9 @@ describe("BotSettings thinking options", () => {
     );
     expect(container.querySelector<HTMLInputElement>('input[type="range"]')!.value).toBe("4");
     expect(container.querySelector(".bot-effort-preview")?.getAttribute("data-level")).toBe("max");
+    // No scope: the write lands on the model list that applies in this Space.
     expect(rpc.models.setRole).toHaveBeenCalledExactlyOnceWith({
       role: "main",
-      scope: "account",
       expectedUserId: "user-1",
       primary: { ...primary, thinkingLevel: "max" },
     });
@@ -557,6 +674,33 @@ describe("BotSettings thinking options", () => {
     );
     expect(container.querySelector<HTMLInputElement>('input[type="range"]')!.value).toBe("2");
     expect(container.textContent).toContain("Could not save effort");
+  });
+
+  it("re-enables the model and effort controls when a refresh after saving fails", async () => {
+    vi.mocked(rpc.me).mockResolvedValue({
+      userId: "user-1",
+      defaultProvider: "fixture",
+      defaultModel: "balanced",
+    } as Me);
+    vi.mocked(rpc.models.role).mockResolvedValue({
+      primary: { provider: "fixture", modelId: "balanced", thinkingLevel: "high" },
+      backups: [],
+    });
+    await render("Billing", {}, false, 0, "computer");
+    // The catalog reload that follows the save is the one that fails.
+    vi.mocked(rpc.models.list).mockRejectedValueOnce(new Error("offline"));
+    await act(async () =>
+      container.querySelector<HTMLButtonElement>('.effort-stops button[aria-label="Max"]')!.click(),
+    );
+    await act(async () => new Promise((resolve) => setTimeout(resolve, 0)));
+    // The save landed and the failing reload is the second catalog read.
+    expect(rpc.models.setRole).toHaveBeenCalledTimes(1);
+    expect(vi.mocked(rpc.models.list).mock.calls).toHaveLength(2);
+    expect(container.querySelector<HTMLInputElement>('input[type="range"]')!.disabled).toBe(false);
+    expect(
+      container.querySelector<HTMLButtonElement>('.effort-stops button[aria-label="Max"]')!
+        .disabled,
+    ).toBe(false);
   });
 
   it("preserves saved thinking on a profile save when options are hidden", async () => {
@@ -610,7 +754,7 @@ describe("BotSettings thinking options", () => {
     expect(thinking.max).toBe("1");
     expect(
       [...container.querySelectorAll(".effort-stops button")].map((node) => node.textContent),
-    ).toEqual(["low", "high"]);
+    ).toEqual(["Low", "High"]);
   });
 
   it("shows the effective effort for an old override and saves only that bot's choice", async () => {

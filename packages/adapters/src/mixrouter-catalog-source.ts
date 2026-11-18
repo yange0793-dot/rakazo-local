@@ -64,6 +64,10 @@ export function createMixRouterCatalogSource(
       const state = StateSchema.parse(await readJson("/api/state", signal));
       const providers = state.providers[config.group];
       if (!providers) throw new Error("Catalog source did not return the configured group");
+      // A gateway that just started or reloaded its configuration answers with an empty
+      // group before its store fills. That is a failed read, not an empty catalog.
+      if (providers.length === 0)
+        throw new Error("Catalog source returned no channels for the configured group");
       const insights = InsightsSchema.parse(await readJson("/api/insights/models", signal));
       const ids = new Set<string>();
       return providers.map((provider) => {

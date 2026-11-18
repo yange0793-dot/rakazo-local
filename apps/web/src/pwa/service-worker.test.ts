@@ -198,7 +198,9 @@ describe("service worker", () => {
 
     const response = await sw.fetch("/", "navigate");
     expect(sw.waiting.postMessage).toHaveBeenCalledWith(SKIP_WAITING);
-    expect(response!.headers.get("refresh")).toBe("0");
+    // A meta refresh reloads everywhere; a Refresh header leaves Safari on a blank page.
+    expect(response!.headers.get("content-type")).toContain("text/html");
+    expect(await response!.text()).toContain('<meta http-equiv="refresh" content="0">');
     expect(network).not.toHaveBeenCalled();
 
     await sw.dispatch("message", { data: SKIP_WAITING });

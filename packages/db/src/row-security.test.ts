@@ -1,6 +1,12 @@
 import { describe, expect, it, vi } from "vitest";
 import type { PrismaClient } from "./generated/prisma/client.js";
-import { rlsBypassKey, runAsSystem, runAsTenant, withRowLevelSecurity } from "./row-security.js";
+import {
+  ROW_SECURITY_MODELS,
+  rlsBypassKey,
+  runAsSystem,
+  runAsTenant,
+  withRowLevelSecurity,
+} from "./row-security.js";
 
 describe("rlsBypassKey", () => {
   it("follows the password pg logs in with", () => {
@@ -19,6 +25,10 @@ describe("rlsBypassKey", () => {
 });
 
 describe("withRowLevelSecurity", () => {
+  it("tracks lesson usage as a tenant-scoped model", () => {
+    expect(ROW_SECURITY_MODELS.has("LessonUsage")).toBe(true);
+  });
+
   type AllOperations = (params: {
     model?: string;
     operation: string;

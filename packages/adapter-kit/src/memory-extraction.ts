@@ -46,6 +46,8 @@ export interface MemoryExtractionChange {
   /** A correction names an existing active fact; the host binds its observed revision. */
   replacesId?: string;
   expectedRevision?: number;
+  /** The source asks to drop the targeted fact; the host tombstones it after re-checking. */
+  remove?: true;
 }
 
 export interface MemoryExtractor {

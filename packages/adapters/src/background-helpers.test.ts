@@ -41,7 +41,7 @@ function harness(overrides: { trigger?: string; threadBotId?: string | null } = 
     task: { create: vi.fn(async () => ({ id: "helper-task" })) },
     run: {
       findFirst: vi.fn(async () => null),
-      count: vi.fn(async () => 0),
+      count: vi.fn(async (_args?: { where?: { status?: unknown } }) => 0),
       create: createRun,
     },
   };
@@ -65,7 +65,7 @@ function harness(overrides: { trigger?: string; threadBotId?: string | null } = 
       botId: overrides.threadBotId === undefined ? "bot" : overrides.threadBotId,
     },
   } as unknown as RunContext;
-  return { ctx, prisma, createRun, enqueue };
+  return { ctx, prisma, tx, createRun, enqueue };
 }
 
 describe("starting a background helper", () => {
@@ -127,6 +127,34 @@ describe("starting a background helper", () => {
       ok: true,
       name: START.name,
       note: expect.stringContaining("is working in the background"),
+    });
+  });
+
+  it("counts a helper waiting on approval as free, and does not call it working", async () => {
+    // A paused helper holds no slot: four of them do not fill the parallel limit.
+    const waitingOnly = harness();
+    waitingOnly.tx.run.count.mockImplementation(async (args?: { where?: { status?: unknown } }) =>
+      args?.where?.status === "waiting_input" ? 4 : 0,
+    );
+    await expect(startBackgroundHelper(waitingOnly.ctx, START)).resolves.toMatchObject({
+      ok: true,
+    });
+
+    const allWorking = harness();
+    allWorking.tx.run.count.mockImplementation(async (args?: { where?: { status?: unknown } }) =>
+      args?.where?.status === "waiting_input" ? 0 : 4,
+    );
+    await expect(startBackgroundHelper(allWorking.ctx, START)).resolves.toEqual({
+      error: "4 background helpers are already working. Wait for a result before starting another.",
+    });
+
+    const mixed = harness();
+    mixed.tx.run.count.mockImplementation(async (args?: { where?: { status?: unknown } }) =>
+      args?.where?.status === "waiting_input" ? 2 : 4,
+    );
+    await expect(startBackgroundHelper(mixed.ctx, START)).resolves.toEqual({
+      error:
+        "4 background helpers are already working, and 2 more are waiting for approval. Wait for a result before starting another.",
     });
   });
 

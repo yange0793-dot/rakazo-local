@@ -42,6 +42,7 @@ class FakeCollection:
         self.rows = {}
         self.last_query = None
         self.last_lexical_query = None
+        self.updated = []
 
     def upsert(self, *, ids, documents, metadatas, embeddings):
         for storage_id, document, metadata, embedding in zip(ids, documents, metadatas, embeddings, strict=True):
@@ -50,6 +51,25 @@ class FakeCollection:
     def delete(self, *, ids):
         for storage_id in ids:
             self.rows.pop(storage_id, None)
+
+    def get(self, *, ids=None, where=None, limit=None, offset=None, include=None):
+        keys = list(self.rows) if ids is None else [key for key in ids if key in self.rows]
+        if where is not None:
+            keys = [key for key in keys if self.rows[key]["metadata"].get("wing") == where.get("wing")]
+        if offset:
+            keys = keys[offset:]
+        if limit is not None:
+            keys = keys[:limit]
+        return SimpleNamespace(
+            ids=keys,
+            documents=[self.rows[key]["document"] for key in keys],
+            metadatas=[self.rows[key]["metadata"] for key in keys],
+        )
+
+    def update(self, *, ids, documents):
+        for storage_id, document in zip(ids, documents, strict=True):
+            self.rows[storage_id]["document"] = document
+            self.updated.append(storage_id)
 
     def query(self, *, query_embeddings, n_results, where, include):
         self.last_query = {"where": where, "include": include}
@@ -71,10 +91,11 @@ class FakeCollection:
         for storage_id, row in self.rows.items():
             if row["metadata"]["wing"] != where["wing"]:
                 continue
-            # Contract fake only: shared token count, not a reimplementation of BM25.
-            score = len(query_tokens & set(re.findall(r"\w{2,}", row["document"].lower())))
+            # Contract fake only: shared token count scaled to BM25-like magnitudes, not a
+            # reimplementation of BM25.
+            score = 5.0 * len(query_tokens & set(re.findall(r"\w{2,}", row["document"].lower())))
             if score:
-                hits.append(SimpleNamespace(id=storage_id, document=row["document"], metadata=row["metadata"], score=float(score)))
+                hits.append(SimpleNamespace(id=storage_id, document=row["document"], metadata=row["metadata"], score=score))
         hits.sort(key=lambda hit: hit.score, reverse=True)
         return SimpleNamespace(hits=hits[:n_results])
 
@@ -120,7 +141,8 @@ class IndexTests(unittest.TestCase):
         result = self.index.search({"namespace": "space-a:bot-a", "query": "synthetic-query", "limit": 5})
         self.assertEqual(result, {"candidates": [
             {"id": "fact-a", "revision": 1, "score": 1.0},
-            {"id": "fact-a", "revision": 2, "score": 61 / 62},
+            # Only the lexical leg survives: the second revision vector is unrelated.
+            {"id": "fact-a", "revision": 2, "score": 61 / 124},
         ]})
         self.assertEqual(self.backend.collection.last_query, {"where": {"wing": "space-a:bot-a"}, "include": ["metadatas", "distances"]})
         self.assertEqual(self.backend.collection.last_lexical_query, {
@@ -153,7 +175,8 @@ class IndexTests(unittest.TestCase):
                 self.assertEqual(self.backend.collection.last_lexical_query["where"], {"wing": "space-a:bot-a"})
         self.index.remove({"namespace": "space-a:bot-a", "indexId": "exact:3"})
         result = self.index.search({"namespace": "space-a:bot-a", "query": EXACT_ID, "limit": 2})
-        self.assertEqual([candidate["id"] for candidate in result["candidates"]], ["fact-a", "fact-b"])
+        # The unrelated vector is below the similarity floor, so only the close vector returns.
+        self.assertEqual([candidate["id"] for candidate in result["candidates"]], ["fact-a"])
 
     def test_boundaries_reject_before_embedding(self):
         for request in (
@@ -174,6 +197,107 @@ class IndexTests(unittest.TestCase):
             index = index_module.LocalIndex(FakeBackend(), Path("/synthetic-index"), lambda input: [value])
             with self.assertRaises(RuntimeError):
                 index.upsert(self.input())
+
+    def test_relevance_floor_drops_vectors_below_the_measured_background(self):
+        for distance, expected in (
+            (0.42, []),  # 0.58 similarity: the measured band of unrelated queries.
+            (0.38, [{"id": "fact-a", "revision": 1, "score": 0.5}]),
+        ):
+            with self.subTest(distance=distance):
+                backend = FakeBackend()
+                index = index_module.LocalIndex(backend, Path("/synthetic-index"), SyntheticEmbedder())
+                index.upsert(self.input())
+                metadata = {"wing": "space-a:bot-a", "namespace": "space-a:bot-a",
+                            "id": "fact-a", "revision": 1}
+                backend.collection.query = lambda **kwargs: SimpleNamespace(
+                    metadatas=[[metadata]], distances=[[distance]],
+                )
+                backend.collection.lexical_search = lambda **kwargs: SimpleNamespace(hits=[])
+                self.assertEqual(index.search({"namespace": "space-a:bot-a", "query": "synthetic-query", "limit": 5}),
+                                 {"candidates": expected})
+
+    def test_a_full_top_k_of_unrelated_vectors_returns_nothing(self):
+        class UnrelatedBackend(FakeBackend):
+            # Every vector is maximally distant and no term overlaps: the shape RRF returned
+            # for every query before the floor existed.
+            def __init__(self):
+                super().__init__()
+                for position in range(10):
+                    self.collection.rows[f"row-{position}"] = {
+                        "document": "unrelated",
+                        "metadata": {"wing": "space-a:bot-a", "namespace": "space-a:bot-a",
+                                     "id": f"fact-{position}", "revision": 1},
+                        "embedding": [0.0, 1.0],
+                    }
+
+        index = index_module.LocalIndex(
+            UnrelatedBackend(), Path("/synthetic-index"),
+            lambda input: [[1.0, 0.0] for _ in input],
+        )
+        self.assertEqual(index.search({"namespace": "space-a:bot-a", "query": "gardening", "limit": 20}),
+                         {"candidates": []})
+
+    def test_a_low_bm25_exact_hit_still_counts(self):
+        # BM25 scales with corpus size and document length: the same exact identifier scored 0.69
+        # in a three-fact index, so the lexical leg cannot carry a cutoff without losing it.
+        backend = FakeBackend()
+        index = index_module.LocalIndex(backend, Path("/synthetic-index"), SyntheticEmbedder())
+        index.upsert(self.input())
+        metadata = {"wing": "space-a:bot-a", "namespace": "space-a:bot-a", "id": "fact-a", "revision": 1}
+        backend.collection.query = lambda **kwargs: SimpleNamespace(metadatas=[[metadata]], distances=[[1.0]])
+        backend.collection.lexical_search = lambda **kwargs: SimpleNamespace(
+            hits=[SimpleNamespace(metadata=metadata, score=0.6853)],
+        )
+        self.assertEqual(index.search({"namespace": "space-a:bot-a", "query": "synthetic-query", "limit": 5}),
+                         {"candidates": [{"id": "fact-a", "revision": 1, "score": 0.5}]})
+
+    def test_cjk_query_reaches_chinese_words_inside_a_longer_run(self):
+        # The fake tokenizes exactly like the installed whitespace tokenizer, so this proves the
+        # projection is applied on both the stored document and the query.
+        documents = ["用户偏好：每周五下午三点开会。", "会议记录放在项目文档里。", "车险九月到期。"]
+        vectors = {
+            documents[0]: [1.0, 0.0, 0.0], documents[1]: [0.0, 1.0, 0.0], documents[2]: [0.0, 0.0, 1.0],
+            "会议记录": [0.0, 1.0, 0.0], "车险": [0.0, 0.0, 1.0],
+        }
+        index = index_module.LocalIndex(FakeBackend(), Path("/synthetic-index"),
+                                        lambda input: [vectors[text] for text in input])
+        for position, content in enumerate(documents):
+            index.upsert({"namespace": "space-a", "indexId": f"fact-{position}:1", "id": f"fact-{position}",
+                          "revision": 1, "content": content})
+        for query, fact_id in (("会议记录", "fact-1"), ("车险", "fact-2")):
+            with self.subTest(query=query):
+                self.assertEqual(index.search({"namespace": "space-a", "query": query, "limit": 5}), {
+                    "candidates": [{"id": fact_id, "revision": 1, "score": 1.0}],
+                })
+
+    def test_projection_is_stable_under_repetition(self):
+        projected = index_module.lexical_text("用户偏好：每周五下午三点开会，会议记录放在项目文档里。")
+        self.assertEqual(projected, "用户 户偏 偏好：每周 周五 五下 下午 午三 三点 点开 开会，会议 议记 记录 录放 放在 在项 项目 目文 文档 档里。")
+        self.assertEqual(index_module.lexical_text(projected), projected)
+        self.assertEqual(index_module.lexical_text("plain ascii/path.py"), "plain ascii/path.py")
+
+
+class ProjectionMigrationTests(unittest.TestCase):
+    def test_existing_documents_are_projected_once_and_the_marker_short_circuits(self):
+        with tempfile.TemporaryDirectory() as root:
+            palace = Path(root) / "palace"
+            palace.mkdir()
+            collection = FakeCollection()
+            collection.rows = {
+                "old": {"document": "项目代号是北极星", "metadata": {"wing": "ns"}, "embedding": [1.0, 0.0]},
+                "current": {"document": index_module.lexical_text("会议记录"),
+                            "metadata": {"wing": "ns"}, "embedding": [0.0, 1.0]},
+            }
+            self.assertEqual(index_module.migrate_lexical_projection(collection, palace), 1)
+            self.assertEqual(collection.updated, ["old"])
+            self.assertIn("北极 极星", collection.rows["old"]["document"])
+            self.assertEqual(collection.rows["current"]["document"], index_module.lexical_text("会议记录"))
+            self.assertTrue((palace / index_module.PROJECTION_FILE).is_file())
+            self.assertEqual(index_module.migrate_lexical_projection(collection, palace), 0)
+            self.assertEqual(collection.updated, ["old"])
+            # A lost marker must not double-project already converted documents.
+            (palace / index_module.PROJECTION_FILE).unlink()
+            self.assertEqual(index_module.migrate_lexical_projection(collection, palace), 0)
 
 
 class DirectoryAndTokenTests(unittest.TestCase):
@@ -349,6 +473,41 @@ class InstalledBackendSmoke(unittest.TestCase):
                 self.assertEqual([hit.metadata["id"] for hit in index.collection.lexical_search(
                     query=EXACT_ID, n_results=5, where={"wing": "space-b"},
                 ).hits], ["foreign"])
+            finally:
+                backend.close()
+
+    def test_native_fts_matches_chinese_words_through_the_projection(self):
+        documents = ["用户偏好：每周五下午三点开会。", "会议记录放在项目文档里。", "车险九月到期。"]
+        vectors = {
+            documents[0]: [1.0, 0.0, 0.0], documents[1]: [0.0, 1.0, 0.0], documents[2]: [0.0, 0.0, 1.0],
+            "会议记录": [0.0, 1.0, 0.0], "北极星": [0.577, 0.577, 0.577],
+        }
+        with tempfile.TemporaryDirectory(prefix="rakazo-memory-cjk-test-") as root:
+            palace = index_module.prepare_palace_dir(Path(root) / "palace", "synthetic-test")
+            self.enterContext(patch.dict(os.environ, {
+                "MEMPALACE_CONFIG_DIR": str(palace / "config"),
+                "HF_HUB_OFFLINE": "1", "TRANSFORMERS_OFFLINE": "1", "ANONYMIZED_TELEMETRY": "False",
+            }))
+            from mempalace.backends.sqlite_exact import SQLiteExactBackend
+
+            backend = SQLiteExactBackend()
+            try:
+                index = index_module.LocalIndex(backend, palace, lambda input: [vectors[text] for text in input])
+                for position, content in enumerate(documents):
+                    index.upsert({"namespace": "space-a", "indexId": f"fact-{position}:1",
+                                  "id": f"fact-{position}", "revision": 1, "content": content})
+                with index.collection._cursor() as cursor:
+                    self.assertTrue(index.collection._fts_available(cursor))
+                # The raw query is one oversized token for the installed tokenizer; the
+                # projection is what turns it into matchable 2-character runs.
+                self.assertEqual(index.collection.lexical_search(
+                    query="会议记录", n_results=5, where={"wing": "space-a"},
+                ).hits, [])
+                self.assertEqual(index.search({"namespace": "space-a", "query": "会议记录", "limit": 5}), {
+                    "candidates": [{"id": "fact-1", "revision": 1, "score": 1.0}],
+                })
+                self.assertEqual(index.search({"namespace": "space-a", "query": "北极星", "limit": 5}),
+                                 {"candidates": []})
             finally:
                 backend.close()
 

@@ -382,6 +382,12 @@ export async function archiveBot(
   }
 }
 
+/**
+ * Deleting the memories commits with the bot row, so the transaction also tombstones every
+ * fact in the scope; the 20s snapshot budget is not enough for a large one.
+ */
+const BOT_DELETION_TRANSACTION_OPTIONS = { ...THREAD_LOCK_TRANSACTION_OPTIONS, timeout: 120_000 };
+
 export async function destroyBot(
   deps: BotLifecycleDeps,
   bot: LifecycleBot,
@@ -393,15 +399,6 @@ export async function destroyBot(
     strictTeardown?: boolean;
   },
 ) {
-  // The lifecycle caller already authorized deletion. Retirement acts for the
-  // bot's owner so an authorized space owner can also remove another member's
-  // bot. Shared facts belong to the surviving space, not this isolated scope.
-  // Markdown's preserve/delete choice stays separate; the delete outbox outlives
-  // the bot's cascading rows and late isolated writes must remain fenced out.
-  await deps.semanticFacts?.retireScope(
-    { spaceId: bot.spaceId, botId: bot.id },
-    { ...context, spaceId: bot.spaceId, userId: bot.userId, botId: bot.id },
-  );
   await deps.messagingInstallations?.removeForBot(bot);
   const [dedicated, activeRuns, routines] = await Promise.all([
     deps.prisma.computer.findUnique({
@@ -441,41 +438,54 @@ export async function destroyBot(
   await removePiBotSessions(deps.dataDir, bot.userId, bot.id);
   // Deleting the bot deletes its thread, so this waits out snapshot reads holding that row.
   const deletion = await withTransactionRetry(() =>
-    deps.prisma.$transaction(async (tx) => {
-      const locked = await tx.$queryRaw<Array<{ id: string; webhookSecretId: string | null }>>`
+    deps.prisma.$transaction(
+      async (tx) => {
+        const locked = await tx.$queryRaw<Array<{ id: string; webhookSecretId: string | null }>>`
         SELECT id, "webhookSecretId"
         FROM bots
         WHERE id = ${bot.id} AND "spaceId" = ${bot.spaceId}
         FOR UPDATE
       `;
-      // A concurrent removal of the same bot committed while this one waited for the lock;
-      // it owns the deletion and the cleanup that follows.
-      if (locked.length === 0) return null;
-      const webhookSecretId = locked[0]?.webhookSecretId ?? bot.webhookSecretId ?? null;
-      const { deleteMemories } = options;
-      const botArtifacts = await tx.artifact.findMany({
-        where: { botId: bot.id, groupId: null, spaceId: bot.spaceId },
-        select: { storageKey: true },
-      });
-      await tx.artifact.deleteMany({
-        where: { botId: bot.id, groupId: null, spaceId: bot.spaceId },
-      });
-      // Like its files, the bot's own pages and their links go with it; group pages stay.
-      const botPages = { botId: bot.id, groupId: null, spaceId: bot.spaceId };
-      const pageShareSecrets = await deletePageShareSecrets(tx, botPages);
-      await tx.page.deleteMany({ where: botPages });
-      const groupCleanup = await detachBotFromGroups(tx, bot.id);
-      await tx.computerExecutionLease.deleteMany({ where: { botId: bot.id } });
-      await tx.computer.updateMany({
-        where: {
-          ...(dedicated ? { id: { not: dedicated.id } } : {}),
-          OR: [{ controlBotId: bot.id }, { executionBotId: bot.id }],
-        },
-        data: releasedComputerLease(),
-      });
-      if (!deleteMemories) {
-        const directory = archivedMemoryDirectory(bot.name, bot.id);
-        await tx.$executeRaw`
+        // A concurrent removal of the same bot committed while this one waited for the lock;
+        // it owns the deletion and the cleanup that follows.
+        if (locked.length === 0) return null;
+        const { deleteMemories } = options;
+        // Retire the bot's memory scope in this same transaction: a delete that fails leaves its
+        // memories intact, and a kept-memories delete never touches them. Retirement acts for the
+        // bot's owner so an authorized space owner can also remove another member's bot; shared
+        // durable facts belong to the surviving space. The retire outbox outlives the cascading
+        // rows, keeping late isolated writes fenced out.
+        if (deleteMemories) {
+          await deps.semanticFacts?.retireScope(
+            { spaceId: bot.spaceId, botId: bot.id },
+            { ...context, spaceId: bot.spaceId, userId: bot.userId, botId: bot.id },
+            tx,
+          );
+        }
+        const webhookSecretId = locked[0]?.webhookSecretId ?? bot.webhookSecretId ?? null;
+        const botArtifacts = await tx.artifact.findMany({
+          where: { botId: bot.id, groupId: null, spaceId: bot.spaceId },
+          select: { storageKey: true },
+        });
+        await tx.artifact.deleteMany({
+          where: { botId: bot.id, groupId: null, spaceId: bot.spaceId },
+        });
+        // Like its files, the bot's own pages and their links go with it; group pages stay.
+        const botPages = { botId: bot.id, groupId: null, spaceId: bot.spaceId };
+        const pageShareSecrets = await deletePageShareSecrets(tx, botPages);
+        await tx.page.deleteMany({ where: botPages });
+        const groupCleanup = await detachBotFromGroups(tx, bot.id);
+        await tx.computerExecutionLease.deleteMany({ where: { botId: bot.id } });
+        await tx.computer.updateMany({
+          where: {
+            ...(dedicated ? { id: { not: dedicated.id } } : {}),
+            OR: [{ controlBotId: bot.id }, { executionBotId: bot.id }],
+          },
+          data: releasedComputerLease(),
+        });
+        if (!deleteMemories) {
+          const directory = archivedMemoryDirectory(bot.name, bot.id);
+          await tx.$executeRaw`
           UPDATE "memory_documents"
           SET "botId" = NULL,
               "scope" = 'user',
@@ -483,32 +493,34 @@ export async function destroyBot(
               "updatedAt" = CURRENT_TIMESTAMP
           WHERE "botId" = ${bot.id}
         `;
-      }
-      await tx.botDeletion.create({
-        data: {
-          id: bot.id,
-          spaceId: bot.spaceId,
-          name: bot.name,
-          deletedByUserId: context.userId,
-          memoriesPreserved: !deleteMemories,
-        },
-      });
-      await tx.bot.delete({ where: { id: bot.id } });
-      if (webhookSecretId) {
-        await tx.secret.deleteMany({
-          where: { id: webhookSecretId, kind: "webhook", spaceId: bot.spaceId },
+        }
+        await tx.botDeletion.create({
+          data: {
+            id: bot.id,
+            spaceId: bot.spaceId,
+            name: bot.name,
+            deletedByUserId: context.userId,
+            memoriesPreserved: !deleteMemories,
+          },
         });
-      }
-      if (dedicated) await tx.computer.delete({ where: { id: dedicated.id } });
-      return {
-        artifactKeys: [
-          ...botArtifacts.map((artifact) => artifact.storageKey),
-          ...groupCleanup.artifactKeys,
-        ],
-        cancelledGroupRuns: groupCleanup.cancelledRuns,
-        pageShareSecrets: [...pageShareSecrets, ...groupCleanup.pageShareSecrets],
-      };
-    }, THREAD_LOCK_TRANSACTION_OPTIONS),
+        await tx.bot.delete({ where: { id: bot.id } });
+        if (webhookSecretId) {
+          await tx.secret.deleteMany({
+            where: { id: webhookSecretId, kind: "webhook", spaceId: bot.spaceId },
+          });
+        }
+        if (dedicated) await tx.computer.delete({ where: { id: dedicated.id } });
+        return {
+          artifactKeys: [
+            ...botArtifacts.map((artifact) => artifact.storageKey),
+            ...groupCleanup.artifactKeys,
+          ],
+          cancelledGroupRuns: groupCleanup.cancelledRuns,
+          pageShareSecrets: [...pageShareSecrets, ...groupCleanup.pageShareSecrets],
+        };
+      },
+      options.deleteMemories ? BOT_DELETION_TRANSACTION_OPTIONS : THREAD_LOCK_TRANSACTION_OPTIONS,
+    ),
   );
   if (!deletion) return;
   await Promise.allSettled(

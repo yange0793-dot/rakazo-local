@@ -143,15 +143,18 @@ export function resolveBotWorkspaceCwd(
   return resolveBotWorkspacePath(scope, botId, requestedCwd);
 }
 
-/** Paths a user may write while controlling this bot: its home, or shared/. */
-export function resolveBotUploadPath(
+/**
+ * Paths a bot tool may write on a team computer: its own folder, or shared/. Reads keep the
+ * wider rule in resolveBotWorkspacePath, so other bots' folders stay visible but are theirs to
+ * write. A private computer has one bot, so its whole workspace is writable as before.
+ */
+export function resolveBotWorkspaceWritePath(
   scope: ComputerMode,
   botId: string,
   requestedPath: string,
 ): string {
-  const stored = resolveBotWorkspacePath(scope, botId, requestedPath);
-  if (scope !== "team") return normalizeWorkspacePath(stored);
-  const normalized = normalizeWorkspacePath(stored);
+  const normalized = normalizeWorkspacePath(resolveBotWorkspacePath(scope, botId, requestedPath));
+  if (scope !== "team") return normalized;
   const botDirectory = teamBotWorkspaceDirectory(botId);
   if (
     normalized === botDirectory ||
@@ -162,6 +165,15 @@ export function resolveBotUploadPath(
     return normalized;
   }
   throw new Error("Path escapes the bot workspace");
+}
+
+/** Paths a user may write while controlling this bot: its home, or shared/. */
+export function resolveBotUploadPath(
+  scope: ComputerMode,
+  botId: string,
+  requestedPath: string,
+): string {
+  return resolveBotWorkspaceWritePath(scope, botId, requestedPath);
 }
 
 export function displayBotWorkspacePath(

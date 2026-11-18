@@ -322,6 +322,23 @@ describe("page kit", () => {
     expect(markup.indexOf(">1</td>")).toBeLessThan(markup.indexOf(">Record 1</td>"));
   });
 
+  it("renders record rows whose columns name no key by the record's own property order", () => {
+    const markup = html(
+      <Table
+        columns={["Account", "Amount"]}
+        rows={[
+          { account: "Acme", amount: "1.00" },
+          { account: "Globex", amount: "2.00" },
+        ]}
+      />,
+    );
+    expect(markup.match(/<tr>/g)).toHaveLength(3);
+    expect(markup).toContain(">Acme</td>");
+    expect(markup).toContain(">1.00</td>");
+    expect(markup).toContain(">Globex</td>");
+    expect(markup).toContain(">2.00</td>");
+  });
+
   it("marks a line chart's floor, middle and ceiling and thins x labels to fit", () => {
     const days = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"];
     const markup = html(

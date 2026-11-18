@@ -219,6 +219,18 @@ const visibleBlocks: Array<[MessageBlock, string]> = [
   [{ kind: "child_bot", botId: "child", name: "Helper", status: "created" }, "Helper"],
   [
     {
+      kind: "lesson_draft",
+      lessonId: "lesson",
+      runId: "run",
+      cue: "When a check is stale",
+      lesson: "Refresh the data first",
+      evidence: { kind: "run_failed", quote: "stale data" },
+      status: "draft",
+    },
+    "When a check is stale",
+  ],
+  [
+    {
       kind: "cloud_agent",
       agentId: "agent",
       title: "Fix",

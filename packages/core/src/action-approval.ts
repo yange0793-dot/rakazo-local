@@ -20,6 +20,8 @@ const APPROVAL_EXEMPT_TOOLS = new Set([
   "request_takeover",
   "request_secret",
   "generate_secret",
+  // Only queues a review of a finished run: no card, and nothing outside this run changes.
+  "reflect_on_run",
   "run_subagent",
   "spawn_bot",
   "schedule_create",
@@ -63,6 +65,47 @@ const OUTSIDE_RUN_SAFE_BUILTIN_TOOLS = new Set([
   "web_search",
 ]);
 
+/**
+ * Built-ins whose approval depends on what the run has read: `shell`, and tools that leave
+ * something behind after the run (a saved routine, a new bot, a shared memory document).
+ * Outside content can reach them in any run, so once text someone else wrote has entered a run
+ * they ask a person, the owner's own runs included. See toolNeedsPersonApproval.
+ */
+export const TAINT_GATED_BUILTIN_TOOLS: ReadonlySet<string> = new Set([
+  "save_shared_memory",
+  "schedule_create",
+  "schedule_update",
+  "spawn_bot",
+  "shell",
+]);
+
+/**
+ * Whether this call needs a person's approval because of who started the run or what it has
+ * read, rather than because of what the tool is:
+ *
+ * - `shell` runs commands as the deployment's own user. In a run the owner did not start, text
+ *   from another bot, a helper or a routine arrived before the command did, so a tainted run
+ *   asks. A message from an outside channel always asks.
+ * - The taint-gated writes above ask as soon as the run is tainted, whoever started it.
+ * - `add_mcp_server` always asks: a server can point at local services, and its tools are then
+ *   judged by their names alone.
+ *
+ * A saved always-allow rule still lets any of them through, and Never ask still runs them: this
+ * only keeps the approval model from deciding them on its own.
+ */
+export function toolNeedsPersonApproval(input: {
+  toolName: string;
+  ownerStartedRun: boolean;
+  messagingChannelRun: boolean;
+  tainted: boolean;
+}): boolean {
+  if (input.toolName === "add_mcp_server") return true;
+  if (input.toolName === "shell") {
+    return input.messagingChannelRun || (!input.ownerStartedRun && input.tainted);
+  }
+  return input.tainted && TAINT_GATED_BUILTIN_TOOLS.has(input.toolName);
+}
+
 const APPROVAL_REQUIRED_BUILTIN_TOOLS = new Set([
   "generate_image",
   "generate_video",
@@ -92,6 +135,11 @@ const EXPLICIT_APPROVAL_BUILTIN_TOOLS = new Set([
   "create_space",
   "set_child_instructions",
   "set_child_bot_model",
+  // Saving a skill writes instruction-like content the bot follows in later runs, so a person
+  // approves every write to the catalog and Auto Review never does.
+  "skill_create",
+  "skill_update",
+  "skill_delete",
 ]);
 
 const READ_ONLY_CONNECTOR_PATTERN = /(^|[_-])(get|list|search|find|read)([_-]|$)/i;
@@ -254,6 +302,8 @@ const OWN_STATE_RESULT_TOOLS = new Set([
   "message_user",
   "read_history",
   "recall_memory",
+  // Only confirms the review it queued.
+  "reflect_on_run",
   "remember",
   "render_plot",
   "request_secret",
@@ -321,10 +371,16 @@ export function newSiteOutcome(input: {
 }
 
 /**
- * These send data to the site their url names, so a site the run was not given is gated, and
- * "Always allow" on a card naming that site allows the site, never the tool.
+ * These name a site, so a site the run was not given is gated, and "Always allow" on a card
+ * naming that site allows the site, never the tool. `web_fetch` and `paid_request` send data to
+ * the site their url names; `browser_act` acts on the page it was observed on, and joins them
+ * only so the site its card names is the one its "Always allow" saves.
  */
-export const SITE_SENDING_TOOLS: ReadonlySet<string> = new Set(["web_fetch", "paid_request"]);
+export const SITE_SENDING_TOOLS: ReadonlySet<string> = new Set([
+  "browser_act",
+  "web_fetch",
+  "paid_request",
+]);
 
 export function siteAlwaysAllowed(rules: ActionApprovalRule[], site: string): boolean {
   return rules.some(

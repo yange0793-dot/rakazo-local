@@ -66,6 +66,21 @@ describe("local memory index client", () => {
     expect(transport.mock.calls[0]?.[0]).toBe(`${baseUrl}/search`);
   });
 
+  it("gives recall a short deadline while writes keep the longer one", async () => {
+    vi.mocked(dispatcherFetch).mockImplementation(async () => Response.json({ candidates: [] }));
+    const timeout = vi.spyOn(AbortSignal, "timeout");
+    const index = createLocalMemoryIndex({ baseUrl, token });
+    await index.search(
+      { namespace: "space-a:bot-a", query: "synthetic project", limit: 5 },
+      signal(),
+    );
+    expect(timeout).toHaveBeenLastCalledWith(5_000);
+    vi.mocked(dispatcherFetch).mockImplementation(async () => Response.json({ ok: true }));
+    await index.health(signal());
+    expect(timeout).toHaveBeenLastCalledWith(30_000);
+    timeout.mockRestore();
+  });
+
   it("preserves stable exact index ids for repeated upserts and deletes", async () => {
     const transport = vi.fn().mockImplementation(async () => Response.json({ ok: true }));
     vi.mocked(dispatcherFetch).mockImplementation(transport);

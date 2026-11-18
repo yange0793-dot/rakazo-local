@@ -81,6 +81,13 @@ msgstr "{0} (max {ATTACHMENT_MAX_COUNT} attachments)"
 msgid "{0} (over {1})"
 msgstr "{0} (over {1})"
 
+#. placeholder {0}: choice.label
+#. placeholder {0}: choice.title ?? choice.label
+#. placeholder {0}: selected?.label
+#: apps/web/src/pages/shell/chat-model-picker.tsx
+msgid "{0} (Unavailable)"
+msgstr "{0} (Unavailable)"
+
 #. placeholder {0}: preset.n
 #: apps/web/src/lib/cron.ts
 msgid "{0} {unitLabel}"
@@ -366,6 +373,10 @@ msgstr "{hiddenSelectedCount, plural, one {# selected model is hidden by your se
 #: apps/web/src/lib/relative-time.ts
 msgid "{hours}h ago"
 msgstr "{hours}h ago"
+
+#: apps/web/src/pages/model-settings/compatible-model-fields.tsx
+msgid "{id} (Unavailable)"
+msgstr "{id} (Unavailable)"
 
 #: apps/web/src/pages/Invite.tsx
 msgid "{inviterName} invited you"
@@ -1384,6 +1395,10 @@ msgstr "Amount"
 msgid "An API key is stored for this provider, not a subscription sign-in."
 msgstr "An API key is stored for this provider, not a subscription sign-in."
 
+#: apps/web/src/pages/routine-editor/trigger-cards.tsx
+msgid "An HTTPS endpoint"
+msgstr "An HTTPS endpoint"
+
 #: apps/web/src/lib/agent-import-errors.ts
 msgid "An imported API key could not be checked. Try again."
 msgstr "An imported API key could not be checked. Try again."
@@ -1412,7 +1427,6 @@ msgstr "Another assistant"
 
 #: apps/mobile/components/IncomingCall.tsx
 #: apps/mobile/lib/incoming-calls.ts
-#: apps/web/src/components/AskCard.tsx
 msgid "Answer"
 msgstr "Answer"
 
@@ -1827,6 +1841,7 @@ msgid "bot"
 msgstr "bot"
 
 #: apps/mobile/app/(settings)/messaging.tsx
+#: apps/mobile/app/(settings)/semantic-memory.tsx
 #: apps/mobile/app/bot-profile.tsx
 #: apps/mobile/app/computer.tsx
 #: apps/mobile/app/peer-chat.tsx
@@ -1842,6 +1857,7 @@ msgstr "bot"
 #: apps/web/src/lib/identity-display.ts
 #: apps/web/src/pages/IntegrationSetup.tsx
 #: apps/web/src/pages/MessagingSettingsPanel.tsx
+#: apps/web/src/pages/SemanticFactsSection.tsx
 #: apps/web/src/pages/Shell.tsx
 #: apps/web/src/pages/shell/avatar-studio-popover.tsx
 #: apps/web/src/pages/shell/message-view.tsx
@@ -2016,6 +2032,7 @@ msgstr "Can't read images"
 #: apps/mobile/app/(settings)/model-connection.tsx
 #: apps/mobile/app/(settings)/plugin.tsx
 #: apps/mobile/app/(settings)/profile.tsx
+#: apps/mobile/app/(settings)/semantic-memory.tsx
 #: apps/mobile/app/(settings)/skill.tsx
 #: apps/mobile/app/(settings)/space.tsx
 #: apps/mobile/app/(settings)/spending-limit.tsx
@@ -2071,6 +2088,7 @@ msgstr "Can't read images"
 #: apps/web/src/pages/onboarding/model-step.tsx
 #: apps/web/src/pages/PaymentWalletSettingsPanel.tsx
 #: apps/web/src/pages/PluginSubmissionsPanel.tsx
+#: apps/web/src/pages/SemanticFactsSection.tsx
 #: apps/web/src/pages/shell/create-bot-dialog.tsx
 #: apps/web/src/pages/shell/dialogs.tsx
 msgid "Cancel"
@@ -2258,6 +2276,7 @@ msgstr "Check the server URL and network, then test again."
 msgid "Check this yourself"
 msgstr "Check this yourself"
 
+#: apps/web/src/components/pages/PagePreviewPane.tsx
 #: apps/web/src/components/pages/PageView.tsx
 #: apps/web/src/components/pages/PageViewHost.tsx
 msgid "Check your connection and try again."
@@ -2312,6 +2331,11 @@ msgstr "Choose a provider"
 #: apps/web/src/pages/shell/agent-import.tsx
 msgid "Choose backup"
 msgstr "Choose backup"
+
+#: apps/mobile/app/(settings)/semantic-memory.tsx
+#: apps/web/src/pages/SemanticFactsSection.tsx
+msgid "Choose bot"
+msgstr "Choose bot"
 
 #: apps/web/src/pages/shell/agent-import.tsx
 #: apps/web/src/pages/shell/avatar-studio-popover.tsx
@@ -2490,6 +2514,10 @@ msgstr "Cloud"
 msgid "Cloud agent"
 msgstr "Cloud agent"
 
+#: apps/web/src/pages/shell/bot-panel.tsx
+msgid "Cloud computer"
+msgstr "Cloud computer"
+
 #: apps/mobile/app/sign-in.tsx
 #: apps/mobile/components/confirm-identity.tsx
 #: apps/mobile/components/thread/ask-block.tsx
@@ -2578,7 +2606,6 @@ msgstr "Completed"
 #: apps/mobile/components/ComputerCard.tsx
 #: apps/web/src/components/ComputerCard.tsx
 #: apps/web/src/pages/settings-nav.ts
-#: apps/web/src/pages/shell/bot-panel.tsx
 #: apps/web/src/pages/shell/bot-settings-sections.tsx
 msgid "Computer"
 msgstr "Computer"
@@ -2680,6 +2707,7 @@ msgstr "Confirm the URL is reachable from this browser session, then test again.
 #: apps/web/src/components/integrations/IntegrationSetup.tsx
 #: apps/web/src/components/integrations/plugin-marketplace.tsx
 #: apps/web/src/pages/memory-providers/HonchoSettingsForm.tsx
+#: apps/web/src/pages/memory-providers/LocalMemorySettingsForm.tsx
 #: apps/web/src/pages/memory-providers/SerenitySettingsForm.tsx
 #: apps/web/src/pages/memory-providers/SupermemorySettingsForm.tsx
 #: apps/web/src/pages/MessagingSettingsPanel.tsx
@@ -2793,6 +2821,7 @@ msgstr "Connected."
 #: apps/web/src/components/integrations/plugin-marketplace.tsx
 #: apps/web/src/pages/McpServersOverlay.tsx
 #: apps/web/src/pages/memory-providers/HonchoSettingsForm.tsx
+#: apps/web/src/pages/memory-providers/LocalMemorySettingsForm.tsx
 #: apps/web/src/pages/memory-providers/SerenitySettingsForm.tsx
 #: apps/web/src/pages/memory-providers/SupermemorySettingsForm.tsx
 #: apps/web/src/pages/shell/message-cards.tsx
@@ -2963,6 +2992,16 @@ msgstr "Copy prompt"
 #: apps/web/src/components/markdown-copy.tsx
 msgid "Copy rows"
 msgstr "Copy rows"
+
+#: apps/mobile/app/(settings)/semantic-memory.tsx
+#: apps/web/src/pages/SemanticFactsSection.tsx
+msgid "Correct"
+msgstr "Correct"
+
+#: apps/mobile/app/(settings)/semantic-memory.tsx
+#: apps/web/src/pages/SemanticFactsSection.tsx
+msgid "Correction"
+msgstr "Correction"
 
 #: apps/web/src/pages/AccountSettingsOverlay.tsx
 msgid "Cost"
@@ -3137,6 +3176,11 @@ msgstr "Could not continue"
 msgid "Could not copy the link."
 msgstr "Could not copy the link."
 
+#: apps/mobile/app/(settings)/semantic-memory.tsx
+#: apps/web/src/pages/SemanticFactsSection.tsx
+msgid "Could not correct memory"
+msgstr "Could not correct memory"
+
 #: apps/mobile/app/new-bot.tsx
 #: apps/web/src/pages/shell/agent-import.tsx
 #: apps/web/src/pages/shell/create-bot-dialog.tsx
@@ -3286,9 +3330,19 @@ msgstr "Could not download {name}. Try again."
 msgid "Could not enable tools"
 msgstr "Could not enable tools"
 
+#: apps/mobile/app/(settings)/semantic-memory.tsx
+#: apps/web/src/pages/SemanticFactsSection.tsx
+msgid "Could not export memory"
+msgstr "Could not export memory"
+
 #: apps/mobile/lib/use-subscription-sign-in.ts
 msgid "Could not finish sign-in"
 msgstr "Could not finish sign-in"
+
+#: apps/mobile/app/(settings)/semantic-memory.tsx
+#: apps/web/src/pages/SemanticFactsSection.tsx
+msgid "Could not forget memory"
+msgstr "Could not forget memory"
 
 #: apps/web/src/pages/AdminAccessPage.tsx
 msgid "Could not grant access"
@@ -3345,8 +3399,10 @@ msgstr "Could not load billing"
 msgid "Could not load bot"
 msgstr "Could not load bot"
 
+#: apps/mobile/app/(settings)/semantic-memory.tsx
 #: apps/mobile/app/index.tsx
 #: apps/mobile/lib/use-home-inbox.ts
+#: apps/web/src/pages/SemanticFactsSection.tsx
 msgid "Could not load bots"
 msgstr "Could not load bots"
 
@@ -3399,6 +3455,8 @@ msgstr "Could not load members"
 
 #: apps/mobile/app/(settings)/memory-note.tsx
 #: apps/mobile/app/(settings)/memory.tsx
+#: apps/mobile/app/(settings)/semantic-memory.tsx
+#: apps/web/src/pages/SemanticFactsSection.tsx
 msgid "Could not load memory"
 msgstr "Could not load memory"
 
@@ -3408,6 +3466,7 @@ msgstr "Could not load memory"
 #: apps/mobile/app/bot-model.tsx
 #: apps/mobile/app/bot-settings.tsx
 #: apps/web/src/pages/model-settings/use-model-settings.ts
+#: apps/web/src/pages/ModelSettingsOverlay.tsx
 msgid "Could not load model settings"
 msgstr "Could not load model settings"
 
@@ -3554,6 +3613,10 @@ msgstr "Could not play a test clip"
 #: apps/web/src/lib/tts.ts
 msgid "Could not play that clip."
 msgstr "Could not play that clip."
+
+#: apps/web/src/components/pages/DownloadPdfButton.tsx
+msgid "Could not prepare PDF. Try again."
+msgstr "Could not prepare PDF. Try again."
 
 #: apps/mobile/app/(settings)/plugin.tsx
 #: apps/web/src/components/integrations/plugin-marketplace.tsx
@@ -3903,6 +3966,11 @@ msgstr "Could not switch computer"
 msgid "Could not switch spaces"
 msgstr "Could not switch spaces"
 
+#: apps/mobile/app/(settings)/models.tsx
+#: apps/web/src/pages/model-settings/use-model-settings.ts
+msgid "Could not sync model sources"
+msgstr "Could not sync model sources"
+
 #: apps/web/src/pages/shell/use-computer.tsx
 msgid "Could not take control"
 msgstr "Could not take control"
@@ -4098,8 +4166,10 @@ msgstr "Create space"
 msgid "Create your Rakazo"
 msgstr "Create your Rakazo"
 
+#: apps/mobile/app/(settings)/semantic-memory.tsx
 #: apps/mobile/components/thread/message-bubble.tsx
 #: apps/web/src/components/AskCard.tsx
+#: apps/web/src/pages/SemanticFactsSection.tsx
 msgid "Created"
 msgstr "Created"
 
@@ -4179,6 +4249,7 @@ msgid "Custom header"
 msgstr "Custom header"
 
 #: apps/mobile/app/sign-in.tsx
+#: apps/web/src/pages/ModelSettingsOverlay.tsx
 msgid "Custom server"
 msgstr "Custom server"
 
@@ -4273,7 +4344,6 @@ msgstr "Default"
 
 #. placeholder {0}: thinkingLevelLabel(defaultThinkingLevel)
 #: apps/web/src/pages/routine-editor/model-settings.tsx
-#: apps/web/src/pages/shell/bot-settings-sections.tsx
 msgid "Default ({0})"
 msgstr "Default ({0})"
 
@@ -4284,6 +4354,10 @@ msgstr "Default from Hermes"
 #: apps/web/src/pages/shell/agent-import-plan.tsx
 msgid "Default from OpenClaw"
 msgstr "Default from OpenClaw"
+
+#: apps/web/src/pages/shell/chat-model-picker.tsx
+msgid "Default model for all bots"
+msgstr "Default model for all bots"
 
 #: apps/web/src/pages/MemorySettingsOverlay.tsx
 msgid "Default scope"
@@ -4547,10 +4621,12 @@ msgid "Disabled"
 msgstr "Disabled"
 
 #: apps/mobile/app/(settings)/memory-note.tsx
+#: apps/mobile/app/(settings)/semantic-memory.tsx
 msgid "Discard"
 msgstr "Discard"
 
 #: apps/mobile/app/(settings)/memory-note.tsx
+#: apps/mobile/app/(settings)/semantic-memory.tsx
 msgid "Discard changes?"
 msgstr "Discard changes?"
 
@@ -4662,6 +4738,7 @@ msgstr "Document changed. Reopen to edit the latest version."
 msgid "Don’t have an account?"
 msgstr "Don’t have an account?"
 
+#: apps/mobile/app/(settings)/semantic-memory.tsx
 #: apps/mobile/app/(settings)/vault.tsx
 #: apps/mobile/app/bot-settings.tsx
 #: apps/mobile/components/ComputerCard.tsx
@@ -4712,6 +4789,7 @@ msgstr "Download CSV"
 msgid "Download PDF"
 msgstr "Download PDF"
 
+#: apps/web/src/components/ArtifactFileCard.tsx
 #: apps/web/src/components/DesktopUpdates.tsx
 msgid "Downloading…"
 msgstr "Downloading…"
@@ -4748,9 +4826,9 @@ msgstr "Edit"
 msgid "Edit avatar"
 msgstr "Edit avatar"
 
-#: apps/web/src/components/AskCard.tsx
-msgid "Edit first"
-msgstr "Edit first"
+#: apps/mobile/components/model-providers.tsx
+msgid "Edit connection"
+msgstr "Edit connection"
 
 #: apps/mobile/app/(settings)/profile.tsx
 #: apps/mobile/app/bot-settings.tsx
@@ -4768,6 +4846,14 @@ msgstr "Edit Profile"
 #: apps/mobile/app/routine.tsx
 msgid "Edit routine"
 msgstr "Edit routine"
+
+#: apps/web/src/pages/shell/bot-settings-sections.tsx
+msgid "Effort"
+msgstr "Effort"
+
+#: apps/web/src/pages/shell/bot-settings-sections.tsx
+msgid "Effort unavailable for this model"
+msgstr "Effort unavailable for this model"
 
 #: apps/mobile/app/bot-profile.tsx
 #: apps/mobile/app/sign-in.tsx
@@ -4815,9 +4901,17 @@ msgstr "Embedded"
 msgid "Enable {0}"
 msgstr "Enable {0}"
 
+#: apps/web/src/pages/shell/bot-settings-sections.tsx
+msgid "Enable browser notifications"
+msgstr "Enable browser notifications"
+
 #: apps/web/src/components/ComputerProviderSettings.tsx
 msgid "End user ID"
 msgstr "End user ID"
+
+#: apps/web/src/pages/memory-providers/LocalMemorySettingsForm.tsx
+msgid "Endpoint"
+msgstr "Endpoint"
 
 #: apps/mobile/app/(settings)/billing.tsx
 msgid "Ends"
@@ -4876,6 +4970,10 @@ msgstr "Enter an amount"
 #: apps/web/src/lib/model-connection-preflight.ts
 msgid "Enter an API key before testing."
 msgstr "Enter an API key before testing."
+
+#: apps/web/src/lib/routine-draft.ts
+msgid "Enter an HTTPS URL"
+msgstr "Enter an HTTPS URL"
 
 #: apps/web/src/components/ComputerProviderSettings.tsx
 msgid "Environment ID"
@@ -5043,8 +5141,10 @@ msgstr "Expires {expiry}"
 msgid "Expiry"
 msgstr "Expiry"
 
+#: apps/mobile/app/(settings)/semantic-memory.tsx
 #: apps/mobile/app/bot-settings.tsx
 #: apps/web/src/components/AccountDataSettings.tsx
+#: apps/web/src/pages/SemanticFactsSection.tsx
 #: apps/web/src/pages/shell/bot-settings-sections.tsx
 msgid "Export"
 msgstr "Export"
@@ -5083,6 +5183,7 @@ msgstr "failed"
 #: apps/mobile/components/thread/special-message-card.tsx
 #: apps/mobile/lib/activity.ts
 #: apps/web/src/components/SubagentCard.tsx
+#: apps/web/src/components/ToolActivityDisclosure.tsx
 #: apps/web/src/pages/ActivityList.tsx
 msgid "Failed"
 msgstr "Failed"
@@ -5106,13 +5207,13 @@ msgstr "Failed."
 msgid "Failure handling"
 msgstr "Failure handling"
 
-#: apps/web/src/pages/routine-editor/trigger-cards.tsx
-msgid "Fields that mark a change"
-msgstr "Fields that mark a change"
+#: apps/web/src/pages/shell/bot-settings-sections.tsx
+msgid "Faster"
+msgstr "Faster"
 
 #: apps/web/src/pages/routine-editor/trigger-cards.tsx
-msgid "Fields to compare, e.g. id, modifiedTime (optional)"
-msgstr "Fields to compare, e.g. id, modifiedTime (optional)"
+msgid "Fields to compare (optional)"
+msgstr "Fields to compare (optional)"
 
 #: apps/mobile/components/thread/message-bubble.tsx
 #: apps/mobile/lib/search-sheet.ts
@@ -5222,10 +5323,25 @@ msgstr "Finishing MCP connection…"
 msgid "Focus message"
 msgstr "Focus message"
 
+#: apps/mobile/app/(settings)/semantic-memory.tsx
+#: apps/web/src/pages/SemanticFactsSection.tsx
+msgid "Forget"
+msgstr "Forget"
+
+#: apps/mobile/app/(settings)/semantic-memory.tsx
+#: apps/web/src/pages/SemanticFactsSection.tsx
+msgid "Forget this record?"
+msgstr "Forget this record?"
+
 #: apps/mobile/app/sign-in.tsx
 #: apps/web/src/pages/Auth.tsx
 msgid "Forgot password?"
 msgstr "Forgot password?"
+
+#: apps/mobile/app/(settings)/semantic-memory.tsx
+#: apps/web/src/pages/SemanticFactsSection.tsx
+msgid "Forgotten"
+msgstr "Forgotten"
 
 #: apps/mobile/app/(settings)/model-connection.tsx
 msgid "Found {count} model."
@@ -5512,6 +5628,11 @@ msgstr "Hide {label}"
 msgid "Hide chats"
 msgstr "Hide chats"
 
+#: apps/mobile/app/(settings)/semantic-memory.tsx
+#: apps/web/src/pages/SemanticFactsSection.tsx
+msgid "Hide history"
+msgstr "Hide history"
+
 #: apps/web/src/pages/routine-editor/trigger-cards.tsx
 msgid "Hide key"
 msgstr "Hide key"
@@ -5542,6 +5663,16 @@ msgstr "High"
 msgid "High"
 msgstr "High"
 
+#: apps/mobile/app/(settings)/semantic-memory.tsx
+#: apps/web/src/pages/SemanticFactsSection.tsx
+msgid "Historical"
+msgstr "Historical"
+
+#: apps/mobile/app/(settings)/semantic-memory.tsx
+#: apps/web/src/pages/SemanticFactsSection.tsx
+msgid "History"
+msgstr "History"
+
 #: apps/web/src/components/composer/HoldToTalk.tsx
 msgid "Hold to talk"
 msgstr "Hold to talk"
@@ -5554,6 +5685,16 @@ msgstr "Hold to talk, release to send"
 #: apps/web/src/components/vault/VaultItemEditor.tsx
 msgid "Home"
 msgstr "Home"
+
+#. js-lingui-explicit-id
+#: apps/web/src/pages/memory-providers/registry.ts
+msgid "Honcho Cloud"
+msgstr "Honcho Cloud"
+
+#. js-lingui-explicit-id
+#: apps/web/src/pages/memory-providers/registry.ts
+msgid "Honcho Cloud ({workspaceId})"
+msgstr "Honcho Cloud ({workspaceId})"
 
 #: apps/mobile/lib/cron.ts
 #: apps/web/src/lib/cron.ts
@@ -5600,6 +5741,10 @@ msgstr "How will you use Rakazo?"
 #: apps/mobile/components/compatible-endpoint-form.tsx
 msgid "http://127.0.0.1:8000/v1"
 msgstr "http://127.0.0.1:8000/v1"
+
+#: apps/web/src/pages/routine-editor/trigger-cards.tsx
+msgid "HTTPS URL"
+msgstr "HTTPS URL"
 
 #: apps/mobile/components/add-custom-integration.tsx
 msgid "https://example.com/graphql"
@@ -5652,7 +5797,9 @@ msgstr "Image input is not configured for this model."
 msgid "Image upload area"
 msgstr "Image upload area"
 
+#: apps/mobile/app/(settings)/semantic-memory.tsx
 #: apps/web/src/components/AccountDataSettings.tsx
+#: apps/web/src/pages/SemanticFactsSection.tsx
 msgid "Import"
 msgstr "Import"
 
@@ -5816,7 +5963,9 @@ msgstr "Invite link"
 msgid "Invite link copied"
 msgstr "Invite link copied"
 
+#: apps/mobile/app/(settings)/semantic-memory.tsx
 #: apps/web/src/pages/MemorySettingsOverlay.tsx
+#: apps/web/src/pages/SemanticFactsSection.tsx
 #: apps/web/src/pages/shell/bot-settings-sections.tsx
 msgid "Isolated"
 msgstr "Isolated"
@@ -5832,6 +5981,11 @@ msgstr "It could not be opened. Try again from the sidebar."
 #: apps/web/src/components/pages/PageViewHost.tsx
 msgid "It may have been deleted, or it belongs to someone else."
 msgstr "It may have been deleted, or it belongs to someone else."
+
+#: apps/mobile/app/(settings)/semantic-memory.tsx
+#: apps/web/src/pages/SemanticFactsSection.tsx
+msgid "It will no longer be recalled."
+msgstr "It will no longer be recalled."
 
 #: apps/mobile/lib/confirm-delete-section.ts
 #: apps/web/src/pages/shell/shell-dialogs.tsx
@@ -5964,10 +6118,6 @@ msgstr "Left"
 msgid "Let bots use this computer"
 msgstr "Let bots use this computer"
 
-#: apps/web/src/pages/MemorySettingsOverlay.tsx
-msgid "Lets bots save and recall facts by meaning, alongside MEMORY.md."
-msgstr "Lets bots save and recall facts by meaning, alongside MEMORY.md."
-
 #: apps/mobile/app/(settings)/general.tsx
 #: apps/web/src/pages/AccountSettingsOverlay.tsx
 #: apps/web/src/pages/shell/use-palette-actions.ts
@@ -6037,6 +6187,10 @@ msgstr "Load older runs"
 msgid "Load web images automatically"
 msgstr "Load web images automatically"
 
+#: apps/web/src/pages/shell/bot-settings-sections.tsx
+msgid "Loading"
+msgstr "Loading"
+
 #: apps/web/src/pages/ActivityList.tsx
 msgid "Loading activity…"
 msgstr "Loading activity…"
@@ -6053,6 +6207,10 @@ msgstr "Loading integrations…"
 #: apps/web/src/pages/MemorySettingsOverlay.tsx
 msgid "Loading memory settings…"
 msgstr "Loading memory settings…"
+
+#: apps/web/src/pages/SemanticFactsSection.tsx
+msgid "Loading memory…"
+msgstr "Loading memory…"
 
 #: apps/web/src/pages/ModelRoleSettings.tsx
 #: apps/web/src/pages/ModelSettingsOverlay.tsx
@@ -6080,6 +6238,7 @@ msgstr "Loading voice providers…"
 #: apps/mobile/app/(settings)/memory-note.tsx
 #: apps/mobile/app/(settings)/memory.tsx
 #: apps/mobile/app/(settings)/plugin.tsx
+#: apps/mobile/app/(settings)/semantic-memory.tsx
 #: apps/mobile/app/(settings)/skill.tsx
 #: apps/mobile/app/(settings)/skills.tsx
 #: apps/mobile/app/paywall.tsx
@@ -6109,6 +6268,11 @@ msgstr "Local access lets bots run commands without asking. Avoid it on shared o
 #: apps/web/src/pages/HostComputerPrompt.tsx
 msgid "Local computer access requires the latest desktop app."
 msgstr "Local computer access requires the latest desktop app."
+
+#. js-lingui-explicit-id
+#: apps/web/src/pages/memory-providers/registry.ts
+msgid "Local memory"
+msgstr "Local memory"
 
 #: apps/web/src/components/AccountMenu.tsx
 #: apps/web/src/components/SidebarFooter.tsx
@@ -6203,6 +6367,11 @@ msgstr "Manage other bots"
 #: apps/web/src/pages/plugins/domain-search.tsx
 msgid "Manual"
 msgstr "Manual"
+
+#: apps/mobile/app/(settings)/semantic-memory.tsx
+#: apps/web/src/pages/SemanticFactsSection.tsx
+msgid "Manual correction"
+msgstr "Manual correction"
 
 #: apps/web/src/pages/plugins/domain-search.tsx
 msgid "Manual setup required"
@@ -6324,6 +6493,11 @@ msgstr "Memory"
 msgid "Memory {position}"
 msgstr "Memory {position}"
 
+#: apps/mobile/app/(settings)/semantic-memory.tsx
+#: apps/web/src/pages/SemanticFactsSection.tsx
+msgid "Memory actions"
+msgstr "Memory actions"
+
 #: apps/web/src/pages/shell/agent-import-plan.tsx
 msgid "Memory for {title}"
 msgstr "Memory for {title}"
@@ -6349,8 +6523,10 @@ msgstr "Mentions OpenClaw features"
 msgid "Mentions: {mentions}"
 msgstr "Mentions: {mentions}"
 
+#: apps/mobile/app/(settings)/semantic-memory.tsx
 #: apps/mobile/lib/search-sheet.ts
 #: apps/mobile/lib/thread-message-text.ts
+#: apps/web/src/pages/SemanticFactsSection.tsx
 #: apps/web/src/pages/shell/chat-shared.ts
 #: apps/web/src/pages/shell/composer.tsx
 #: apps/web/src/pages/SpaceSearch.tsx
@@ -6473,6 +6649,7 @@ msgstr "Mode"
 #: apps/web/src/pages/onboarding/model-step.tsx
 #: apps/web/src/pages/routine-editor/model-settings.tsx
 #: apps/web/src/pages/shell/agent-import-plan.tsx
+#: apps/web/src/pages/shell/bot-panel.tsx
 #: apps/web/src/pages/shell/bot-settings-sections.tsx
 msgid "Model"
 msgstr "Model"
@@ -6499,6 +6676,10 @@ msgstr "Model options"
 #: apps/mobile/components/run-error-sheet.tsx
 msgid "Model provider"
 msgstr "Model provider"
+
+#: apps/mobile/components/model-providers.tsx
+msgid "Model sources"
+msgstr "Model sources"
 
 #: apps/mobile/app/(settings)/_layout.tsx
 #: apps/mobile/app/(settings)/account.tsx
@@ -6854,6 +7035,7 @@ msgid "Next page"
 msgstr "Next page"
 
 #: apps/mobile/app/routine.tsx
+#: apps/web/src/pages/RoutineEditor.tsx
 msgid "Next run"
 msgstr "Next run"
 
@@ -6896,10 +7078,19 @@ msgstr "No authentication"
 msgid "No bots"
 msgstr "No bots"
 
+#: apps/mobile/app/(settings)/semantic-memory.tsx
+#: apps/web/src/pages/SemanticFactsSection.tsx
+msgid "No bots available"
+msgstr "No bots available"
+
 #: apps/web/src/pages/GroupPanel.tsx
 #: apps/web/src/pages/shell/bot-picker.tsx
 msgid "No bots match"
 msgstr "No bots match"
+
+#: apps/web/src/pages/SemanticFactsSection.tsx
+msgid "No current records. Show history to include earlier ones."
+msgstr "No current records. Show history to include earlier ones."
 
 #: apps/mobile/components/thread/message-bubble.tsx
 #: apps/web/src/components/AskCard.tsx
@@ -6932,6 +7123,11 @@ msgstr "No matching bots"
 #: apps/web/src/pages/shell/chat-model-picker.tsx
 msgid "No matching models"
 msgstr "No matching models"
+
+#: apps/mobile/app/(settings)/semantic-memory.tsx
+#: apps/web/src/pages/SemanticFactsSection.tsx
+msgid "No matching records"
+msgstr "No matching records"
 
 #: apps/mobile/components/bot-member-picker.tsx
 #: apps/web/src/pages/GroupPanel.tsx
@@ -7121,6 +7317,11 @@ msgstr "Not sent. Tap to retry"
 msgid "Not supported in Rakazo"
 msgstr "Not supported in Rakazo"
 
+#: apps/mobile/components/model-providers.tsx
+#: apps/web/src/pages/model-settings/providers-section.tsx
+msgid "Not synced"
+msgstr "Not synced"
+
 #: apps/web/src/pages/shell/agent-import-plan.tsx
 msgid "Not used by Rakazo"
 msgstr "Not used by Rakazo"
@@ -7132,7 +7333,9 @@ msgid "Not working"
 msgstr "Not working"
 
 #: apps/mobile/app/(settings)/memory.tsx
+#: apps/mobile/app/(settings)/semantic-memory.tsx
 #: apps/web/src/pages/KnowledgeSection.tsx
+#: apps/web/src/pages/SemanticFactsSection.tsx
 msgid "Nothing remembered yet"
 msgstr "Nothing remembered yet"
 
@@ -7150,6 +7353,10 @@ msgstr "Notification settings"
 #: apps/web/src/pages/shell/bot-settings-sections.tsx
 msgid "Notifications"
 msgstr "Notifications"
+
+#: apps/web/src/pages/shell/bot-settings-sections.tsx
+msgid "Notifications are blocked in your browser's site settings."
+msgstr "Notifications are blocked in your browser's site settings."
 
 #: apps/mobile/components/inbox-rows.tsx
 msgid "notifications silenced"
@@ -7182,6 +7389,11 @@ msgstr "OAuth client secret (optional)"
 #: apps/web/src/pages/McpOAuthCallback.tsx
 msgid "OAuth connection failed"
 msgstr "OAuth connection failed"
+
+#: apps/mobile/app/(settings)/semantic-memory.tsx
+#: apps/web/src/pages/SemanticFactsSection.tsx
+msgid "Observed"
+msgstr "Observed"
 
 #: apps/web/src/components/ComputerDeviceSettings.tsx
 msgid "Offline"
@@ -7221,6 +7433,8 @@ msgstr "On the button"
 
 #: apps/mobile/lib/cron.ts
 #: apps/web/src/lib/cron.ts
+#: apps/web/src/pages/routine-editor/add-trigger-menu.tsx
+#: apps/web/src/pages/RoutineSchedule.tsx
 msgid "One-time"
 msgstr "One-time"
 
@@ -7274,6 +7488,8 @@ msgid "Open"
 msgstr "Open"
 
 #. placeholder {0}: headerName(group)
+#. placeholder {0}: page.title
+#: apps/web/src/components/pages/PageTile.tsx
 #: apps/web/src/pages/shell/sidebar-roster.tsx
 msgid "Open {0}"
 msgstr "Open {0}"
@@ -7322,6 +7538,10 @@ msgstr "Open conversation"
 msgid "Open external link?"
 msgstr "Open external link?"
 
+#: apps/web/src/components/pages/PagePreviewPane.tsx
+msgid "Open full screen"
+msgstr "Open full screen"
+
 #: apps/mobile/components/inline-image-attachment.tsx
 msgid "Open image {name}"
 msgstr "Open image {name}"
@@ -7338,6 +7558,10 @@ msgstr "Open in full window"
 #: apps/web/src/components/pages/SharePopover.tsx
 msgid "Open link"
 msgstr "Open link"
+
+#: apps/web/src/pages/shell/bot-panel.tsx
+msgid "Open live desktop"
+msgstr "Open live desktop"
 
 #: apps/web/src/pages/shell/chat-header.tsx
 msgid "Open navigation"
@@ -7441,6 +7665,10 @@ msgstr "OTA {id}, {date}"
 msgid "Other model…"
 msgstr "Other model…"
 
+#: apps/web/src/components/ToolActivityDisclosure.tsx
+msgid "Outcome unavailable"
+msgstr "Outcome unavailable"
+
 #: apps/web/src/pages/AccountSettingsOverlay.tsx
 msgid "Output"
 msgstr "Output"
@@ -7501,6 +7729,7 @@ msgstr "Page title"
 #: apps/mobile/app/_layout.tsx
 #: apps/mobile/app/bot-profile.tsx
 #: apps/mobile/app/group-settings.tsx
+#: apps/web/src/components/pages/PagePreviewPane.tsx
 #: apps/web/src/pages/GroupPanel.tsx
 #: apps/web/src/pages/shell/bot-panel.tsx
 #: apps/web/src/pages/shell/command-palette.tsx
@@ -7605,6 +7834,11 @@ msgstr "Paste your API key"
 #: apps/web/src/lib/model-connection-preflight.ts
 msgid "Paste your API key, then test again."
 msgstr "Paste your API key, then test again."
+
+#: apps/mobile/app/(settings)/semantic-memory.tsx
+#: apps/web/src/pages/SemanticFactsSection.tsx
+msgid "Path"
+msgstr "Path"
 
 #: apps/mobile/components/audio-attachment.tsx
 #: apps/mobile/components/voice-player-bar.tsx
@@ -7748,8 +7982,8 @@ msgid "Plugins"
 msgstr "Plugins"
 
 #: apps/web/src/pages/routine-editor/trigger-cards.tsx
-msgid "Post \"No changes\" in chat"
-msgstr "Post \"No changes\" in chat"
+msgid "Post a chat message when a check finds no changes. The routine won't run."
+msgstr "Post a chat message when a check finds no changes. The routine won't run."
 
 #: apps/mobile/lib/bot-template-copy.ts
 #: apps/web/src/components/bot-templates/bot-template-copy.ts
@@ -7874,6 +8108,7 @@ msgstr "Questions, approvals, takeover"
 msgid "Queued"
 msgstr "Queued"
 
+#: apps/mobile/app/(settings)/semantic-memory.tsx
 #: apps/mobile/components/thread/message-row.tsx
 #: apps/mobile/components/thread/quote-sheet.tsx
 msgid "Quote"
@@ -7915,6 +8150,11 @@ msgstr "Read from the page, not checked"
 msgid "Read replies aloud"
 msgstr "Read replies aloud"
 
+#. js-lingui-explicit-id
+#: apps/web/src/pages/memory-providers/registry.ts
+msgid "read/write"
+msgstr "read/write"
+
 #: apps/web/src/pages/shell/import-status.ts
 msgid "Ready"
 msgstr "Ready"
@@ -7936,6 +8176,11 @@ msgstr "Recall and write"
 #: apps/web/src/pages/memory-providers/HonchoSettingsForm.tsx
 msgid "Recall from this peer; save to Rakazo’s own peers."
 msgstr "Recall from this peer; save to Rakazo’s own peers."
+
+#. js-lingui-explicit-id
+#: apps/web/src/pages/memory-providers/registry.ts
+msgid "recall only"
+msgstr "recall only"
 
 #: apps/web/src/pages/memory-providers/SerenitySettingsForm.tsx
 msgid "Recall only"
@@ -7976,6 +8221,11 @@ msgstr "Reconnect OAuth"
 #: apps/web/src/components/ComputerUpdateProgress.tsx
 msgid "Reconnecting"
 msgstr "Reconnecting"
+
+#: apps/mobile/app/(settings)/semantic-memory.tsx
+#: apps/web/src/pages/SemanticFactsSection.tsx
+msgid "Record changed. Reload to discard your edit and use the latest version."
+msgstr "Record changed. Reload to discard your edit and use the latest version."
 
 #: apps/web/src/components/teach/TeachComputerOverlay.tsx
 msgid "Recording may have started, but the view could not refresh"
@@ -8062,6 +8312,12 @@ msgstr "Redirect URI"
 msgid "Refresh"
 msgstr "Refresh"
 
+#. placeholder {0}: source.label
+#: apps/mobile/components/model-providers.tsx
+#: apps/web/src/pages/model-settings/providers-section.tsx
+msgid "Refresh {0}"
+msgstr "Refresh {0}"
+
 #: apps/web/src/components/ModelCredits.tsx
 msgid "Refresh credits"
 msgstr "Refresh credits"
@@ -8108,8 +8364,10 @@ msgstr "Release"
 msgid "Release control"
 msgstr "Release control"
 
+#: apps/mobile/app/(settings)/semantic-memory.tsx
 #: apps/web/src/components/InstructionSettings.tsx
 #: apps/web/src/lib/client-update.ts
+#: apps/web/src/pages/SemanticFactsSection.tsx
 msgid "Reload"
 msgstr "Reload"
 
@@ -8343,6 +8601,10 @@ msgstr "Reply cancelled"
 msgid "Replying to {0}"
 msgstr "Replying to {0}"
 
+#: apps/web/src/pages/routine-editor/trigger-cards.tsx
+msgid "Report unchanged checks"
+msgstr "Report unchanged checks"
+
 #: apps/mobile/lib/user-error.ts
 #: apps/web/src/lib/user-error.ts
 msgid "Request a new code"
@@ -8482,6 +8744,7 @@ msgstr "Resume notifications"
 #: apps/mobile/app/(settings)/memory.tsx
 #: apps/mobile/app/(settings)/plugin.tsx
 #: apps/mobile/app/(settings)/profile.tsx
+#: apps/mobile/app/(settings)/semantic-memory.tsx
 #: apps/mobile/app/(settings)/skill.tsx
 #: apps/mobile/app/(settings)/skills.tsx
 #: apps/mobile/app/sign-in.tsx
@@ -8502,6 +8765,7 @@ msgstr "Resume notifications"
 #: apps/web/src/pages/plugins/plugin-browse.tsx
 #: apps/web/src/pages/PluginsOverlay.tsx
 #: apps/web/src/pages/PluginSubmissionsPanel.tsx
+#: apps/web/src/pages/SemanticFactsSection.tsx
 #: apps/web/src/pages/SpaceSettingOverrides.tsx
 msgid "Retry"
 msgstr "Retry"
@@ -8515,6 +8779,11 @@ msgstr "Retry now"
 #: apps/web/src/pages/shell/use-computer.tsx
 msgid "Retry screen"
 msgstr "Retry screen"
+
+#: apps/mobile/components/model-providers.tsx
+#: apps/web/src/pages/model-settings/providers-section.tsx
+msgid "Retry sync"
+msgstr "Retry sync"
 
 #. placeholder {0}: call.botName
 #: apps/web/src/components/call/CallCard.tsx
@@ -8597,6 +8866,11 @@ msgstr "Row"
 msgid "Rules"
 msgstr "Rules"
 
+#: apps/mobile/app/(settings)/semantic-memory.tsx
+#: apps/web/src/pages/SemanticFactsSection.tsx
+msgid "Run"
+msgstr "Run"
+
 #: apps/web/src/pages/RoutineEditor.tsx
 msgid "Run at"
 msgstr "Run at"
@@ -8625,6 +8899,7 @@ msgstr "running"
 #: apps/mobile/components/thread/special-message-card.tsx
 #: apps/mobile/lib/activity.ts
 #: apps/web/src/components/SubagentCard.tsx
+#: apps/web/src/components/ToolActivityDisclosure.tsx
 #: apps/web/src/pages/ActivityList.tsx
 #: apps/web/src/pages/RoutineList.tsx
 msgid "Running"
@@ -8714,6 +8989,11 @@ msgstr "Saturday"
 msgid "Save"
 msgstr "Save"
 
+#: apps/mobile/app/(settings)/semantic-memory.tsx
+#: apps/web/src/pages/SemanticFactsSection.tsx
+msgid "Save correction"
+msgstr "Save correction"
+
 #: apps/mobile/app/(settings)/memory-note.tsx
 msgid "Save mine"
 msgstr "Save mine"
@@ -8740,9 +9020,25 @@ msgstr "Save to Vault"
 msgid "Saved"
 msgstr "Saved"
 
+#. placeholder {0}: thinkingLevelLabel(choice.thinkingLevel!)
+#. placeholder {1}: thinkingLevelLabel(effectiveThinking)
+#: apps/web/src/pages/ModelRoleSettings.tsx
+msgid "Saved {0}; using {1}."
+msgstr "Saved {0}; using {1}."
+
 #: apps/mobile/lib/artifact-open.ts
 msgid "Saved {name} locally"
 msgstr "Saved {name} locally"
+
+#: apps/web/src/pages/shell/bot-settings-sections.tsx
+msgid "Saved {requestedLabel}; using {effectiveLabel}."
+msgstr "Saved {requestedLabel}; using {effectiveLabel}."
+
+#: apps/mobile/app/(settings)/_layout.tsx
+#: apps/mobile/app/(settings)/memory.tsx
+#: apps/web/src/pages/SemanticFactsSection.tsx
+msgid "Saved facts"
+msgstr "Saved facts"
 
 #: apps/web/src/pages/ScratchpadSection.tsx
 msgid "Saved, but list refresh failed"
@@ -8797,6 +9093,11 @@ msgstr "Scheduled routines"
 msgid "Scheduled tasks"
 msgstr "Scheduled tasks"
 
+#: apps/mobile/app/(settings)/semantic-memory.tsx
+#: apps/web/src/pages/SemanticFactsSection.tsx
+msgid "Scope"
+msgstr "Scope"
+
 #: apps/web/src/pages/McpServerForm.tsx
 msgid "Scopes (optional)"
 msgstr "Scopes (optional)"
@@ -8818,6 +9119,7 @@ msgstr "Screen not connected"
 #: apps/web/src/pages/model-settings/providers-section.tsx
 #: apps/web/src/pages/model-settings/role-model-picker.tsx
 #: apps/web/src/pages/plugins/domain-search.tsx
+#: apps/web/src/pages/SemanticFactsSection.tsx
 #: apps/web/src/pages/shell/bot-picker.tsx
 #: apps/web/src/pages/shell/chat-model-picker.tsx
 #: apps/web/src/pages/shell/command-palette.tsx
@@ -8939,6 +9241,11 @@ msgstr "Select text"
 msgid "Self-hosted"
 msgstr "Self-hosted"
 
+#. js-lingui-explicit-id
+#: apps/web/src/pages/memory-providers/registry.ts
+msgid "Self-hosted ({baseUrl})"
+msgstr "Self-hosted ({baseUrl})"
+
 #: apps/mobile/components/thread-composer.tsx
 #: apps/web/src/pages/shell/composer-parts.tsx
 msgid "Send"
@@ -8961,7 +9268,6 @@ msgid "Send <0>{linkCode}</0> to <1>{linkAddress}</1> from {linkApp} within 10 m
 msgstr "Send <0>{linkCode}</0> to <1>{linkAddress}</1> from {linkApp} within 10 minutes."
 
 #: apps/mobile/components/thread/ask-block.tsx
-#: apps/web/src/components/AskCard.tsx
 msgid "Send answer"
 msgstr "Send answer"
 
@@ -8974,10 +9280,6 @@ msgstr "Send as file"
 #: apps/web/src/components/AccountAccess.tsx
 msgid "Send deletion code"
 msgstr "Send deletion code"
-
-#: apps/web/src/components/AskCard.tsx
-msgid "Send it"
-msgstr "Send it"
 
 #: apps/web/src/components/composer/HoldToTalk.tsx
 msgid "Send recording"
@@ -9137,9 +9439,11 @@ msgstr "Share to"
 msgid "Share, anyone with the link can view"
 msgstr "Share, anyone with the link can view"
 
+#: apps/mobile/app/(settings)/semantic-memory.tsx
 #: apps/mobile/app/pages.tsx
-#: apps/web/src/components/pages/PagesList.tsx
+#: apps/web/src/components/pages/PageTile.tsx
 #: apps/web/src/pages/MemorySettingsOverlay.tsx
+#: apps/web/src/pages/SemanticFactsSection.tsx
 #: apps/web/src/pages/shell/bot-settings-sections.tsx
 msgid "Shared"
 msgstr "Shared"
@@ -9172,6 +9476,11 @@ msgstr "Show bots"
 msgid "Show chats"
 msgstr "Show chats"
 
+#: apps/mobile/app/(settings)/semantic-memory.tsx
+#: apps/web/src/pages/SemanticFactsSection.tsx
+msgid "Show history"
+msgstr "Show history"
+
 #: apps/web/src/pages/routine-editor/trigger-cards.tsx
 msgid "Show key"
 msgstr "Show key"
@@ -9185,6 +9494,7 @@ msgid "Show list"
 msgstr "Show list"
 
 #: apps/mobile/app/(settings)/integrations.tsx
+#: apps/mobile/app/(settings)/semantic-memory.tsx
 #: apps/mobile/app/pages.tsx
 #: apps/mobile/components/bot-context-cards.tsx
 #: apps/mobile/components/integration-plugins.tsx
@@ -9192,6 +9502,7 @@ msgstr "Show list"
 #: apps/web/src/pages/KnowledgeSection.tsx
 #: apps/web/src/pages/plugins/plugin-browse.tsx
 #: apps/web/src/pages/ScratchpadSection.tsx
+#: apps/web/src/pages/SemanticFactsSection.tsx
 msgid "Show more"
 msgstr "Show more"
 
@@ -9403,6 +9714,10 @@ msgstr "Slack not enabled"
 msgid "Slide up to lock"
 msgstr "Slide up to lock"
 
+#: apps/web/src/pages/shell/bot-settings-sections.tsx
+msgid "Smarter"
+msgstr "Smarter"
+
 #: apps/mobile/components/bot-organize-modal.tsx
 #: apps/mobile/components/inbox-swipe-row.ios.tsx
 #: apps/web/src/pages/BotContextMenu.tsx
@@ -9413,6 +9728,12 @@ msgstr "Snooze"
 #: apps/web/src/pages/shell/snoozed-chats.tsx
 msgid "Snoozed"
 msgstr "Snoozed"
+
+#: apps/mobile/app/(settings)/model-connection.tsx
+#: apps/mobile/components/model-providers.tsx
+#: apps/web/src/pages/model-settings/providers-section.tsx
+msgid "Some models unavailable"
+msgstr "Some models unavailable"
 
 #: apps/mobile/app/(settings)/skills.tsx
 #: apps/mobile/components/integration-plugins.tsx
@@ -9476,6 +9797,16 @@ msgstr "Sorted by {column}, descending"
 #: apps/web/src/components/bot-templates/bot-template-copy.ts
 msgid "Sorts new email and drafts the replies"
 msgstr "Sorts new email and drafts the replies"
+
+#: apps/mobile/app/(settings)/semantic-memory.tsx
+#: apps/web/src/pages/SemanticFactsSection.tsx
+msgid "Source"
+msgstr "Source"
+
+#: apps/mobile/app/(settings)/semantic-memory.tsx
+#: apps/web/src/pages/SemanticFactsSection.tsx
+msgid "Source ID"
+msgstr "Source ID"
 
 #: apps/mobile/app/(settings)/_layout.tsx
 #: apps/mobile/lib/identity-display.ts
@@ -9613,9 +9944,11 @@ msgstr "Starting…"
 msgid "State or region"
 msgstr "State or region"
 
+#: apps/mobile/app/(settings)/semantic-memory.tsx
 #: apps/mobile/components/run-error-sheet.tsx
 #: apps/web/src/pages/ActivityList.tsx
 #: apps/web/src/pages/Board.tsx
+#: apps/web/src/pages/SemanticFactsSection.tsx
 msgid "Status"
 msgstr "Status"
 
@@ -9652,6 +9985,7 @@ msgstr "Stop teaching"
 
 #: apps/mobile/components/thread/special-message-card.tsx
 #: apps/web/src/components/SubagentCard.tsx
+#: apps/web/src/components/ToolActivityDisclosure.tsx
 msgid "Stopped"
 msgstr "Stopped"
 
@@ -9716,10 +10050,19 @@ msgstr "Subscribe with your own AI"
 msgid "Subscription required"
 msgstr "Subscription required"
 
+#: apps/web/src/components/ToolActivityDisclosure.tsx
+msgid "Succeeded"
+msgstr "Succeeded"
+
 #: apps/mobile/lib/cron.ts
 #: apps/web/src/lib/cron.ts
 msgid "Sunday"
 msgstr "Sunday"
+
+#. js-lingui-explicit-id
+#: apps/web/src/pages/memory-providers/registry.ts
+msgid "Supermemory Cloud"
+msgstr "Supermemory Cloud"
 
 #: apps/mobile/components/compatible-endpoint-form.tsx
 #: apps/web/src/pages/model-settings/compatible-model-fields.tsx
@@ -9777,6 +10120,15 @@ msgstr "Switching servers deletes unsent messages."
 #: apps/web/src/pages/model-settings/space-bots-model.tsx
 msgid "Switching…"
 msgstr "Switching…"
+
+#: apps/mobile/components/model-providers.tsx
+msgid "Synced {syncedAt}"
+msgstr "Synced {syncedAt}"
+
+#. placeholder {0}: new Date(source.lastSyncedAt).toLocaleString()
+#: apps/web/src/pages/model-settings/providers-section.tsx
+msgid "Synced <0>{0}</0>"
+msgstr "Synced <0>{0}</0>"
 
 #: apps/mobile/app/(settings)/general.tsx
 #: apps/web/src/pages/AccountSettingsOverlay.tsx
@@ -10047,11 +10399,10 @@ msgstr "They get {weeks} weeks free."
 #: apps/web/src/components/call/CallCard.tsx
 #: apps/web/src/pages/ModelRoleSettings.tsx
 #: apps/web/src/pages/routine-editor/model-settings.tsx
-#: apps/web/src/pages/shell/bot-settings-sections.tsx
 msgid "Thinking"
 msgstr "Thinking"
 
-#. placeholder {0}: thinkingLevelLabel(choice.thinkingLevel)
+#. placeholder {0}: thinkingLevelLabel(effectiveThinking)
 #: apps/web/src/pages/ModelRoleSettings.tsx
 msgid "Thinking: {0}"
 msgstr "Thinking: {0}"
@@ -10209,7 +10560,8 @@ msgid "This page couldn't be shown."
 msgstr "This page couldn't be shown."
 
 #: apps/mobile/components/pages/page-card.tsx
-#: apps/web/src/components/pages/PageCard.tsx
+#: apps/web/src/components/pages/PagePreview.tsx
+#: apps/web/src/components/pages/PagePreviewPane.tsx
 #: apps/web/src/components/pages/PageView.tsx
 #: apps/web/src/components/pages/PageViewHost.tsx
 msgid "This page couldn't load"
@@ -10242,6 +10594,11 @@ msgstr "This permanently removes every message and stops current work. The chat 
 #: apps/web/src/lib/model-connection-preflight.ts
 msgid "This provider cannot be tested without saving."
 msgstr "This provider cannot be tested without saving."
+
+#: apps/mobile/app/(settings)/semantic-memory.tsx
+#: apps/web/src/pages/SemanticFactsSection.tsx
+msgid "This provider does not support managing saved facts."
+msgstr "This provider does not support managing saved facts."
 
 #: apps/web/src/lib/model-connection-preflight.ts
 msgid "This provider is not connected yet."
@@ -10301,8 +10658,10 @@ msgid "This week"
 msgstr "This week"
 
 #: apps/mobile/app/_layout.tsx
+#: apps/mobile/app/(settings)/semantic-memory.tsx
 #: apps/mobile/components/chat-header-title.tsx
 #: apps/mobile/components/thread/thread-header.tsx
+#: apps/web/src/pages/SemanticFactsSection.tsx
 msgid "Thread"
 msgstr "Thread"
 
@@ -10359,6 +10718,10 @@ msgstr "Today"
 msgid "Toggle sidebar"
 msgstr "Toggle sidebar"
 
+#: apps/web/src/pages/memory-providers/LocalMemorySettingsForm.tsx
+msgid "Token"
+msgstr "Token"
+
 #: apps/web/src/pages/AccountSettingsOverlay.tsx
 msgid "Tokens"
 msgstr "Tokens"
@@ -10367,6 +10730,10 @@ msgstr "Tokens"
 #: apps/web/src/pages/BotContextMenu.tsx
 msgid "Tomorrow"
 msgstr "Tomorrow"
+
+#: apps/web/src/pages/SemanticFactsSection.tsx
+msgid "Too long to save: a memory record holds at most 40 KB of text."
+msgstr "Too long to save: a memory record holds at most 40 KB of text."
 
 #: apps/mobile/lib/user-error.ts
 msgid "Too many attempts. Try again in a few minutes."
@@ -10542,7 +10909,6 @@ msgid "Type without recording"
 msgstr "Type without recording"
 
 #: apps/mobile/components/thread/ask-block.tsx
-#: apps/web/src/components/AskCard.tsx
 msgid "Type your answer"
 msgstr "Type your answer"
 
@@ -10553,6 +10919,15 @@ msgstr "Type your answer"
 #: apps/web/src/pages/Shell.tsx
 msgid "Unassigned"
 msgstr "Unassigned"
+
+#: apps/mobile/app/(settings)/model-connection.tsx
+#: apps/mobile/components/compatible-endpoint-form.tsx
+#: apps/mobile/components/model-providers.tsx
+#: apps/mobile/components/model-role-settings.tsx
+#: apps/web/src/pages/model-settings/providers-section.tsx
+#: apps/web/src/pages/ModelRoleSettings.tsx
+msgid "Unavailable"
+msgstr "Unavailable"
 
 #: apps/mobile/components/change-undo.tsx
 #: apps/web/src/components/AskCard.tsx
@@ -10667,6 +11042,11 @@ msgstr "Update required"
 #: apps/mobile/lib/api.ts
 msgid "Update your server to use AI data sharing in this mobile version."
 msgstr "Update your server to use AI data sharing in this mobile version."
+
+#: apps/mobile/app/(settings)/semantic-memory.tsx
+#: apps/web/src/pages/SemanticFactsSection.tsx
+msgid "Updated"
+msgstr "Updated"
 
 #: apps/mobile/components/pages/page-card.tsx
 msgid "Updated below"
@@ -10825,6 +11205,11 @@ msgstr "Use up to 512 letters, digits, _ or -."
 msgid "Use your own key"
 msgstr "Use your own key"
 
+#: apps/mobile/app/(settings)/semantic-memory.tsx
+#: apps/web/src/pages/SemanticFactsSection.tsx
+msgid "User"
+msgstr "User"
+
 #: apps/web/src/pages/memory-providers/HonchoSettingsForm.tsx
 msgid "User peer"
 msgstr "User peer"
@@ -10863,6 +11248,16 @@ msgstr "Using your API key"
 #: apps/web/src/components/ModelCredits.tsx
 msgid "Using your API key. Free plan ends {freeUntil}."
 msgstr "Using your API key. Free plan ends {freeUntil}."
+
+#: apps/mobile/app/(settings)/semantic-memory.tsx
+#: apps/web/src/pages/SemanticFactsSection.tsx
+msgid "Valid from"
+msgstr "Valid from"
+
+#: apps/mobile/app/(settings)/semantic-memory.tsx
+#: apps/web/src/pages/SemanticFactsSection.tsx
+msgid "Valid to"
+msgstr "Valid to"
 
 #: apps/mobile/components/login-fields-editor.tsx
 #: apps/mobile/components/vault-item-editor.tsx
@@ -10907,7 +11302,9 @@ msgstr "Verify and add"
 msgid "Verifying…"
 msgstr "Verifying…"
 
+#: apps/mobile/app/(settings)/semantic-memory.tsx
 #: apps/web/src/pages/Artifacts.tsx
+#: apps/web/src/pages/SemanticFactsSection.tsx
 msgid "Version"
 msgstr "Version"
 
@@ -10952,6 +11349,11 @@ msgstr "Voice request timed out."
 #: apps/web/src/lib/model-connection-preflight.ts
 msgid "Wait a moment and test again."
 msgstr "Wait a moment and test again."
+
+#: apps/mobile/components/thread/special-message-card.tsx
+#: apps/web/src/components/SubagentCard.tsx
+msgid "Waiting"
+msgstr "Waiting"
 
 #: apps/mobile/app/(settings)/model-connection.tsx
 msgid "Waiting for sign-in — the code expires in about {minutes} minutes."
@@ -11299,7 +11701,6 @@ msgid "Your card is charged the prorated difference today."
 msgstr "Your card is charged the prorated difference today."
 
 #: apps/mobile/app/computer.tsx
-#: apps/web/src/pages/Shell.tsx
 msgid "Your computer's disk is nearly full. Free up space by removing build output and caches you no longer need."
 msgstr "Your computer's disk is nearly full. Free up space by removing build output and caches you no longer need."
 

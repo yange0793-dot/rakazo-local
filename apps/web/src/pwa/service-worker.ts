@@ -127,7 +127,12 @@ export function installServiceWorker(
 
   async function navigate(request: Request): Promise<Response> {
     if (await activateWaitingWorker()) {
-      return new Response("", { headers: { Refresh: "0" } });
+      // Safari and home-screen web apps ignore the Refresh response header and would
+      // sit on a blank page; a tiny document reloads itself everywhere.
+      return new Response(
+        '<!doctype html><meta http-equiv="refresh" content="0"><title>Rakazo</title>',
+        { headers: { "content-type": "text/html; charset=utf-8" } },
+      );
     }
     try {
       return await scope.fetch(request);

@@ -45,7 +45,8 @@ async function runAfterFill(
     spaceId: "space-1",
     userId: "user-1",
     status: "queued",
-    trigger: "routine",
+    // A run the owner started, so a shell command needs no approval between the tools under test.
+    trigger: "user",
     routineId: "routine-1",
     retryOfRunId: null,
     leaseFence: 0,

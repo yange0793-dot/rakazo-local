@@ -7,7 +7,6 @@ import {
   deleteClaimedSpaceForMember,
   listClaimedSpaceBots,
   listClaimedSpaceComputers,
-  releaseSpaceDeletionClaim,
   renewSpaceDeletionClaim,
 } from "@rakazo/db";
 import { beforeEach, describe, expect, it, vi } from "vitest";
@@ -49,9 +48,11 @@ const deleted = {
 };
 const pointer = { id: "index-work-1", spaceId: removedSpaceId, userId: actor.userId };
 
+const indexOutbox = vi.hoisted(() => ({ deleteMany: vi.fn(async () => ({ count: 0 })) }));
+
 function makeDeps(overrides: Partial<SpaceDeletionDeps> = {}): SpaceDeletionDeps {
   return {
-    prisma: {},
+    prisma: { semanticMemoryIndexOutbox: indexOutbox },
     sandbox: {},
     home: {},
     jobs: {},
@@ -146,19 +147,19 @@ describe("space semantic memory cleanup", () => {
     expect(deleteClaimedSpaceForMember).toHaveBeenCalledOnce();
   });
 
-  it("keeps the claim and credentials when pending cleanup has no resolver", async () => {
+  it("still deletes the space when pending cleanup has no resolver", async () => {
     pendingIndexWork.mockResolvedValue([pointer]);
 
     await expect(
       deleteSpaceWithContent(makeDeps({ semanticFacts: makeFacts() }), actor, removedSpaceId),
-    ).rejects.toThrow("Reconnect local memory");
+    ).resolves.toEqual({ activeSpaceId: actor.spaceId });
 
-    expect(deleteClaimedSpaceForMember).not.toHaveBeenCalled();
-    expect(rehomeItemsLeaving).not.toHaveBeenCalled();
-    expect(releaseSpaceDeletionClaim).not.toHaveBeenCalled();
+    expect(deleteClaimedSpaceForMember).toHaveBeenCalledOnce();
+    expect(rehomeItemsLeaving).toHaveBeenCalledOnce();
+    expect(indexOutbox.deleteMany).toHaveBeenCalledWith({ where: { spaceId: removedSpaceId } });
   });
 
-  it("leaves failed index cleanup retryable instead of destroying the space", async () => {
+  it("still deletes the space when the index reports an error", async () => {
     pendingIndexWork.mockResolvedValue([pointer]);
     const syncIndex = vi.fn(async () => ({
       ok: false as const,
@@ -177,9 +178,8 @@ describe("space semantic memory cleanup", () => {
         actor,
         removedSpaceId,
       ),
-    ).rejects.toThrow("Synthetic index unavailable");
+    ).resolves.toEqual({ activeSpaceId: actor.spaceId });
 
-    expect(deleteClaimedSpaceForMember).not.toHaveBeenCalled();
-    expect(releaseSpaceDeletionClaim).not.toHaveBeenCalled();
+    expect(deleteClaimedSpaceForMember).toHaveBeenCalledOnce();
   });
 });

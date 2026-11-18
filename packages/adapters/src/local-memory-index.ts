@@ -6,6 +6,11 @@ export const MAX_LOCAL_MEMORY_TEXT_BYTES = 40 * 1024;
 export const MAX_LOCAL_MEMORY_CANDIDATES = 50;
 export const MAX_LOCAL_MEMORY_RESPONSE_BYTES = 64 * 1024;
 const REQUEST_TIMEOUT_MS = 30_000;
+/**
+ * Recall runs before every direct turn, so it needs its own short deadline: an index that is up
+ * but stuck (embedding lock, ONNX stall) must cost a few seconds, not the full write timeout.
+ */
+const SEARCH_TIMEOUT_MS = 5_000;
 const MAX_REQUEST_BYTES = 256 * 1024;
 
 export interface LocalMemoryCandidate {
@@ -52,9 +57,10 @@ export function createLocalMemoryIndex(
     path: string,
     body: object | undefined,
     signal: AbortSignal,
+    timeoutMs = REQUEST_TIMEOUT_MS,
   ): Promise<unknown> {
     assertLocalMemoryEndpointAllowed(baseUrl, options.allowedUrls);
-    const abort = AbortSignal.any([signal, AbortSignal.timeout(REQUEST_TIMEOUT_MS)]);
+    const abort = AbortSignal.any([signal, AbortSignal.timeout(timeoutMs)]);
     abort.throwIfAborted();
     const payload = body === undefined ? undefined : JSON.stringify(body);
     if (payload && Buffer.byteLength(payload, "utf8") > MAX_REQUEST_BYTES) {
@@ -123,7 +129,7 @@ export function createLocalMemoryIndex(
       ) {
         throw new Error(`Local memory limit must be between 1 and ${MAX_LOCAL_MEMORY_CANDIDATES}.`);
       }
-      const response = await request("/search", input, signal);
+      const response = await request("/search", input, signal, SEARCH_TIMEOUT_MS);
       const candidates =
         response && typeof response === "object"
           ? (response as { candidates?: unknown }).candidates

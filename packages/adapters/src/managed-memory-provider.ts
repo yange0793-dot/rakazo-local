@@ -6,7 +6,12 @@ import type {
 } from "@rakazo/adapter-kit";
 import { MEMORY_REVISION_CONFLICT_ERROR, semanticMemorySyncJob } from "@rakazo/adapter-kit";
 import type { PrismaClient } from "@rakazo/db";
-import { IsolationError, SemanticFactStore, semanticFactNamespace } from "@rakazo/db";
+import {
+  IsolationError,
+  lessonFactNamespace,
+  SemanticFactStore,
+  semanticFactNamespace,
+} from "@rakazo/db";
 import { getLogger } from "@rakazo/logging";
 import type { LocalMemoryIndex } from "./local-memory-index.js";
 import { LOCAL_MEMORY_PROVIDER_ID, MAX_LOCAL_MEMORY_CANDIDATES } from "./local-memory-index.js";
@@ -54,9 +59,14 @@ export function createManagedMemoryProvider(
         // Authorize the real bot/space before sending even the query to the index.
         await store.authorizeScope(request, ctx);
         const startedAt = performance.now();
+        // Lessons live in their own per-bot namespace, so ordinary recall never sees them.
+        const namespace =
+          request.kind === "lesson"
+            ? lessonFactNamespace(ctx.spaceId, request.botId)
+            : semanticFactNamespace(ctx.spaceId, request.scope, request.botId);
         const candidates = await options.index.search(
           {
-            namespace: semanticFactNamespace(ctx.spaceId, request.scope, request.botId),
+            namespace,
             query: request.query,
             // The DB filters stale revisions/history after the index returns; keep a surplus.
             limit: MAX_LOCAL_MEMORY_CANDIDATES,

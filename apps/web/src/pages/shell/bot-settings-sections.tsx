@@ -299,7 +299,7 @@ export function EffortBar({
             <span className="effort-stop-hit" aria-hidden="true">
               <span className="effort-stop-dot" />
             </span>
-            <span className="text-caption font-mono">{option}</span>
+            <span className="text-caption">{thinkingLevelLabel(option)}</span>
           </button>
         ))}
       </div>

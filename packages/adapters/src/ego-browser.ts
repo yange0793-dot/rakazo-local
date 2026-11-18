@@ -1540,7 +1540,8 @@ async function controlLost(task) {
     activeTask = undefined;
     return true;
   } catch {
-    return false;
+    // A listing that fails may be a space the user took over; stop rather than act on it.
+    return true;
   }
 }
 

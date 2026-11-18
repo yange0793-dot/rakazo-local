@@ -1,7 +1,6 @@
 import type { AgentRunRequest, AgentRuntime, JobPublisher } from "@rakazo/adapter-kit";
 import { historyCompactJob } from "@rakazo/adapter-kit";
 import type { MessageBlock } from "@rakazo/contracts";
-import { SEMANTIC_RECALL_DEFAULT_LIMIT } from "@rakazo/contracts";
 import {
   blocksToAgentHistoryText,
   botMessageContext,
@@ -23,7 +22,7 @@ import type {
   ConfiguredMemoryProvider,
   MemoryProviderResolver,
 } from "./memory-provider-factory.js";
-import { byteLength } from "./utf8.js";
+import { byteLength, truncateUtf8 } from "./utf8.js";
 
 /**
  * Sentinel for "nothing compacted yet". Message `seq` is 0-based, so an exclusive lower bound of
@@ -54,9 +53,12 @@ export const COMPACTION_BATCH_SIZE = 50;
 export const HISTORY_WINDOW_SIZE = 50;
 export const LEGACY_HISTORY_WINDOW_SIZE = 200;
 export const MAX_COMPACTED_SUMMARY_CHARS = 20_000;
-export const MAX_RECALLED_MEMORIES = SEMANTIC_RECALL_DEFAULT_LIMIT;
+/** Per-turn automatic recall stays small: the delivery budget is five facts, not the tool's 20. */
+export const MAX_RECALLED_MEMORIES = 5;
 /** The complete escaped/redacted data block, including its source citations. */
 export const MAX_RECALLED_MEMORY_BYTES = 10_000;
+/** A stored provenance quote is unbounded, so each citation is rendered up to this many bytes. */
+export const MAX_RECALLED_CITATION_BYTES = 400;
 
 export type CompactedHistoryMessage = {
   id?: string;
@@ -147,10 +149,19 @@ export function buildRecalledMemory(
       : result.memory.trim();
     if (seen.has(identity)) continue;
     seen.add(identity);
+    // A stored quote is not bounded, so the rendered citation is: otherwise one long quote
+    // displaces every other fact in the block budget.
+    let provenance: string | null = null;
+    if (result.provenance) {
+      const redacted = redactSecrets(result.provenance, secrets);
+      provenance = `provenance: ${escapePromptData(
+        byteLength(redacted) > MAX_RECALLED_CITATION_BYTES
+          ? `${truncateUtf8(redacted, MAX_RECALLED_CITATION_BYTES - 3)}…`
+          : redacted,
+      )}`;
+    }
     const citation = [
-      result.provenance
-        ? `provenance: ${escapePromptData(redactSecrets(result.provenance, secrets))}`
-        : null,
+      provenance,
       result.id ? `id: ${escapePromptData(redactSecrets(result.id, secrets))}` : null,
       result.entity ? `entity: ${escapePromptData(redactSecrets(result.entity, secrets))}` : null,
       result.revision === undefined ? null : `revision: ${result.revision}`,

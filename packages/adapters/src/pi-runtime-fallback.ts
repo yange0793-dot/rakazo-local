@@ -48,7 +48,6 @@ import {
   resolveRuntimeModel,
   sameModelTarget,
   thinkingLevelFor,
-  withOutputBudget,
 } from "./pi-runtime-models.js";
 import { MODEL_STREAM_IDLE_TIMEOUT_MESSAGE } from "./pi-runtime-stream.js";
 import { reportedContextWindow } from "./reported-context-window.js";
@@ -188,7 +187,12 @@ const LOWEST_FIRST_THINKING_LEVELS: readonly ModelThinkingLevel[] = [
  * more room: double the budget within the model's ceiling, the input reserve and any output cap
  * the provider asked for, or, when the user set the budget or it is already at that ceiling,
  * one thinking level less (never off, which some endpoints refuse).
+ *
+ * The retry may use half the window for output instead of the quarter the first call reserves:
+ * a budget that came from that quarter (`min(card, window / 4)`) could otherwise never grow.
  */
+const RETRY_OUTPUT_WINDOW_SHARE = 2;
+
 function lengthRecovery(
   target: RuntimeModelTarget,
   sentMaxTokens: number,
@@ -202,7 +206,10 @@ function lengthRecovery(
       sentMaxTokens * 2,
     );
     const maxTokens = target.model.contextWindow
-      ? effectiveOutputReserve(target.model.contextWindow, doubled)
+      ? Math.min(
+          doubled,
+          Math.max(1, Math.floor(target.model.contextWindow / RETRY_OUTPUT_WINDOW_SHARE)),
+        )
       : doubled;
     if (Number.isFinite(maxTokens) && maxTokens > sentMaxTokens) return { maxTokens };
   }
@@ -493,11 +500,20 @@ export function fallbackAwareModelStream(
       const thinkingLevel =
         thinkingOverride ??
         (target.model.reasoning ? thinkingLevelFor(target.model, requestedThinking) : "off");
-      const sentTarget = outputBudget ? withOutputBudget(target, outputBudget) : target;
+      // A budget raised for this call is the call's own cap, so the window reserve does not
+      // trim it back to the quarter it was raised from.
+      const callOptions =
+        outputBudget === undefined
+          ? attemptOptions
+          : {
+              ...attemptOptions,
+              maxTokens: Math.min(outputBudget, attemptOptions.maxTokens ?? outputBudget),
+            };
+      const sentTarget = target;
       const sentMaxTokens = resolveCompletionMaxTokens(
         sentTarget.model.maxTokens,
         sentTarget.config.maxTokens,
-        attemptOptions.maxTokens,
+        callOptions.maxTokens,
         sentTarget.model.reasoning,
         sentTarget.model.contextWindow,
         operatorMaxTokens(sentTarget.model),
@@ -510,10 +526,10 @@ export function fallbackAwareModelStream(
           requestContext(),
           // With backups the switch replaces the SDK's retry, so a hung model is not waited on twice.
           state.request.fallbackModels?.length
-            ? { ...attemptOptions, apiKey, reasoning, maxRetries: 0 }
+            ? { ...callOptions, apiKey, reasoning, maxRetries: 0 }
             : thinkingOverride
-              ? { ...attemptOptions, reasoning }
-              : attemptOptions,
+              ? { ...callOptions, reasoning }
+              : callOptions,
         );
       } catch (error) {
         finishWithThrownError(target, error);

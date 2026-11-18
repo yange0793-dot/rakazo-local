@@ -392,8 +392,8 @@ async function hasSkillDraftCreatedEvent(
   });
 }
 
-async function emitSkillDraftMessages(
-  deps: TeachingSessionDeps,
+export async function emitSkillDraftMessages(
+  deps: Pick<TeachingSessionDeps, "prisma" | "events">,
   actor: Actor,
   skill: TaughtSkillRow,
   bot: { id: string; thread: { id: string } | null },

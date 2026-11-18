@@ -29,6 +29,17 @@ RRF_OFFSET = 60
 MAX_REVISION = 2**53 - 1
 COLLECTION = "rakazo-semantic-index-v1"
 OWNER_FILE = ".rakazo-local-memory-index"
+PROJECTION_FILE = ".rakazo-lexical-projection"
+PROJECTION_VERSION = "cjk-bigram-v1\n"
+PROJECTION_PAGE = 200
+# Both legs score every candidate inside their own top-k, so without a floor RRF returns
+# unrelated facts for any query. Measured with the cached embeddinggemma model: unrelated queries
+# peak at 0.568 against real stored facts and at 0.615 against a synthetic varied corpus, while
+# relevant queries reach 0.61–0.87. 0.60 keeps those and still drops the unrelated band. The
+# lexical leg has no comparable floor: the same exact identifier measures 0.69 BM25 in a 3-fact
+# index and 3.22 in a 6-fact one, while a coincidental bigram reached 5.72 on a 39-fact index, so
+# any lexical cutoff would either drop exact identifiers or keep the noise.
+MIN_VECTOR_SIMILARITY = 0.60
 TOKEN_RE = re.compile(r"[A-Za-z0-9._~+/\-]{32,512}\Z")
 MINILM_FILES = (
     "config.json", "model.onnx", "special_tokens_map.json",
@@ -65,6 +76,29 @@ def revision_field(data: dict) -> int:
     if type(revision) is not int or revision < 1 or revision > MAX_REVISION:
         raise InvalidRequest("Invalid revision.")
     return revision
+
+
+# Languages written without spaces between words reach the FTS5 whitespace tokenizer as one
+# oversized token, so both the document and the query add their overlapping 2-character runs.
+CJK_RUN = re.compile(
+    "[\u3040-\u30ff\u3400-\u4dbf\u4e00-\u9fff\uf900-\ufaff\U00020000-\U0002fa1f]+"
+)
+
+
+def lexical_text(text: str) -> str:
+    """The text with every CJK run replaced by its space-separated 2-character runs.
+
+    Spaces are what the unicode61 tokenizer splits on, and a run without them reaches it as one
+    oversized token that no ordinary query matches. Replacement, rather than appending, keeps
+    the function idempotent: every emitted token is a 2-character run that maps to itself, so
+    the startup migration is safe to rerun.
+    """
+
+    def grams(match: re.Match) -> str:
+        run = match.group(0)
+        return " ".join([run] if len(run) == 1 else [run[index : index + 2] for index in range(len(run) - 1)])
+
+    return CJK_RUN.sub(grams, text)
 
 
 def validate_palace_path(path: Path) -> Path:
@@ -155,6 +189,34 @@ def load_cached_embedder(model: str, cache: Path):
     return get_embedding_function(device="cpu", model=model)
 
 
+def migrate_lexical_projection(collection, palace: Path) -> int:
+    """Add the CJK bigrams to documents stored before the projection existed; safe to rerun.
+
+    Only the FTS source changes: embeddings, ids and metadata are kept as they are, so this
+    runs on an existing palace without re-embedding anything.
+    """
+    marker = palace / PROJECTION_FILE
+    if marker.is_file() and marker.read_text(encoding="utf-8") == PROJECTION_VERSION:
+        return 0
+    migrated = 0
+    offset = 0
+    while True:
+        page = collection.get(limit=PROJECTION_PAGE, offset=offset, include=["documents"])
+        if not page.ids:
+            break
+        projected = [lexical_text(document) for document in page.documents]
+        changed = [position for position, document in enumerate(page.documents) if projected[position] != document]
+        if changed:
+            collection.update(
+                ids=[page.ids[position] for position in changed],
+                documents=[projected[position] for position in changed],
+            )
+            migrated += len(changed)
+        offset += len(page.ids)
+    marker.write_text(PROJECTION_VERSION, encoding="utf-8")
+    return migrated
+
+
 class LocalIndex:
     def __init__(self, backend, palace: Path, embedder):
         self.backend = backend
@@ -194,7 +256,7 @@ class LocalIndex:
         self.collection.upsert(
             ids=[self.storage_id(namespace, index_id)],
             # Native FTS5/BM25 needs text in this private index; authority stays in Postgres.
-            documents=[content],
+            documents=[lexical_text(content)],
             metadatas=[{"wing": namespace, "namespace": namespace, "id": fact_id, "revision": revision}],
             embeddings=[self.vector(content)],
         )
@@ -218,21 +280,30 @@ class LocalIndex:
             query_embeddings=[self.vector(query)], n_results=limit,
             where={"wing": namespace}, include=["metadatas", "distances"],
         )
-        lexical = self.collection.lexical_search(query=query, n_results=limit, where={"wing": namespace})
+        lexical = self.collection.lexical_search(
+            query=lexical_text(query), n_results=limit, where={"wing": namespace},
+        )
+        vector_hits = []
+        for metadata, distance in zip(result.metadatas[0], result.distances[0], strict=True):
+            if not math.isfinite(distance):
+                raise RuntimeError("Index returned an invalid score.")
+            similarity = 1.0 - distance
+            if similarity >= MIN_VECTOR_SIMILARITY:
+                vector_hits.append((metadata, similarity))
+        lexical_hits = []
+        for hit in lexical.hits:
+            if not math.isfinite(hit.score):
+                raise RuntimeError("Index returned an invalid score.")
+            lexical_hits.append((hit.metadata, hit.score))
         candidates = {}
         # Equal-weight reciprocal ranks avoid mixing cosine and BM25 score scales.
         # Lexical-first stable ties retain exact path/id hits outside the vector top-k.
-        for rows in (
-            [(hit.metadata, hit.score) for hit in lexical.hits],
-            zip(result.metadatas[0], result.distances[0], strict=True),
-        ):
+        for rows in (lexical_hits, vector_hits):
             for rank, (metadata, backend_score) in enumerate(rows, start=1):
                 if metadata.get("namespace") != namespace:
                     continue
                 fact_id = text_field(metadata, "id", 256)
                 revision = revision_field(metadata)
-                if not math.isfinite(backend_score):
-                    raise RuntimeError("Index returned an invalid score.")
                 candidate = candidates.setdefault(
                     (fact_id, revision), {"id": fact_id, "revision": revision, "score": 0.0},
                 )
@@ -367,6 +438,9 @@ def main(argv=None) -> int:
     backend = SQLiteExactBackend()
     try:
         index = LocalIndex(backend, palace, embedder)
+        migrated = migrate_lexical_projection(index.collection, palace)
+        if migrated:
+            print(f"Migrated the lexical projection for {migrated} indexed documents.", flush=True)
         server_type = IPv6IndexHTTPServer if host.version == 6 else IndexHTTPServer
         with server_type((str(host), args.port), index, token) as server:
             print(f"Local memory index listening on loopback port {args.port}.", flush=True)

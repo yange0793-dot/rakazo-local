@@ -9,6 +9,7 @@ import {
   formatSkillRunPrompt,
   formatSkillsCatalogInstruction,
   isCallClientNonce,
+  isConversationalRun,
   isMessagingChannelRun,
   isOwnerStartedRun,
   isTerminal,
@@ -36,6 +37,7 @@ import {
   parseComputerMode,
   RunHistoryWriteError,
   readRunTimingFields,
+  recordLessonUse,
   recordUsage,
   settleReleasedTakeoverCards,
   teamChatRunFromOwner,
@@ -106,6 +108,7 @@ import {
   neutralizeSpeakerLabels,
   personSpeaker,
 } from "./history-speakers.js";
+import { buildLessonNotes } from "./lesson-notes.js";
 import { createMediaGenerationProvider } from "./media-generation-factory.js";
 import { loadAgentMemoryContext } from "./memory-context.js";
 import { resolveMemberMainModel, selectConfiguredModel } from "./model-roles.js";
@@ -152,6 +155,7 @@ import {
   mayOpenModelStream,
   renewRunLease,
   requeueComputerRun,
+  requeueRunAfterShutdown,
   retryRunSetup,
   runEndedForThisWorker,
 } from "./run-lifecycle.js";
@@ -185,7 +189,11 @@ import {
   selectBuiltinToolsForRun,
 } from "./run-tool-selection.js";
 import { applyTool } from "./run-tools.js";
-import { historyMyChatsAllowed, semanticRecallForRun } from "./run-tools-memory.js";
+import {
+  historyMyChatsAllowed,
+  lessonRecallForRun,
+  semanticRecallForRun,
+} from "./run-tools-memory.js";
 import type { UserComputerState } from "./run-tools-user-computer.js";
 import { USER_COMPUTER_SHELL_TOOL, userComputerOwner } from "./run-tools-user-computer.js";
 import { createRunTrustLoaders } from "./run-trust.js";
@@ -644,6 +652,9 @@ export function createRunExecutor(executorDeps: ExecutorDeps) {
           deps.memoryProviders.resolve(run.spaceId),
           deps.prisma.taughtSkill.findMany({
             where: { botId: run.botId, spaceId: run.spaceId, status: "saved" },
+            // Newest first, so a long-lived bot's catalog favors what it learned recently.
+            // No take: invokedSkill matches by name across every saved skill.
+            orderBy: { updatedAt: "desc" },
           }),
           listAgentSkillRecords(deps.prisma, {
             spaceId: run.spaceId,
@@ -876,6 +887,13 @@ export function createRunExecutor(executorDeps: ExecutorDeps) {
         const sourceHistoryIndex = messages.findIndex(
           (message) => message.id === run.sourceMessageId,
         );
+        const previousUserMessages =
+          sourceHistoryIndex < 0
+            ? []
+            : messages
+                .slice(sourceHistoryIndex + 1)
+                .filter((message) => message.steeringMessages.length === 0);
+        const externalRecall = nonOwnerChatRun || Boolean(thread.externalConversationId);
         const recallPromise = semanticRecallForRun(
           {
             provider: semanticMemory,
@@ -883,17 +901,26 @@ export function createRunExecutor(executorDeps: ExecutorDeps) {
             botId: bot.id,
             run,
             sourceMessage,
-            previousMessages:
-              sourceHistoryIndex < 0
-                ? []
-                : messages
-                    .slice(sourceHistoryIndex + 1)
-                    .filter((message) => message.steeringMessages.length === 0),
-            external: nonOwnerChatRun || Boolean(thread.externalConversationId),
+            previousMessages: previousUserMessages,
+            external: externalRecall,
             includeSemanticRecall: threadContext.includeSemanticRecall,
             prompt: task.prompt,
             historyCompactedUpToSeq: thread.historyCompactedUpToSeq,
             historyGeneration: thread.historyCompactionGeneration,
+            secrets: runSecrets,
+          },
+          context,
+        );
+        // Lessons recall alongside facts, with their own namespace and query.
+        const lessonRecallPromise = lessonRecallForRun(
+          {
+            provider: semanticMemory,
+            botId: bot.id,
+            run,
+            sourceMessage,
+            previousMessages: previousUserMessages,
+            external: externalRecall,
+            prompt: task.prompt,
             secrets: runSecrets,
           },
           context,
@@ -905,6 +932,7 @@ export function createRunExecutor(executorDeps: ExecutorDeps) {
           scratchpadContext,
           ticketContext,
           automaticRecall,
+          lessonRecall,
         ] = await Promise.all([
           discoveredPromise,
           loadCurrentTurnImages(deps, turnBlocks, context),
@@ -924,6 +952,7 @@ export function createRunExecutor(executorDeps: ExecutorDeps) {
                 text: task.prompt,
               }),
           recallPromise,
+          lessonRecallPromise,
         ]);
         const semanticMemoryEnabled = Boolean(semanticMemory) && !nonOwnerChatRun;
         const recalled = automaticRecall.response;
@@ -931,6 +960,12 @@ export function createRunExecutor(executorDeps: ExecutorDeps) {
           getLogger().error(
             "semantic memory recall failed",
             sanitizeConnectorError(recalled.error, runSecrets),
+          );
+        }
+        if (lessonRecall && !lessonRecall.ok) {
+          getLogger().error(
+            "lesson recall failed",
+            sanitizeConnectorError(lessonRecall.error, runSecrets),
           );
         }
         // Early durable recall is not evidence that a legacy thread's missing history is covered.
@@ -948,13 +983,14 @@ export function createRunExecutor(executorDeps: ExecutorDeps) {
         }
         const runDeployment = deps.deploymentModelConfigured ? resolveDeploymentModel() : null;
         const runtimeFallback = runtimeFallbackModel(deps.runtime);
+        // A model the deployment itself serves needs no user connection: its own model
+        // (deployment key or host credentials) and the eval runtime's scripted model resolve
+        // without one. A pin must not demand a connection the unpinned path never needs.
+        const deploymentServesModel =
+          modelChoice.modelProvider === runDeployment?.provider ||
+          modelChoice.modelProvider === runtimeFallback?.provider;
         const pinError =
-          !pinnedComputerModels &&
-          run.modelPinned &&
-          !(
-            (await modelCreditBillingEnabled(deps)) &&
-            modelChoice.modelProvider === runDeployment?.provider
-          )
+          !pinnedComputerModels && run.modelPinned && !deploymentServesModel
             ? pinnedModelCredentialError(modelChoice, overrideCredential)
             : undefined;
         const selected = pinnedComputerModels
@@ -1002,7 +1038,8 @@ export function createRunExecutor(executorDeps: ExecutorDeps) {
         if (
           !pinnedComputerModels &&
           run.modelPinned &&
-          (selected.provider !== modelChoice.modelProvider || selected.id !== modelChoice.modelId)
+          (selectedProvider !== modelChoice.modelProvider ||
+            selectedModelId !== modelChoice.modelId)
         ) {
           await failRunBeforeModel(PINNED_PROVIDER_NOT_CONNECTED, true);
           return;
@@ -1512,6 +1549,9 @@ export function createRunExecutor(executorDeps: ExecutorDeps) {
           screen: { lastFrameId: undefined, unchangedVisualStreak: { count: 0 } },
           toolCallStreak: { key: undefined, count: 0 },
           overLimitActionCalls: 0,
+          steeringClaimed: 0,
+          toolLoopStopped: false,
+          injectedLessonIds: [],
           toolResults: new Map(),
           tainted: initiallyTainted,
           ownerSettingsRefused: false,
@@ -1556,6 +1596,8 @@ export function createRunExecutor(executorDeps: ExecutorDeps) {
           secrets: runSecrets,
           source: {
             ownerStartedRun,
+            ownerAuthoredRun:
+              ownerStartedRun && sourceMessage?.authorUserId === run.userId && !nonOwnerChatRun,
             messagingChannelRun: nonOwnerChatRun,
             channelId,
             historySearchBeforeSeq,
@@ -1707,30 +1749,6 @@ export function createRunExecutor(executorDeps: ExecutorDeps) {
         const sharedSpaceNote = people
           ? await loadSharedSpaceNote(deps.prisma, run.spaceId, run.userId)
           : undefined;
-        const prompt = [
-          replyContext,
-          run.trigger === "reaction" && replyContext ? undefined : basePrompt,
-          takeoverResume?.promptNote,
-          approvalContinuation,
-          // A hang-up turn is read, not heard: no spoken-reply constraint.
-          voiceCall && !callEndRun ? voiceCallInstruction(disabledBuiltinTools) : undefined,
-          // Per-turn, not in the system prompt: the timestamp changes every call and would break the cacheable prefix.
-          formatCurrentTimeInstruction(deps.now?.() ?? new Date(), userTimeZone),
-          lateRoutineNote,
-          sharedSpaceNote,
-        ]
-          .filter(Boolean)
-          .join("\n\n");
-        const historicalContext: AgentRunRequest["history"] = [];
-        if (compactedHistory.usedLocalSummary && compactedHistory.summary) {
-          historicalContext.push({
-            role: "user",
-            content: redactSecrets(
-              formatCompactedSummary(compactedHistory.summary, thread.historyCompactedUpToSeq!),
-              runSecrets,
-            ),
-          });
-        }
         // Model/browser setup can add protected values after recall; charge redaction at injection.
         const recallBlock = recalled?.ok ? buildRecalledMemory(recalled.value, runSecrets) : null;
         if (recallBlock) {
@@ -1743,10 +1761,51 @@ export function createRunExecutor(executorDeps: ExecutorDeps) {
           });
         }
         const recalledMemory = recallBlock?.text ?? "";
-        if (recalledMemory) {
+        const lessonNotes = lessonRecall?.ok
+          ? buildLessonNotes(
+              lessonRecall.value.flatMap((result) =>
+                result.id && result.revision !== undefined
+                  ? [{ id: result.id, revision: result.revision, content: result.memory }]
+                  : [],
+              ),
+              runSecrets,
+            )
+          : { ids: [] };
+        if (lessonNotes.ids.length > 0) {
+          ctx.state.injectedLessonIds = lessonNotes.ids;
+          await recordLessonUse(deps.prisma, {
+            spaceId: run.spaceId,
+            botId: bot.id,
+            runId,
+            lessonIds: lessonNotes.ids,
+          });
+        }
+        // Recalled facts and notes change every turn, so they ride at the end of the current turn
+        // rather than the front of history: a moved first message rewrites the cached prefix.
+        const prompt = [
+          replyContext,
+          run.trigger === "reaction" && replyContext ? undefined : basePrompt,
+          takeoverResume?.promptNote,
+          approvalContinuation,
+          // A hang-up turn is read, not heard: no spoken-reply constraint.
+          voiceCall && !callEndRun ? voiceCallInstruction(disabledBuiltinTools) : undefined,
+          // Per-turn, not in the system prompt: the timestamp changes every call and would break the cacheable prefix.
+          formatCurrentTimeInstruction(deps.now?.() ?? new Date(), userTimeZone),
+          lateRoutineNote,
+          sharedSpaceNote,
+          recalledMemory || undefined,
+          lessonNotes.text,
+        ]
+          .filter(Boolean)
+          .join("\n\n");
+        const historicalContext: AgentRunRequest["history"] = [];
+        if (compactedHistory.usedLocalSummary && compactedHistory.summary) {
           historicalContext.push({
             role: "user",
-            content: recalledMemory,
+            content: redactSecrets(
+              formatCompactedSummary(compactedHistory.summary, thread.historyCompactedUpToSeq!),
+              runSecrets,
+            ),
           });
         }
         const modelImageBudget =
@@ -1850,6 +1909,32 @@ export function createRunExecutor(executorDeps: ExecutorDeps) {
           }
           return true;
         };
+        // A background turn steps aside for a person's message waiting on the bot's computer:
+        // the turn is aborted and requeued between tool calls, so it never opens another model
+        // call ahead of the person. Its tool effects replay from the ledger on the next attempt.
+        // One yield per run: a turn that already restarted once (this yield, or any other
+        // requeue) runs to its end, so a busy conversation cannot restart it over and over.
+        let yieldedToWaitingUser = false;
+        const userTurnWaiting = async () => {
+          if (isConversationalRun(run.trigger)) return false;
+          ctx.state.earlierAttempt ??= deps.prisma.attempt
+            .count({ where: { runId } })
+            .then((count) => count > 1);
+          if (await ctx.state.earlierAttempt) return false;
+          const waiting = await deps.prisma.run.findFirst({
+            where: {
+              botId: run.botId,
+              id: { not: runId },
+              status: "queued",
+              trigger: "user",
+              // A group member waits for the members before it, not for this computer.
+              groupTurn: null,
+              OR: [{ wakeAt: null }, { wakeAt: { lte: new Date() } }],
+            },
+            select: { id: true },
+          });
+          return waiting !== null;
+        };
 
         try {
           if (checkpointLoadError) throw checkpointLoadError;
@@ -1910,7 +1995,7 @@ export function createRunExecutor(executorDeps: ExecutorDeps) {
                 redactedTicketContext: ticketContext
                   ? redactSecrets(ticketContext, runSecrets)
                   : undefined,
-                hasHistoricalContext: historicalContext.length > 0,
+                hasHistoricalContext: historicalContext.length > 0 || Boolean(recalledMemory),
                 // A background helper is not offered the history tools, so it gets no guidance on them.
                 historyRetrievalEnabled:
                   contextStrategy !== "current" &&
@@ -2031,8 +2116,20 @@ export function createRunExecutor(executorDeps: ExecutorDeps) {
               emptyResponseText,
               executeTool: scripted
                 ? undefined
-                : (name, args, executionId, route, observer) =>
-                    applyTool(ctx, name, args, executionId, route, observer),
+                : async (name, args, executionId, route, observer) => {
+                    const result = await applyTool(ctx, name, args, executionId, route, observer);
+                    // Checked after a tool, before the next model call. A paused tool belongs
+                    // to the user now, so its run finishes as a pause, not a yield.
+                    if (
+                      !yieldedToWaitingUser &&
+                      !ctx.state.approval.pausePending &&
+                      (await userTurnWaiting())
+                    ) {
+                      yieldedToWaitingUser = true;
+                      ctx.runtimeAbortController.abort();
+                    }
+                    return result;
+                  },
               resolveModel: scripted
                 ? undefined
                 : (provider, modelId) =>
@@ -2063,8 +2160,8 @@ export function createRunExecutor(executorDeps: ExecutorDeps) {
                 );
                 return audited;
               },
-              claimSteering: (seenIds) =>
-                claimRunSteering(
+              claimSteering: async (seenIds) => {
+                const claimed = await claimRunSteering(
                   deps,
                   {
                     threadId: thread.id,
@@ -2080,7 +2177,10 @@ export function createRunExecutor(executorDeps: ExecutorDeps) {
                     messageId: currentTurnMessage?.id,
                     hasImages: Boolean(currentTurnImages?.length),
                   },
-                ),
+                );
+                ctx.state.steeringClaimed += claimed.length;
+                return claimed;
+              },
             },
             {
               ...context,
@@ -2088,6 +2188,13 @@ export function createRunExecutor(executorDeps: ExecutorDeps) {
             },
           );
           if (await consumeRunEvents(ctx, runtimeEvents)) return;
+          if (yieldedToWaitingUser) {
+            // Queued again with no retry timer; releasing the computer starts the person's run.
+            await requeueRunAfterShutdown(deps, runId, workerId, fence).catch((error) =>
+              getLogger().error("run yield requeue", error),
+            );
+            return;
+          }
           if (await interruptedByShutdown()) return;
           await completeRun(ctx);
         } catch (turnError) {

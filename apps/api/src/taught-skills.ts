@@ -611,6 +611,41 @@ export function createTaughtSkillsService(deps: TaughtSkillsDeps) {
           parseRecording(skill.recording).controlLeaseId,
         );
       }
+      const bot = await deps.prisma.bot.findUnique({
+        where: { id: skill.botId },
+        include: { thread: true },
+      });
+      if (bot?.thread) {
+        const messages = await deps.prisma.message.findMany({
+          where: { threadId: bot.thread.id, role: "bot" },
+          orderBy: { seq: "desc" },
+          take: 100,
+        });
+        for (const message of messages) {
+          const parsed = message.blocks as MessageBlock[];
+          if (!Array.isArray(parsed)) continue;
+          const index = parsed.findIndex(
+            (block) => block.kind === "skill_draft" && block.skillId === skill.id,
+          );
+          if (index === -1) continue;
+          const existing = parsed[index];
+          if (existing?.kind !== "skill_draft") continue;
+          const nextBlocks: MessageBlock[] = [...parsed];
+          nextBlocks[index] = { ...existing, status: "deleted" };
+          await deps.prisma.message.update({
+            where: { id: message.id },
+            data: { blocks: nextBlocks as never },
+          });
+          await deps.events.append({
+            spaceId: actor.spaceId,
+            threadId: bot.thread.id,
+            botId: skill.botId,
+            type: "thread.message.updated",
+            payload: { messageId: message.id, role: "bot", blocks: nextBlocks },
+          });
+          break;
+        }
+      }
       await deps.prisma.taughtSkill.delete({ where: { id: skill.id } });
       return { ok: true as const };
     },

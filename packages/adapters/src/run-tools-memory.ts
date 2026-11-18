@@ -28,6 +28,7 @@ import { editMemory } from "./memory-tools.js";
 import type { RunContext } from "./run-context.js";
 import { isRunTainted } from "./run-context.js";
 import type { ToolCall, ToolHandlers } from "./run-tool-gate.js";
+import { selfEvolutionEnabled } from "./self-evolution.js";
 import { argsError } from "./tool-args.js";
 import { truncateUtf8 } from "./utf8.js";
 
@@ -80,6 +81,35 @@ export function semanticMemoryUserSource(
   return text.trim() ? { messageId: source.id, text } : null;
 }
 
+/** The query text every automatic recall shares: the person's own words, or the task prompt. */
+export function recallQueryText(options: {
+  source: { messageId: string; text: string } | null;
+  previousMessages?: readonly SemanticMemorySourceMessage[];
+  run: SemanticMemoryRunSource;
+  external: boolean;
+  prompt: string;
+  secrets: readonly string[];
+}): string {
+  if (!options.source) return options.prompt;
+  let query = redactSecrets(options.source.text, options.secrets).trim();
+  const previous = (options.previousMessages ?? [])
+    .flatMap((message) => {
+      if (message.id === options.source!.messageId) return [];
+      const value = semanticMemoryUserSource(
+        { ...options.run, sourceMessageId: message.id },
+        message,
+        options.external,
+      );
+      return value ? [truncateUtf8(redactSecrets(value.text, options.secrets).trim(), 1_000)] : [];
+    })
+    .slice(0, 2);
+  query = truncateUtf8(query, 6_000);
+  if (previous.length) {
+    query = `Current user request:\n${query}\n\nEarlier user context:\n${previous.reverse().join("\n")}`;
+  }
+  return query;
+}
+
 /** One automatic recall path: early user-source recall or the unchanged legacy compacted path. */
 export async function semanticRecallForRun(
   options: {
@@ -113,26 +143,14 @@ export async function semanticRecallForRun(
   if (preTurn ? !source : options.historyCompactedUpToSeq == null) {
     return { origin: null, response: null };
   }
-  let query = source ? redactSecrets(source.text, options.secrets).trim() : options.prompt;
-  if (source) {
-    const previous = (options.previousMessages ?? [])
-      .flatMap((message) => {
-        if (message.id === source.messageId) return [];
-        const value = semanticMemoryUserSource(
-          { ...options.run, sourceMessageId: message.id },
-          message,
-          options.external,
-        );
-        return value
-          ? [truncateUtf8(redactSecrets(value.text, options.secrets).trim(), 1_000)]
-          : [];
-      })
-      .slice(0, 2);
-    query = truncateUtf8(query, 6_000);
-    if (previous.length) {
-      query = `Current user request:\n${query}\n\nEarlier user context:\n${previous.reverse().join("\n")}`;
-    }
-  }
+  const query = recallQueryText({
+    source,
+    previousMessages: options.previousMessages,
+    run: options.run,
+    external: options.external,
+    prompt: options.prompt,
+    secrets: options.secrets,
+  });
   const request: SemanticMemoryRecallRequest = {
     query,
     scope,
@@ -147,6 +165,49 @@ export async function semanticRecallForRun(
     origin: preTurn ? "preTurn" : "compacted",
     response: await provider.recall(request, context),
   };
+}
+
+/** Lessons are the bot's own notes: a small, separate namespace with its own small budget. */
+export const MAX_LESSON_RECALLS = 3;
+
+/**
+ * Recalls this bot's lessons through the same query path as facts, from the host's lesson
+ * namespace. Only a host-managed provider has one, and another person's chat never gets them.
+ */
+export async function lessonRecallForRun(
+  options: {
+    provider: SemanticMemoryProvider | null;
+    botId: string;
+    run: SemanticMemoryRunSource;
+    sourceMessage: SemanticMemorySourceMessage | null;
+    previousMessages?: readonly SemanticMemorySourceMessage[];
+    external: boolean;
+    prompt: string;
+    secrets: readonly string[];
+  },
+  context: AdapterContext,
+): Promise<SemanticMemoryResponse<SemanticMemoryResult[]> | null> {
+  if (!selfEvolutionEnabled()) return null;
+  if (options.provider?.describe().capabilities.managedFacts !== true) return null;
+  if (options.external) return null;
+  const source = semanticMemoryUserSource(options.run, options.sourceMessage, options.external);
+  return options.provider.recall(
+    {
+      query: recallQueryText({
+        source,
+        previousMessages: options.previousMessages,
+        run: options.run,
+        external: options.external,
+        prompt: options.prompt,
+        secrets: options.secrets,
+      }),
+      scope: "isolated",
+      botId: options.botId,
+      kind: "lesson",
+      limit: MAX_LESSON_RECALLS,
+    },
+    context,
+  );
 }
 
 /** Cross-chat history requires a surviving direct human request in this app thread. */
@@ -181,11 +242,14 @@ export function semanticMemorySaveArguments(
 ):
   | (Pick<SemanticMemorySaveRequest, "content" | "replacesId" | "expectedRevision"> & {
       sourceQuote?: string;
+      /** Namespace from a recall citation; selects the scope a correction applies to. */
+      entity?: string;
     })
   | { error: string } {
   if (
     Object.keys(args).some(
-      (name) => !["content", "source_quote", "replaces_id", "expected_revision"].includes(name),
+      (name) =>
+        !["content", "source_quote", "replaces_id", "expected_revision", "entity"].includes(name),
     )
   ) {
     return { error: "Unsupported memory argument. Source ids are assigned by the server." };
@@ -199,10 +263,19 @@ export function semanticMemorySaveArguments(
   ) {
     return { error: "source_quote must be a nonblank literal quote from the user's message." };
   }
+  if (args.entity !== undefined && (typeof args.entity !== "string" || !args.entity.trim())) {
+    return { error: "entity must be a nonblank namespace from a recall citation." };
+  }
   const replaces = args.replaces_id !== undefined;
   const revision = args.expected_revision !== undefined;
   if (replaces !== revision) {
     return { error: "replaces_id and expected_revision must be provided together." };
+  }
+  if (args.entity !== undefined && !replaces) {
+    return {
+      error:
+        "entity only selects the scope of a correction; pass replaces_id and expected_revision.",
+    };
   }
   if (replaces) {
     if (
@@ -222,6 +295,7 @@ export function semanticMemorySaveArguments(
   return {
     content: args.content,
     ...(args.source_quote === undefined ? {} : { sourceQuote: args.source_quote as string }),
+    ...(args.entity === undefined ? {} : { entity: args.entity as string }),
     ...(replaces
       ? {
           replacesId: args.replaces_id as string,
@@ -484,24 +558,20 @@ export const memoryTools: ToolHandlers = {
         error: "source_quote contains a protected secret and cannot be saved.",
       });
     }
-    return call.finish(
-      await semantic.save(
-        {
-          ...request,
-          content: redactSecrets(request.content, ctx.secrets),
-          scope: ctx.memory.scope,
-          botId: bot.id,
-          source: {
-            kind: "durable",
-            runId,
-            threadId: run.threadId,
-            ...(userSource ? { messageId: userSource.messageId } : {}),
-            ...(sourceQuote === undefined ? {} : { quote: sourceQuote }),
-          },
-        },
-        context,
-      ),
-    );
+    const body: SemanticMemorySaveRequest & { entity?: string } = {
+      ...request,
+      content: redactSecrets(request.content, ctx.secrets),
+      scope: ctx.memory.scope,
+      botId: bot.id,
+      source: {
+        kind: "durable",
+        runId,
+        threadId: run.threadId,
+        ...(userSource ? { messageId: userSource.messageId } : {}),
+        ...(sourceQuote === undefined ? {} : { quote: sourceQuote }),
+      },
+    };
+    return call.finish(await semantic.save(body, context));
   },
   async forget_memory(ctx, call) {
     const { bot, context } = ctx;

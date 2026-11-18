@@ -28,6 +28,7 @@ import {
   ToolOnlyNarration,
   ToolSteps,
 } from "../../components/ToolActivityDisclosure";
+import { LessonDraftCard } from "../../components/teach/LessonDraftCard";
 import { SkillDraftCard } from "../../components/teach/SkillDraftCard";
 import type { ArtifactTarget } from "../../lib/artifact-open";
 import { messageProviderLabel } from "../../lib/messaging";
@@ -643,6 +644,15 @@ export const MessageView = memo(function MessageView({
             return (
               <div key={i} className="flex justify-start">
                 <SkillDraftCard block={block} onRefresh={onRefresh} onAddRoutine={onAddRoutine} />
+              </div>
+            );
+          }
+          if (block.kind === "lesson_draft") {
+            const botId = "botId" in artifactTarget ? artifactTarget.botId : message.botId;
+            if (!botId) return null;
+            return (
+              <div key={i} className="flex justify-start">
+                <LessonDraftCard botId={botId} block={block} onRefresh={onRefresh} />
               </div>
             );
           }

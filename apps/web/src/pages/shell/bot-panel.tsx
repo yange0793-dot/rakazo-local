@@ -205,10 +205,11 @@ export function BotSettings({
   const credentials = credentialsQuery.data ?? NO_CREDENTIALS;
   const catalog = catalogQuery.data ?? NO_CATALOG;
   const me = meQuery.data ?? null;
+  // No scope: read and write the model list that applies in this Space, so a Space's
+  // override is what the star shows and saves rather than a silently shadowed account copy.
   const mainRoleInput = {
     role: "main" as const,
     expectedUserId: me?.userId,
-    scope: "account" as const,
   };
   const mainRoleQuery = useQuery({
     queryKey: queries.models.role.queryKey({ input: mainRoleInput }),
@@ -321,16 +322,27 @@ export function BotSettings({
     defaultEntry?.images,
   ).filter((choice) => choice.key !== "");
 
+  const [pendingDefault, setPendingDefault] = useState(false);
+
   // The starred model runs every bot that chose none; it is the space's main model.
   async function setDefaultModel(choice: ChatModelChoice) {
-    if (!me || !choice.provider || !choice.modelId) return;
-    await spaceRpc.models.setRole({
-      role: "main",
-      scope: "account",
-      expectedUserId: me.userId,
-      primary: { provider: choice.provider, modelId: choice.modelId },
-    });
-    await meQuery.refetch();
+    if (!me || !choice.provider || !choice.modelId || pendingDefault) return;
+    setPendingDefault(true);
+    setError(null);
+    try {
+      await spaceRpc.models.setRole({
+        role: "main",
+        expectedUserId: me.userId,
+        primary: { provider: choice.provider, modelId: choice.modelId },
+      });
+      // The star and the effort slider both read this list; without the refresh the
+      // panel keeps painting the replaced model until it is reopened.
+      await Promise.allSettled([mainRoleQuery.refetch(), meQuery.refetch()]);
+    } catch (cause) {
+      setError(errorText(cause, t`Could not save`));
+    } finally {
+      setPendingDefault(false);
+    }
   }
 
   const [pendingEffort, setPendingEffort] = useState<ThinkingLevel | null>(null);
@@ -389,7 +401,6 @@ export function BotSettings({
       } else {
         await spaceRpc.models.setRole({
           role: "main",
-          scope: "account",
           expectedUserId: me.userId,
           primary: { ...primary, thinkingLevel: level },
         });
@@ -397,7 +408,9 @@ export function BotSettings({
     } catch (cause) {
       setError(errorText(cause));
     } finally {
-      await Promise.all([
+      // A refresh that fails must not leave the picker and slider disabled: the save
+      // already happened, and the next reopen refreshes the reads anyway.
+      await Promise.allSettled([
         mainRoleQuery.refetch(),
         credentialsQuery.refetch(),
         catalogQuery.refetch(),

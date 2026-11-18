@@ -27,6 +27,7 @@ import {
   lazyCatalogTools,
   resolveCatalogCall,
 } from "./lazy-tool-catalog.js";
+import { refusalCode } from "./tool-refusal.js";
 import type { TurnCheckpoint } from "./turn-checkpoint.js";
 import { serializeTurnCheckpoint } from "./turn-checkpoint.js";
 import type { UserDeviceGateway } from "./user-device-protocol.js";
@@ -336,6 +337,10 @@ function fixture({
     | { executionId: string; checkpoint: Omit<TurnCheckpoint, "provider" | "model"> }
     | undefined;
   const spending = fakeSpendingPrisma(spendingLimit);
+  const agentSkill = {
+    findMany: vi.fn(async () => []),
+    create: vi.fn(async () => ({ id: "skill-1", name: "demo", description: "demo" })),
+  };
   const prisma = {
     $transaction: vi.fn(async (fn: (tx: unknown) => unknown) => fn(prisma)),
     $executeRaw: vi.fn(async () => 0),
@@ -498,7 +503,7 @@ function fixture({
     chatGroup: { findMany: vi.fn(async () => []) },
     botSection: { findMany: vi.fn(async () => []) },
     vaultCredential: { findMany: vi.fn(async () => []) },
-    agentSkill: { findMany: vi.fn(async () => []) },
+    agentSkill,
     scratchpadItem: { findMany: vi.fn(async () => []) },
     spaceSettingOverride: {
       findUnique: vi.fn(
@@ -716,6 +721,7 @@ function fixture({
     results,
     execute,
     commit,
+    agentSkill,
     sharedMemoryState,
     pauseRunForInput,
     enqueue,
@@ -1540,6 +1546,33 @@ describe("create_space", () => {
   });
 });
 
+describe("skill writes ask a person", () => {
+  const args = { name: "demo", description: "demo", body: "Run the demo." };
+  beforeEach(() => reviewMock.mockReset());
+
+  it("applyRefusesSkillCreate: a background helper's scripted skill_create creates no skill row", async () => {
+    const f = fixture({
+      name: "skill_create",
+      builtin: true,
+      trigger: "helper",
+      helperSource: { threadId: "chat-1", name: "scout" },
+    });
+    f.setCalls([{ args, executionId: "call-1" }]);
+    await f.run();
+    expect(refusalCode(f.results[0])).toBe("helper_tool_unavailable");
+    expect(f.agentSkill.create).not.toHaveBeenCalled();
+  });
+
+  it("pauses an auto-reviewed owner run for a person before saving a skill", async () => {
+    const f = fixture({ name: "skill_create", builtin: true, autoReview: true });
+    f.setCalls([{ args, executionId: "call-1" }]);
+    await f.run();
+    expect(f.pauseRunForInput).toHaveBeenCalledOnce();
+    expect(reviewMock).not.toHaveBeenCalled();
+    expect(f.agentSkill.create).not.toHaveBeenCalled();
+  });
+});
+
 describe("own instructions through update_bot", () => {
   const first = "Draft only. Ask before sending.";
   function emptyBot(options: Parameters<typeof fixture>[0] = {}) {
@@ -1554,7 +1587,7 @@ describe("own instructions through update_bot", () => {
     reviewMock.mockReset();
     reviewMock.mockResolvedValue({ decision: "pass", reason: "Asked for", model: "mock" });
   });
-  it.each(["user", "created", "routine"])(
+  it.each(["user", "routine"])(
     "sets instructions without a card once Auto Review passes them in a %s run",
     async (trigger) => {
       const f = emptyBot({ trigger, autoReview: true });
@@ -1569,6 +1602,14 @@ describe("own instructions through update_bot", () => {
       expect(f.instructionState.instructionHistory).toHaveLength(1);
     },
   );
+  it("asks a person to set instructions in a created run, whose words are the product's", async () => {
+    const f = emptyBot({ trigger: "created", autoReview: true });
+    await f.run();
+    // The creation intro is not the owner's request, so the checker never sees it.
+    expect(reviewMock).not.toHaveBeenCalled();
+    expect(f.pauseRunForInput).toHaveBeenCalledOnce();
+    expect(f.instructionState.instructionHistory).toHaveLength(0);
+  });
   it("sets them after outside content entered the run, once Auto Review passes them", async () => {
     const f = emptyBot({ autoReview: true });
     f.claimedOutsideSteering(true);
@@ -2717,16 +2758,16 @@ describe("tool watch creation", () => {
   };
   beforeEach(() => reviewMock.mockReset());
 
-  it("reviews a watched read once outside content entered the run", async () => {
-    reviewMock.mockResolvedValue({ decision: "ask", reason: "Unexpected lookup", model: "mock" });
+  it("asks a person to save a watched read once outside content entered the run", async () => {
     const f = fixture({ autoReview: true });
     f.setCalls([search, watchCall]);
     await f.run();
-    expect(reviewMock).toHaveBeenCalledOnce();
+    // The routine itself outlives the run, so the write asks without reaching the checker.
+    expect(reviewMock).not.toHaveBeenCalled();
     expect(isApprovalPausedResult(f.results[1])).toBe(true);
   });
 
-  it("keeps a watched read free on a connector the run used before outside content", async () => {
+  it("never reviews a watched read on a connector the run used before outside content", async () => {
     const f = fixture({ autoReview: true });
     f.setCalls([
       { args: { id: "item-1" }, executionId: "call-0" },
@@ -2736,7 +2777,8 @@ describe("tool watch creation", () => {
     // Saving the routine itself is outside this fixture; only the gate is under test.
     await f.run(true);
     expect(reviewMock).not.toHaveBeenCalled();
-    expect(f.pauseRunForInput).not.toHaveBeenCalled();
+    // The trusted read passes no review, but the routine write still asks: the run is tainted.
+    expect(f.pauseRunForInput).toHaveBeenCalledOnce();
   });
 });
 
@@ -3064,8 +3106,7 @@ describe("Auto Review of new sites", () => {
     expect(JSON.stringify(reviewRequest())).not.toContain("IGNORE PREVIOUS INSTRUCTIONS");
   });
 
-  it("gives the judge none of a message the owner did not write", async () => {
-    reviewMock.mockResolvedValue({ decision: "ask", reason: "Unrelated site", model: "mock" });
+  it("never asks the judge about a message the owner did not write", async () => {
     const f = fixture({
       builtin: true,
       autoReview: true,
@@ -3075,7 +3116,8 @@ describe("Auto Review of new sites", () => {
     });
     f.setCalls([fetchCall("https://attacker.test/")]);
     await f.run();
-    expect(reviewRequest()).toMatchObject({ userTask: "", newSite: true });
+    // No owner words to judge against, so a person decides instead of the checker.
+    expect(reviewRequest()).toBeUndefined();
     expect(isApprovalPausedResult(f.results[0])).toBe(true);
   });
 
@@ -3173,20 +3215,30 @@ describe("Auto Review of new sites", () => {
       expect(JSON.stringify(f.results.at(-1))).not.toContain("never asks");
     });
 
-    it.each([
-      ["before outside content", false, "Every day fetch https://attacker.test/"],
-      ["naming only sites the owner named", true, "Every day read https://docs.example.com"],
-    ])("does not ask %s", async (_label, tainted, prompt) => {
+    it("does not ask before outside content arrives", async () => {
       const f = fixture({
         builtin: true,
         sourceRole: "user",
         prompt: "Watch https://docs.example.com",
       });
-      f.setCalls(tainted ? [search, schedule(prompt)] : [schedule(prompt)]);
+      f.setCalls([schedule("Every day fetch https://attacker.test/")]);
       // Saving the routine itself is outside this fixture; only the gate is under test.
       await f.run(true);
       expect(f.pauseRunForInput).not.toHaveBeenCalled();
       expect(isApprovalPausedResult(f.results.at(-1))).toBe(false);
+    });
+
+    it("asks a person once outside content arrived, even for sites the owner named", async () => {
+      const f = fixture({
+        builtin: true,
+        sourceRole: "user",
+        prompt: "Watch https://docs.example.com",
+      });
+      f.setCalls([search, schedule("Every day read https://docs.example.com")]);
+      await f.run(true);
+      // The routine outlives the run, so any tainted run asks whoever calls the tool.
+      expect(f.pauseRunForInput).toHaveBeenCalledOnce();
+      expect(isApprovalPausedResult(f.results.at(-1))).toBe(true);
     });
   });
 
@@ -4108,9 +4160,11 @@ describe("background helpers and approval", () => {
       kind: "ask",
       text: "Review before browser_act → shop.example.test",
       detail: 'url: https://shop.example.test/checkout\nclick button "Buy now"',
+      // "Always allow" covers the page's site, never every site the browser can reach.
+      site: "example.test",
       actions: [
         { id: "allow", label: "Allow once" },
-        { id: "always", label: "Always allow this tool" },
+        { id: "always", label: "Always allow example.test" },
         { id: "deny", label: "Deny" },
       ],
     });

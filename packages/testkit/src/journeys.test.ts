@@ -2085,6 +2085,9 @@ describeJourneys("required product journeys", () => {
           runId: parent.id,
           bot,
           thread: chat,
+          // The app's scripted runtime runs the parent on its scripted model; the helper
+          // inherits and pins it.
+          model: { provider: "scripted", id: "scripted", thinkingLevel: null },
         } as never,
         {
           name: "scout",
@@ -2567,7 +2570,7 @@ describeJourneys("required product journeys", () => {
     expect(JSON.stringify(relayed)).toContain("helper result");
   });
 
-  it("13i: a group chat cannot start a background helper", async () => {
+  it("13i: a group chat starts a background helper whose card stays in the group", async () => {
     const cookie = await signup(app, `background-group-j-${stamp}@rakazo.test`, "Background Group");
     const [bot, peer] = await Promise.all(
       ["Chief", "Peer"].map((name) =>
@@ -2591,14 +2594,29 @@ describeJourneys("required product journeys", () => {
       "@Chief summarize the venue notes in the background",
       bot!.id,
     );
-    expect(
-      await prisma.run.count({ where: { botId: { in: [bot!.id, peer!.id] }, trigger: "helper" } }),
-    ).toBe(0);
-    const refused = await prisma.event.findFirst({
+    // A chat with a person can start a helper wherever they talk, a group included.
+    const helper = await prisma.run.findFirst({
+      where: { botId: bot!.id, trigger: "helper" },
+      select: { id: true, threadId: true, sourceMessageId: true },
+    });
+    expect(helper).not.toBeNull();
+    // It works in a thread of its own, and its card belongs to the group chat.
+    const groupThread = await prisma.thread.findUniqueOrThrow({
+      where: { groupId: group.id },
+      select: { id: true },
+    });
+    expect(helper!.threadId).not.toBe(groupThread.id);
+    const card = await prisma.message.findUniqueOrThrow({
+      where: { id: helper!.sourceMessageId! },
+      select: { threadId: true },
+    });
+    expect(card.threadId).toBe(groupThread.id);
+    const started = await prisma.event.findFirst({
       where: { botId: bot!.id, type: "agent.tool.completed" },
       select: { payload: true },
     });
-    expect(refused?.payload).toMatchObject({ name: "run_subagent", outcome: "error" });
+    expect(started?.payload).toMatchObject({ name: "run_subagent" });
+    expect(started?.payload).not.toMatchObject({ outcome: "error" });
   });
 
   it("14: this-mac is refused unless the sandbox is docker", async () => {

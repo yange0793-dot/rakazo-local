@@ -21,9 +21,11 @@ import {
   mirrorMessagingOutbound,
   mirrorMessagingProgress,
 } from "./messaging-delivery.js";
+import { reflectRun } from "./run-reflection.js";
 import type { EncryptedSecretStore } from "./secrets.js";
 
 vi.mock("./history-compaction.js", () => ({ compactHistory: vi.fn(async () => undefined) }));
+vi.mock("./run-reflection.js", () => ({ reflectRun: vi.fn(async () => undefined) }));
 vi.mock("./computer-control.js", async (importOriginal) => ({
   ...(await importOriginal<typeof ComputerControl>()),
   expireComputerControl: vi.fn(async () => false),
@@ -199,9 +201,61 @@ describe("createBackgroundJobHandlers", () => {
       { threadId: "thread-1", botId: "bot-1", userId: "user-1" },
       expect.objectContaining({ ...owner, botId: "bot-1", signal: expect.any(AbortSignal) }),
     );
-    await handlers["memory.extract"]({ threadId: "thread-1", botId: "bot-other", userId: "user-1" });
-    await handlers["memory.extract"]({ threadId: "thread-1", botId: "bot-1", userId: "user-other" });
+    await handlers["memory.extract"]({
+      threadId: "thread-1",
+      botId: "bot-other",
+      userId: "user-1",
+    });
+    await handlers["memory.extract"]({
+      threadId: "thread-1",
+      botId: "bot-1",
+      userId: "user-other",
+    });
     expect(archive).toHaveBeenCalledOnce();
+  });
+
+  it("reviews a finished run with the model resolver and deployment default it was given", async () => {
+    const prisma = { run: owned() } as unknown as PrismaClient;
+    const runtime = {} as unknown as AgentRuntime;
+    const events = {} as unknown as ThreadEvents;
+    const resolveModel = vi.fn();
+    const memoryProviders = { resolve: vi.fn(async () => null) };
+    const handlers = createBackgroundJobHandlers({
+      executor: { resolveModel } as unknown as ReturnType<typeof createRunExecutor>,
+      prisma,
+      sandbox: {} as unknown as SandboxProvider,
+      home: {} as unknown as AgentHomeStore,
+      artifacts: {} as unknown as ArtifactStore,
+      jobs: {} as unknown as JobPublisher,
+      events,
+      workerId: "worker-1",
+      runtime,
+      secretStore: {} as unknown as EncryptedSecretStore,
+      memoryProviders,
+      deploymentModelKey: "openrouter-key",
+      deploymentModelConfigured: true,
+    });
+
+    await handlers["harness.reflect"]({ runId: "run-1" });
+    await handlers["harness.reflect"]({ runId: "run-2", auto: true, exceptMessageId: "message-1" });
+
+    expect(reflectRun).toHaveBeenCalledWith(
+      {
+        prisma,
+        runtime,
+        events,
+        memoryProviders,
+        resolveModel,
+        deploymentModelKey: "openrouter-key",
+        deploymentModelConfigured: true,
+      },
+      { runId: "run-1" },
+    );
+    expect(reflectRun).toHaveBeenLastCalledWith(expect.anything(), {
+      runId: "run-2",
+      auto: true,
+      exceptMessageId: "message-1",
+    });
   });
 
   it("runs a job as the tenant of the row it acts for, and skips one whose row is gone", async () => {

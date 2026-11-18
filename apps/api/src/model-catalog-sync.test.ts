@@ -72,4 +72,65 @@ describe("managed catalog projection", () => {
     expect(next.enabledModelIds).toEqual(["provider-id/model-b"]);
     expect(next.managedCatalog?.disabledModelIds).toEqual(["provider-id/model-a"]);
   });
+
+  it("keeps declared capabilities when the source reports none", () => {
+    const declared: CatalogChannel = {
+      ...channel,
+      models: [
+        {
+          id: "provider-id/model-a",
+          label: "model-a",
+          capabilities: {
+            source: "declared",
+            contextWindow: 500000,
+            thinkingLevels: ["low", "high"],
+          },
+        },
+      ],
+    };
+    const first = projectCatalogChannel(source, declared, previous, "Channel", "provider-id");
+    const silent: CatalogChannel = {
+      ...channel,
+      models: [
+        { id: "provider-id/model-a", label: "model-a", capabilities: { source: "unknown" } },
+      ],
+    };
+    const next = projectCatalogChannel(source, silent, first, "Channel", "provider-id");
+    expect(next.managedCatalog?.capabilities["provider-id/model-a"]).toEqual({
+      source: "declared",
+      contextWindow: 500000,
+      thinkingLevels: ["low", "high"],
+    });
+  });
+
+  it("keeps identities and declared capabilities for a channel re-created under a new ID", () => {
+    const declared: CatalogChannel = {
+      ...channel,
+      models: [
+        {
+          id: "provider-id/model-a",
+          label: "model-a",
+          capabilities: { source: "declared", contextWindow: 500000 },
+        },
+      ],
+    };
+    const first = projectCatalogChannel(source, declared, previous, "Channel", "provider-id");
+    const recreated: CatalogChannel = {
+      id: "provider-id-2",
+      label: "Channel",
+      enabled: true,
+      models: [
+        { id: "provider-id-2/model-a", label: "model-a", capabilities: { source: "unknown" } },
+      ],
+    };
+    const next = projectCatalogChannel(source, recreated, first, "Channel", "provider-id-2");
+    expect(next.managedCatalog?.providerId).toBe("provider-id-2");
+    expect(next.managedCatalog?.aliases["provider-id/model-a"]).toBe("provider-id-2/model-a");
+    expect(next.enabledModelIds).toEqual(["provider-id-2/model-a"]);
+    expect(next.managedCatalog?.unavailableModelIds).not.toContain("provider-id/model-a");
+    expect(next.managedCatalog?.capabilities["provider-id-2/model-a"]).toEqual({
+      source: "declared",
+      contextWindow: 500000,
+    });
+  });
 });

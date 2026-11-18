@@ -651,6 +651,7 @@ model Space {
   capabilities                CapabilityInstall[]
   memoryDocuments             MemoryDocument[]
   semanticFacts               SemanticFact[]
+  lessonUsages                LessonUsage[]
   agentHomes                  AgentHome[]
   browserProfiles             BrowserProfile[]
   artifacts                   Artifact[]
@@ -1290,6 +1291,8 @@ model Run {
   startedAt            DateTime?
   // The occurrence a recurring timer run was due at, recorded at its first start only when it started late.
   lateSince            DateTime?
+  /// Outside content entered this run, or it was not started by its owner. Lesson auto-apply requires false.
+  tainted              Boolean           @default(false)
   completedAt          DateTime?
   botOutcomeReturnedAt DateTime?
   messagingMirroredAt  DateTime?
@@ -1300,6 +1303,7 @@ model Run {
   effects              ExternalEffect[]
   steeringMessages     SteeringMessage[]
   externalMessage      ExternalMessage?
+  lessonUsages         LessonUsage[]
 
   @@unique([spaceId, clientNonce])
   @@index([status, wakeAt])
@@ -1319,6 +1323,23 @@ model Run {
   // Partial index runs_helper_outcome_pending_idx (unreturned background-helper outcomes) is created in SQL.
   @@index([routineId])
   @@map("runs")
+}
+
+/// One lesson that was injected into a run, and how that run ended. No lesson text.
+model LessonUsage {
+  spaceId    String
+  space      Space    @relation(fields: [spaceId], references: [id], onDelete: Cascade)
+  botId      String
+  lessonId   String
+  runId      String
+  run        Run      @relation(fields: [runId], references: [id], onDelete: Cascade)
+  surfacedAt DateTime @default(now())
+  outcome    String?
+  settledAt  DateTime?
+
+  @@id([runId, lessonId])
+  @@index([lessonId, outcome])
+  @@map("lesson_usage")
 }
 
 model SteeringMessage {

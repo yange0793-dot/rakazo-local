@@ -182,6 +182,12 @@ export interface RunState {
   toolRefusals?: Map<string, ToolRefusal>;
   /** Consecutive `computer_act`/`browser_act` batches over the action limit, this one included. */
   overLimitActionCalls: number;
+  /** Steering messages claimed from the person during this attempt: a mid-task correction. */
+  steeringClaimed: number;
+  /** The repeated-call guard stopped this attempt's turn (see stopStuckToolLoop). */
+  toolLoopStopped: boolean;
+  /** Lessons whose notes went into this attempt's prompt, settled when the run ends. */
+  injectedLessonIds: string[];
   /**
    * Whether outside content has entered the run. A run someone else started begins tainted,
    * and so does a later attempt, including one with restored untrusted tool results.
@@ -233,6 +239,8 @@ export interface RunComputerContext {
 
 export interface RunSource {
   ownerStartedRun: boolean;
+  /** Its own person authored the source message here, and nobody else's chat did. */
+  ownerAuthoredRun: boolean;
   messagingChannelRun: boolean;
   channelId: string | undefined;
   historySearchBeforeSeq: number;

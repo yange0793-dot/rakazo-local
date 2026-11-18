@@ -928,6 +928,8 @@ export const appContract = {
     facts: oc.input(SemanticFactListRequestSchema).output(SemanticFactPageSchema),
     correctFact: oc.input(SemanticFactCorrectRequestSchema).output(SemanticFactSchema),
     forgetFact: oc.input(SemanticFactForgetRequestSchema).output(z.object({ ok: z.literal(true) })),
+    /** Saves one lesson draft the host wrote to this bot's thread; the client sends no text. */
+    saveLesson: oc.input(z.object({ botId: Id, lessonId: Id })).output(SemanticFactSchema),
     exportFacts: oc.input(SemanticFactExportRequestSchema).output(SemanticFactExportSchema),
   },
   routines: {

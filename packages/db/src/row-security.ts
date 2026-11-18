@@ -120,6 +120,7 @@ export const ROW_SECURITY_MODELS: ReadonlySet<string> = new Set([
   "SemanticMemoryRetirement",
   "SemanticMemoryIndexOutbox",
   "MemoryArchiveProgress",
+  "LessonUsage",
   "Artifact",
   "Secret",
   "BotSecret",

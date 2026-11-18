@@ -24,6 +24,8 @@ import {
   resolveActionApproval,
   resolveActionApprovalDetail,
   resolveActionApprovalForTools,
+  TAINT_GATED_BUILTIN_TOOLS,
+  toolNeedsPersonApproval,
   toolRequiresApproval,
   toolRequiresExplicitApproval,
   toolResultTaintsRun,
@@ -238,6 +240,68 @@ it("treats a declared write with a read-looking name as a write", () => {
   for (const name of ["read_profile_card", "find_validator_record", "get_status"]) {
     expect(toolRequiresApproval(name, true, false)).toBe(true);
   }
+});
+
+describe("toolNeedsPersonApproval", () => {
+  /** The trigger the check needs, derived the way the executor derives it. */
+  const needs = (toolName: string, trigger: string, tainted: boolean) =>
+    toolNeedsPersonApproval({
+      toolName,
+      ownerStartedRun: isOwnerStartedRun(trigger, true),
+      messagingChannelRun: trigger === "messaging",
+      tainted,
+    });
+
+  it("names exactly the tools whose approval depends on what the run read", () => {
+    expect([...TAINT_GATED_BUILTIN_TOOLS].sort()).toEqual([
+      "save_shared_memory",
+      "schedule_create",
+      "schedule_update",
+      "shell",
+      "spawn_bot",
+    ]);
+  });
+
+  it.each([
+    // The owner's own runs keep running shell commands, whatever they read.
+    ["shell", "user", false, false],
+    ["shell", "user", true, false],
+    ["shell", "call_end", true, false],
+    ["shell", "follow_up", true, false],
+    // A run someone else started, once outside text has entered it.
+    ["shell", "bot_message", false, false],
+    ["shell", "bot_message", true, true],
+    ["shell", "helper", true, true],
+    ["shell", "helper_result", true, true],
+    ["shell", "routine", true, true],
+    ["shell", "webhook", true, true],
+    // A message from an outside channel always asks.
+    ["shell", "messaging", false, true],
+    ["shell", "messaging", true, true],
+    // Writes that outlive the run ask once the run is tainted, whoever started it.
+    ["schedule_create", "user", true, true],
+    ["schedule_update", "user", true, true],
+    ["spawn_bot", "user", true, true],
+    ["save_shared_memory", "user", true, true],
+    ["schedule_create", "user", false, false],
+    ["schedule_update", "user", false, false],
+    ["spawn_bot", "user", false, false],
+    ["save_shared_memory", "user", false, false],
+    ["schedule_create", "routine", true, true],
+    ["spawn_bot", "messaging", false, false],
+    // A new server asks a person in every run.
+    ["add_mcp_server", "user", false, true],
+    ["add_mcp_server", "user", true, true],
+    ["add_mcp_server", "routine", true, true],
+    // These keep their existing behavior: no gate here.
+    ["write_file", "user", true, false],
+    ["remember", "user", true, false],
+    ["save_memory", "user", true, false],
+    ["read_file", "bot_message", true, false],
+    ["send_email", "user", true, false],
+  ])("%s in a %s run (tainted: %s) needs a person: %s", (tool, trigger, tainted, expected) => {
+    expect(needs(tool, trigger, tainted)).toBe(expected);
+  });
 });
 
 describe("isApprovalAskBlock", () => {
@@ -981,6 +1045,42 @@ it("classifies schedule_update like schedule_create", () => {
 it("requires human confirmation to approve an agent connection", () => {
   expect(toolRequiresExplicitApproval("respond_agent_connection")).toBe(true);
   expect(toolRequiresApproval("respond_agent_connection", false)).toBe(true);
+});
+
+describe("skill writes", () => {
+  const skillTools = ["skill_create", "skill_update", "skill_delete"];
+
+  it("asks a person for every skill write, and no rule or review may pass it", () => {
+    for (const name of skillTools) {
+      expect(toolRequiresApproval(name, false)).toBe(true);
+      expect(toolRequiresExplicitApproval(name)).toBe(true);
+      const resolved = resolveActionApprovalDetail({
+        toolName: name,
+        rules: [{ effect: "always_allow", matchKind: "tool", matchValue: name }],
+      });
+      expect(
+        planActionGate({
+          resolved,
+          mode: "auto",
+          mandatory: toolRequiresExplicitApproval(name),
+          consequential: true,
+          checkerConfigured: true,
+        }),
+      ).toBe("ask");
+      expect(
+        approvalRuleEffectChoices({
+          effect: "require_approval",
+          matchKind: "tool",
+          matchValue: name,
+        }),
+      ).not.toContain("always_allow");
+    }
+  });
+
+  it("leaves a queued reflection free and untainted", () => {
+    expect(toolRequiresApproval("reflect_on_run", false)).toBe(false);
+    expect(toolResultTaintsRun("reflect_on_run")).toBe(false);
+  });
 });
 
 describe("repeatsDeniedAction", () => {

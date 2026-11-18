@@ -1011,6 +1011,14 @@ async function buildApp(overrides: CreateAppOverrides): Promise<AppHandles> {
       return c.redirect(target.toString());
     });
   }
+  // A page on another site may not write through this session's /rpc. A browser sends Origin on
+  // every cross-site POST; a request with none is a native client or the desktop shell.
+  app.use("/rpc/*", async (c, next) => {
+    if (RPC_WRITE_METHODS.has(c.req.method) && !rpcOriginAllowed(c.req.header("origin"), env)) {
+      return c.json({ error: "Origin not allowed" }, 403);
+    }
+    await next();
+  });
   app.use(
     "/rpc/*",
     clientBuildMiddleware({
@@ -1192,6 +1200,21 @@ export function isTrustedOrigin(
   if (!origin) return true;
   if (origin.startsWith("rakazo://")) return true;
   return new Set(trustedRequestOrigins(env)).has(origin);
+}
+
+/** /rpc methods that can change something; a GET from another site only reads. */
+const RPC_WRITE_METHODS: ReadonlySet<string> = new Set(["POST", "PUT", "PATCH", "DELETE"]);
+
+/**
+ * Whether a write over /rpc may come from this Origin. No Origin header means a native client or
+ * the desktop shell, which the cookie's SameSite rule already gates; an Origin that is present
+ * must be one of the app's own, so a page on another site cannot ride a SameSite=Lax session.
+ */
+export function rpcOriginAllowed(
+  origin: string | undefined,
+  env: Pick<AppEnv, "webOrigin" | "apiUrl" | "authUrl"> & { extraAuthOrigins?: string[] },
+): boolean {
+  return origin === undefined || isTrustedOrigin(origin, env);
 }
 
 export function trustedRequestOrigins(

@@ -1014,6 +1014,36 @@ describe("ego browser helper execution", () => {
     expect(main.calls.some((call) => call.method === "goto")).toBe(false);
   });
 
+  it("stops an action batch when the control check cannot list the spaces", async () => {
+    const options: { listingError?: boolean } = {};
+    const main = fixturePage({
+      snapshotText: () => DUPLICATE_SNAPSHOT,
+      // The listing starts failing mid-batch, as it might when the user takes over.
+      click: () => {
+        options.listingError = true;
+        return {};
+      },
+    });
+    const task = fixtureTask([main]);
+    const { run } = executingRunner(task, options);
+    const browser = new EgoBrowserProvider({ run, blockedOrigins: [] });
+    const snap = await browser.snapshot(computer, {}, context);
+    const result = await browser.act(
+      computer,
+      {
+        actions: [
+          { kind: "click", ref: snap.elements[0]!.ref },
+          { kind: "click", ref: snap.elements[1]!.ref },
+        ],
+      },
+      context,
+    );
+    // A listing that fails may be a takeover, so the batch stops before the next click.
+    expect(result).toMatchObject({ ok: false, completed: 1 });
+    expect(result.error).toContain("Browser control is with the user");
+    expect(main.stats.clicks).toBe(1);
+  });
+
   it.each([false, true])(
     "stops a batch when the user takes control, including a lost receipt (%s)",
     async (lostReceipt) => {

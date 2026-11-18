@@ -37,6 +37,14 @@ export interface MemoryArchiveTarget {
   userId: string;
 }
 
+/** What one applied batch changed; `removed` counts removal proposals applied as tombstones. */
+export interface MemoryArchiveApplyCounts {
+  saved: number;
+  updated: number;
+  skipped: number;
+  removed: number;
+}
+
 /** Pointer-only scheduled work for a reconciler; no message text leaves Postgres. */
 export interface MemoryArchivePointer {
   threadId: string;
@@ -81,10 +89,18 @@ const NON_USER_SOURCE_BLOCKS: ReadonlySet<string> = new Set([
 const DIRECT_RUN_TRIGGERS: ReadonlySet<string> = new Set(["user", "follow_up"]);
 const CONTEXT_MESSAGES = 8;
 const DEFAULT_BATCH_MESSAGES = 40;
+/** A clear drains whole conversations, so each call covers as much as one request allows. */
+export const FORCE_BATCH_MESSAGES = 200;
 const MAX_BATCH_MESSAGES = 200;
+/** One batch's message text has to fit one extraction request beside notes and recall. */
+const MAX_BATCH_TEXT_BYTES = 512 * 1024;
+/** Preceding turns are context; they never get to fill a request on their own. */
+const MAX_CONTEXT_TEXT_BYTES = 64 * 1024;
 const RETIREMENT_EVIDENCE_LIMIT = 100;
 const MAX_PENDING_POINTERS = 1000;
 const CLEAR_SOURCE_RUNS = 10;
+/** Prior turns a first schedule may reach back over when no cursor exists yet. */
+const PRIOR_FAILED_RUNS = 20;
 
 function blocksOf(value: unknown): Array<{ kind?: unknown; text?: unknown }> {
   if (!Array.isArray(value)) return [];
@@ -270,6 +286,43 @@ export class MemoryArchiveStore {
   }
 
   /**
+   * Sources of the contiguous direct turns before this one that never completed. Scheduling
+   * only follows a completed turn, so without a cursor these sources would be seeded past and
+   * never archived. The walk ends at the first turn that completed or is still undecided.
+   */
+  private async skippedSourceSeqs(
+    tx: Tx,
+    run: { id: string; threadId: string; botId: string; createdAt: Date },
+    ctx: AdapterContext,
+  ): Promise<number[]> {
+    const prior = await tx.run.findMany({
+      where: {
+        threadId: run.threadId,
+        spaceId: ctx.spaceId,
+        botId: run.botId,
+        userId: ctx.userId,
+        trigger: { in: [...DIRECT_RUN_TRIGGERS] },
+        createdAt: { lt: run.createdAt },
+      },
+      orderBy: { createdAt: "desc" },
+      take: PRIOR_FAILED_RUNS,
+      select: { id: true, status: true, sourceMessageId: true },
+    });
+    const seqs: number[] = [];
+    for (const row of prior) {
+      if (row.status !== "failed" && row.status !== "cancelled") break;
+      seqs.push(
+        ...(await this.runSourceSeqs(
+          tx,
+          { ...row, threadId: run.threadId, botId: run.botId },
+          ctx,
+        )),
+      );
+    }
+    return seqs;
+  }
+
+  /**
    * Schedule one completed trusted personal turn. The cursor seeds just before this run's
    * earliest real user source, so the first schedule never imports the older conversation.
    */
@@ -286,6 +339,7 @@ export class MemoryArchiveStore {
           status: true,
           trigger: true,
           sourceMessageId: true,
+          createdAt: true,
         },
       });
       if (!run) return false;
@@ -293,6 +347,14 @@ export class MemoryArchiveStore {
       if (run.status !== "completed" || !DIRECT_RUN_TRIGGERS.has(run.trigger)) return false;
       // Serialize with message writers and clear so the seed and bound use one consistent head.
       await tx.$queryRaw`SELECT id FROM threads WHERE id = ${run.threadId} AND "spaceId" = ${ctx.spaceId} FOR UPDATE`;
+      // Group and channel turns complete here too; they have no personal archive and this
+      // is an ordinary no-op rather than an isolation failure.
+      const thread = await tx.thread.findFirst({
+        where: { id: run.threadId, spaceId: ctx.spaceId },
+        select: { helperBotId: true, groupId: true, externalConversationId: true },
+      });
+      if (thread && (thread.helperBotId || thread.groupId || thread.externalConversationId))
+        return false;
       const target = { threadId: run.threadId, botId: run.botId, userId: ctx.userId };
       const authorized = await this.requireDirectThread(tx, target, ctx);
       const seqs = await this.runSourceSeqs(tx, run, ctx);
@@ -312,18 +374,21 @@ export class MemoryArchiveStore {
         pending: true,
       };
       if (!existing || existing.generation !== generation) {
+        // A thread whose first direct turn failed has no cursor yet; seeding at this run alone
+        // would step over that turn forever, so reach back over the uncompleted ones.
+        const skipped = await this.skippedSourceSeqs(tx, run, ctx);
         // A clear retired the old range; seed from this run instead of reviving its messages.
         await tx.memoryArchiveProgress.upsert({
           where: { threadId: run.threadId },
           create: {
             threadId: run.threadId,
             ...bound,
-            processedUpToSeq: Math.min(...seqs) - 1,
+            processedUpToSeq: Math.min(...seqs, ...skipped) - 1,
             throughSeq,
           },
           update: {
             ...bound,
-            processedUpToSeq: Math.min(...seqs) - 1,
+            processedUpToSeq: Math.min(...seqs, ...skipped) - 1,
             throughSeq,
           },
         });
@@ -479,48 +544,83 @@ export class MemoryArchiveStore {
           select: MESSAGE_SELECT,
         }),
       ]);
-      const context = [...contextRows].reverse().flatMap((row) => {
+      // A batch has to fit one extraction request: a long paste otherwise makes the same
+      // range fail forever, and it would ride along in the context of every later batch too.
+      const context: MemoryExtractionMessage[] = [];
+      let contextBytes = 0;
+      // Newest first: the turns closest to the batch are the ones worth the remaining budget.
+      for (const row of contextRows) {
         const message = extractionMessage(row, input, false);
-        return message ? [message] : [];
-      });
-      const fresh = rangeRows.flatMap((row) => {
+        if (!message) continue;
+        const bytes = Buffer.byteLength(message.content);
+        if (contextBytes + bytes > MAX_CONTEXT_TEXT_BYTES) break;
+        contextBytes += bytes;
+        context.push(message);
+      }
+      context.reverse();
+      const fresh: MemoryExtractionMessage[] = [];
+      const newSources: MemoryArchiveBatch["newSources"] = [];
+      let batchThroughSeq = progress.throughSeq;
+      let rangeBytes = 0;
+      for (const row of rangeRows) {
         const message = extractionMessage(row, input, true);
-        return message ? [message] : [];
-      });
-      const newSources = rangeRows.flatMap((row) => {
-        if (row.role !== "user" || row.authorUserId !== input.userId) return [];
-        const text = directUserText(row.blocks);
-        return text ? [{ id: row.id, text, createdAt: row.createdAt.toISOString() }] : [];
-      });
+        const text =
+          row.role === "user" && row.authorUserId === input.userId
+            ? directUserText(row.blocks)
+            : null;
+        const bytes = Buffer.byteLength(message?.content ?? text ?? "");
+        // The first row always goes in; the cursor has to be able to move past it.
+        if (fresh.length > 0 && rangeBytes + bytes > MAX_BATCH_TEXT_BYTES) break;
+        rangeBytes += bytes;
+        if (message) fresh.push(message);
+        if (text !== null) {
+          newSources.push({ id: row.id, text, createdAt: row.createdAt.toISOString() });
+        }
+        batchThroughSeq = row.seq;
+      }
       const scope: DurableMemoryScope = progress.scope === "shared" ? "shared" : "isolated";
       const namespace = semanticFactNamespace(ctx.spaceId, scope, input.botId);
-      const evidence = await this.prisma.semanticFact.findMany({
-        where: {
-          spaceId: ctx.spaceId,
-          namespace,
-          status: { in: ["historical", "forgotten"] },
-          OR: [{ status: "forgotten" }, { sourceThreadId: input.threadId }],
-        },
-        orderBy: [{ updatedAt: "desc" }, { id: "asc" }],
-        take: RETIREMENT_EVIDENCE_LIMIT,
-        select: { id: true, revision: true, content: true, status: true, provenance: true },
-      });
+      // Forgotten facts carry the hard "never recreate this" instruction, so they take the
+      // evidence slots before this thread's own retired history fills the rest.
+      const [forgotten, historical] = await Promise.all([
+        this.prisma.semanticFact.findMany({
+          where: { spaceId: ctx.spaceId, namespace, status: "forgotten" },
+          orderBy: [{ updatedAt: "desc" }, { id: "asc" }],
+          take: RETIREMENT_EVIDENCE_LIMIT,
+          select: { id: true, revision: true, content: true, status: true, provenance: true },
+        }),
+        this.prisma.semanticFact.findMany({
+          where: {
+            spaceId: ctx.spaceId,
+            namespace,
+            status: "historical",
+            sourceThreadId: input.threadId,
+          },
+          orderBy: [{ updatedAt: "desc" }, { id: "asc" }],
+          take: RETIREMENT_EVIDENCE_LIMIT,
+          select: { id: true, revision: true, content: true, status: true, provenance: true },
+        }),
+      ]);
+      const evidence = [...forgotten, ...historical].slice(0, RETIREMENT_EVIDENCE_LIMIT);
       const retirementEvidence: MemoryExtractionExisting[] = evidence.flatMap((row) => {
         const provenance = provenanceValue(row.provenance);
         const status =
           row.status === "forgotten" || row.status === "historical" ? row.status : null;
         if (!status) return [];
         const category = provenance.category;
+        const quote = typeof provenance.quote === "string" ? provenance.quote : undefined;
         return [
           {
             id: row.id,
             revision: row.revision,
-            content: row.content,
+            // Forgetting erases the stored body; its quoted words are all that remains as
+            // evidence of what must not be recreated.
+            content: status === "forgotten" ? (quote ?? row.content) : row.content,
             status,
             ...(typeof provenance.messageId === "string"
               ? { sourceMessageId: provenance.messageId }
               : {}),
-            ...(typeof provenance.quote === "string" ? { sourceQuote: provenance.quote } : {}),
+            ...(quote === undefined ? {} : { sourceQuote: quote }),
             ...(category === "preference" ||
             category === "project" ||
             category === "experience" ||
@@ -539,7 +639,7 @@ export class MemoryArchiveStore {
         generation: progress.generation,
         fromSeq,
         // Never advance past a row this page did not return: a full page leaves the rest due.
-        throughSeq: rangeRows.at(-1)?.seq ?? progress.throughSeq,
+        throughSeq: batchThroughSeq,
         messages: [...context, ...fresh],
         newSources,
         retirementEvidence,
@@ -612,12 +712,12 @@ export class MemoryArchiveStore {
     batch: MemoryArchiveBatch,
     changes: readonly MemoryExtractionChange[],
     ctx: AdapterContext,
-  ): Promise<{ saved: number; updated: number; skipped: number }> {
+  ): Promise<MemoryArchiveApplyCounts> {
     if (ctx.spaceId !== batch.spaceId) throw new IsolationError();
     if (ctx.userId !== batch.userId) throw new IsolationError();
     if (ctx.botId && ctx.botId !== batch.botId) throw new IsolationError();
     if (!Array.isArray(changes)) throw new Error("Memory archive changes must be an array.");
-    const skippedAll = { saved: 0, updated: 0, skipped: changes.length };
+    const skippedAll = { saved: 0, updated: 0, skipped: changes.length, removed: 0 };
     return this.transaction(ctx, async (tx) => {
       // Same row lock every message writer and clearThread uses; a clear strictly orders here.
       await tx.$queryRaw`SELECT id FROM threads
@@ -670,6 +770,28 @@ export class MemoryArchiveStore {
       });
       return counts;
     });
+  }
+
+  /**
+   * Stop automatic extraction retries for this thread after a failed range. The cursor and
+   * the unprocessed messages stay; the next completed turn re-arms the pointer, and a clear
+   * is allowed to proceed instead of failing on a range that cannot be extracted.
+   */
+  async pause(input: MemoryArchiveTarget, ctx: AdapterContext): Promise<void> {
+    if (input.userId !== ctx.userId) throw new IsolationError();
+    if (ctx.botId && ctx.botId !== input.botId) throw new IsolationError();
+    await this.inTenant(ctx, () =>
+      this.prisma.memoryArchiveProgress.updateMany({
+        where: {
+          threadId: input.threadId,
+          spaceId: ctx.spaceId,
+          botId: input.botId,
+          userId: input.userId,
+          pending: true,
+        },
+        data: { pending: false },
+      }),
+    );
   }
 
   /** Pointer-only backlog for the reconciler, across spaces, without transcript text. */

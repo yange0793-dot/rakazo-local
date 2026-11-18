@@ -7,6 +7,7 @@ import type {
   ModelReasoningCapabilities,
   PurchaseCardField,
   SandboxKind,
+  SemanticFactKind,
   VoiceAccountErrorCode,
 } from "@rakazo/contracts";
 
@@ -440,6 +441,8 @@ export interface SemanticMemoryForgetRequest {
   /** Same scope as recall: providers delete only facts inside these namespaces. */
   scope: DurableMemoryScope;
   botId: string;
+  /** Selects the host's lesson namespace; omitted acts on the requested scope's facts. */
+  kind?: SemanticFactKind;
   reason?: string;
   /** Reject a management action based on a fact that changed meanwhile. */
   expectedRevision?: number;
@@ -457,6 +460,8 @@ export interface SemanticMemoryRecallRequest {
   query: string;
   scope: DurableMemoryScope;
   botId: string;
+  /** Selects the host's lesson namespace; omitted reads durable/history facts only. */
+  kind?: SemanticFactKind;
   /** Host-managed history belongs to this exact thread, not every chat of the bot. */
   threadId?: string;
   /** Omit until a thread has compacted history; the provider can then skip that namespace. */
@@ -870,7 +875,7 @@ export interface BackgroundJobPayloads {
   /** Background extraction uses only source pointers; the host opens scoped messages. */
   "memory.extract": { threadId: string; botId: string; userId: string };
   /** Review one finished run and draft a skill card; never changes behavior by itself. */
-  "harness.reflect": { runId: string };
+  "harness.reflect": { runId: string; auto?: true; exceptMessageId?: string };
   "messaging.deliver": { runId?: string };
   /** A running chat-app run's interim messages; the run is not marked mirrored. */
   "messaging.progress": { runId: string };

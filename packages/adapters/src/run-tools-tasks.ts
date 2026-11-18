@@ -1,9 +1,11 @@
+import { reflectRunJob } from "@rakazo/adapter-kit";
 import {
   desktopGuardApplies,
   desktopProtectionGuardMessage,
   protectedComputerLifecycleRefusal,
 } from "./desktop-command-guard.js";
 import type { RunContext } from "./run-context.js";
+import { findSkillForRun } from "./run-reflection.js";
 import type { ToolHandlers } from "./run-tool-gate.js";
 import {
   cancelScheduleFromTool,
@@ -24,6 +26,7 @@ import {
   removeScratchpadItemFromTool,
   updateScratchpadItemFromTool,
 } from "./scratchpad-tools.js";
+import { selfEvolutionEnabled } from "./self-evolution.js";
 import {
   skillCreateFromTool,
   skillDeleteFromTool,
@@ -38,6 +41,7 @@ import {
   listBoardTickets,
   updateTicket,
 } from "./ticket-tools.js";
+import { refusal } from "./tool-refusal.js";
 
 /** A command watch may not run what the desktop guard keeps the bot from running itself. */
 function commandWatchGuardError(ctx: RunContext, watch: unknown): string | undefined {
@@ -331,5 +335,56 @@ export const taskTools: ToolHandlers = {
         },
       ),
     );
+  },
+  async reflect_on_run(ctx, call) {
+    const { deps, run, bot, thread } = ctx;
+    const { args } = call;
+    if (!selfEvolutionEnabled())
+      return refusal(
+        "self_evolution_disabled",
+        "Reviewing a run is turned off in this deployment.",
+      );
+    if (!ctx.source.ownerStartedRun)
+      return refusal("reflect_owner_only", "Only the user's own chat can ask for a run review.");
+    if (thread.groupId)
+      return refusal("reflect_direct_only", "Run reviews happen in the bot's own chat.");
+    const requested = args.runId ? String(args.runId).trim() : undefined;
+    const target = await deps.prisma.run.findFirst({
+      where: {
+        spaceId: run.spaceId,
+        botId: bot.id,
+        threadId: thread.id,
+        status: { in: ["completed", "failed", "cancelled"] },
+        ...(requested ? { id: requested } : { id: { not: ctx.runId } }),
+      },
+      orderBy: { createdAt: "desc" },
+      select: { id: true },
+    });
+    if (!target)
+      return {
+        error: requested
+          ? "That run is not a finished run in this chat."
+          : "There is no finished run to review in this chat yet.",
+      };
+    const existing = await findSkillForRun(deps.prisma, bot.id, target.id);
+    if (existing)
+      return {
+        ok: true,
+        runId: target.id,
+        alreadyReviewed: true,
+        skill: { id: existing.id, name: existing.name, status: existing.status },
+        hint: `This run already produced the skill "${existing.name}" (${existing.status}); no new draft will be created. Edit that skill instead, or delete it first to review this run again.`,
+      };
+    await deps.jobs.enqueue(
+      reflectRunJob(target.id, {
+        // The message asking for this review is not a reaction to the run being reviewed.
+        ...(run.sourceMessageId ? { exceptMessageId: run.sourceMessageId } : {}),
+      }),
+    );
+    return {
+      ok: true,
+      runId: target.id,
+      hint: "Short lessons the review saves appear on this bot's memory page under Experience; a draft skill card appears in this chat only if something reusable turns up, and the user must review and save it.",
+    };
   },
 };

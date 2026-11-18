@@ -230,7 +230,7 @@ postgres("automatic memory archive (isolated PostgreSQL)", () => {
       ],
       ctx,
     );
-    expect(result).toEqual({ saved: 1, updated: 0, skipped: 0 });
+    expect(result).toEqual({ saved: 1, updated: 0, skipped: 0, removed: 0 });
     expect(
       await runAsTenant(ctx, () =>
         prisma.memoryArchiveProgress.findUnique({ where: { threadId } }),
@@ -292,15 +292,15 @@ postgres("automatic memory archive (isolated PostgreSQL)", () => {
       ],
       ctx,
     );
-    expect(result).toEqual({ saved: 0, updated: 0, skipped: 1 });
+    expect(result).toEqual({ saved: 0, updated: 0, skipped: 1, removed: 0 });
     const after = await facts.list({ botId, scope: "isolated", includeHistory: true }, ctx);
-    expect(after.items.filter((fact) => fact.content === "Prefer a narrow console.")).toHaveLength(
-      1,
-    );
     expect(after.items.find((fact) => fact.id === saved.id)).toMatchObject({
       status: "forgotten",
       revision: 2,
+      content: "[forgotten]",
     });
+    // Forgetting erases the stored body instead of keeping a hidden copy of it.
+    expect(after.items.some((fact) => fact.content === "Prefer a narrow console.")).toBe(false);
   });
 
   it("rejects a batch from before a clear and reseeds the next generation", async () => {
@@ -328,7 +328,7 @@ postgres("automatic memory archive (isolated PostgreSQL)", () => {
       ],
       ctx,
     );
-    expect(rejected).toEqual({ saved: 0, updated: 0, skipped: 1 });
+    expect(rejected).toEqual({ saved: 0, updated: 0, skipped: 1, removed: 0 });
     expect(
       await runAsTenant(ctx, () =>
         prisma.semanticFact.count({ where: { spaceId, botId, status: "active" } }),
@@ -360,7 +360,7 @@ postgres("automatic memory archive (isolated PostgreSQL)", () => {
         ],
         ctx,
       ),
-    ).toEqual({ saved: 1, updated: 0, skipped: 0 });
+    ).toEqual({ saved: 1, updated: 0, skipped: 0, removed: 0 });
   });
 
   it("keeps direct personal scope, tenant isolation, and one committed apply", async () => {

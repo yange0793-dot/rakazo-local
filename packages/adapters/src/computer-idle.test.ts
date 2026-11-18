@@ -192,6 +192,25 @@ describe("sandbox idle", () => {
     },
   );
 
+  it("does not keep the computer awake for a helper that is only reasoning", async () => {
+    const harness = idleHarness();
+    // Only a non-helper run would match; the helper row is filtered out by the query itself.
+    harness.prisma.run.findFirst.mockImplementation(
+      async ({ where }: { where: { trigger?: unknown } }) =>
+        where.trigger === undefined ? { id: "reasoning-helper" } : null,
+    );
+
+    await sleepComputerIfIdle(harness.deps, harness.computer.id);
+
+    expect(harness.prisma.run.findFirst).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: expect.objectContaining({ trigger: { not: "helper" } }),
+      }),
+    );
+    expect(harness.sandbox.stop).toHaveBeenCalledOnce();
+    expect(harness.sandbox.keepAlive).not.toHaveBeenCalled();
+  });
+
   it("leaves a held computer whose heartbeat finds the sandbox gone to its recovery", async () => {
     const harness = idleHarness();
     harness.prisma.run.findFirst.mockResolvedValue({ id: "run" });

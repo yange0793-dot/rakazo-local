@@ -21,6 +21,8 @@ import {
   NativeSelectOption,
   Spinner,
   Textarea,
+  ToggleGroup,
+  ToggleGroupItem,
 } from "@rakazo/ui-web";
 import { useInfiniteQuery, useQuery, useQueryClient } from "@tanstack/react-query";
 import { ChevronDown, ChevronRight, MoreHorizontal, Search } from "lucide-react";
@@ -31,6 +33,11 @@ import { useSpaceRpc } from "../lib/space-rpc";
 import { errorCode, errorText } from "../lib/user-error";
 
 type MemoryScope = SemanticFact["scope"];
+/** Lessons are the bot's own notes, kept apart from the facts it recalls. */
+type MemoryCategory = "fact" | "experience";
+
+const segmented = "rounded-lg bg-muted p-1";
+const segment = "h-7 px-3 text-body-sm aria-pressed:bg-background aria-pressed:shadow-sm";
 
 /** Managed records are separate from the Markdown notes above them. */
 export function SemanticFactsSection({
@@ -45,6 +52,7 @@ export function SemanticFactsSection({
   const [expanded, setExpanded] = useState(false);
   const [selectedBotId, setSelectedBotId] = useState("");
   const [scope, setScope] = useState<MemoryScope>("isolated");
+  const [category, setCategory] = useState<MemoryCategory>("fact");
   const [busy, setBusy] = useState(false);
   const [recordEditing, setRecordEditing] = useState(false);
   const botSelectId = useId();
@@ -52,6 +60,7 @@ export function SemanticFactsSection({
   const botsQuery = useQuery({ ...queries.bots.list.queryOptions(), enabled: expanded });
   const bots = botsQuery.data ?? [];
   const botId = bots.find((bot) => bot.id === selectedBotId)?.id;
+  const lessonKind = category === "experience" ? ("lesson" as const) : undefined;
 
   const markBusy = useCallback(
     (next: boolean) => {
@@ -76,6 +85,27 @@ export function SemanticFactsSection({
       </Button>
       {expanded ? (
         <div className="mt-3 space-y-3">
+          <ToggleGroup
+            aria-label={t`Category`}
+            data-testid="memory-category"
+            value={[category]}
+            onValueChange={([next]) => {
+              if (!next || next === category) return;
+              setCategory(next as MemoryCategory);
+              // Lessons never leave the bot's own scope.
+              if (next === "experience") setScope("isolated");
+            }}
+            disabled={disabled || busy || recordEditing}
+            spacing={1}
+            className={segmented}
+          >
+            <ToggleGroupItem value="fact" className={segment}>
+              {t({ id: "Facts", message: "Facts" })}
+            </ToggleGroupItem>
+            <ToggleGroupItem value="experience" className={segment}>
+              {t({ id: "Experience", message: "Experience" })}
+            </ToggleGroupItem>
+          </ToggleGroup>
           <div className="grid gap-3 sm:grid-cols-2">
             <Field>
               <FieldLabel htmlFor={botSelectId}>
@@ -98,20 +128,22 @@ export function SemanticFactsSection({
                 ))}
               </NativeSelect>
             </Field>
-            <Field>
-              <FieldLabel htmlFor={scopeSelectId}>
-                <Trans>Scope</Trans>
-              </FieldLabel>
-              <NativeSelect
-                id={scopeSelectId}
-                value={scope}
-                disabled={disabled || busy || recordEditing || !botId}
-                onChange={(event) => setScope(event.target.value as MemoryScope)}
-              >
-                <NativeSelectOption value="isolated">{t`Isolated`}</NativeSelectOption>
-                <NativeSelectOption value="shared">{t`Shared`}</NativeSelectOption>
-              </NativeSelect>
-            </Field>
+            {lessonKind ? null : (
+              <Field>
+                <FieldLabel htmlFor={scopeSelectId}>
+                  <Trans>Scope</Trans>
+                </FieldLabel>
+                <NativeSelect
+                  id={scopeSelectId}
+                  value={scope}
+                  disabled={disabled || busy || recordEditing || !botId}
+                  onChange={(event) => setScope(event.target.value as MemoryScope)}
+                >
+                  <NativeSelectOption value="isolated">{t`Isolated`}</NativeSelectOption>
+                  <NativeSelectOption value="shared">{t`Shared`}</NativeSelectOption>
+                </NativeSelect>
+              </Field>
+            )}
           </div>
           {botsQuery.isError ? (
             <p role="alert" className="text-body-sm text-destructive">
@@ -122,9 +154,10 @@ export function SemanticFactsSection({
           ) : null}
           {botId ? (
             <SemanticFactsBrowser
-              key={`${botId}:${scope}`}
+              key={`${botId}:${scope}:${category}`}
               botId={botId}
               scope={scope}
+              kind={lessonKind}
               disabled={disabled}
               onBusyChange={markBusy}
               onEditingChange={setRecordEditing}
@@ -139,12 +172,15 @@ export function SemanticFactsSection({
 function SemanticFactsBrowser({
   botId,
   scope,
+  kind,
   disabled,
   onBusyChange,
   onEditingChange,
 }: {
   botId: string;
   scope: MemoryScope;
+  /** Selects the bot's lessons; omitted lists durable and history records. */
+  kind?: "lesson";
   disabled: boolean;
   onBusyChange: (busy: boolean) => void;
   onEditingChange: (editing: boolean) => void;
@@ -163,11 +199,15 @@ function SemanticFactsBrowser({
   const [error, setError] = useState<string | null>(null);
   const [conflicted, setConflicted] = useState(false);
   const [confirmForget, setConfirmForget] = useState(false);
+  // The server takes 40 KiB of UTF-8; a Chinese correction passes that well before
+  // the field's 20,000-character cap, so the limit is shown where the text is typed.
+  const draftTooLong = new TextEncoder().encode(draft).byteLength > 40 * 1024;
   const list = useInfiniteQuery(
     queries.memory.facts.infiniteOptions({
       input: (cursor: string | undefined) => ({
         botId,
         scope,
+        ...(kind ? { kind } : {}),
         ...(query ? { query } : {}),
         ...(cursor ? { cursor } : {}),
         limit: 20,
@@ -217,6 +257,7 @@ function SemanticFactsBrowser({
         id: opened.id,
         botId,
         scope,
+        ...(kind ? { kind } : {}),
         content: draft,
         expectedRevision: opened.revision,
       });
@@ -239,6 +280,7 @@ function SemanticFactsBrowser({
         id: opened.id,
         botId,
         scope,
+        ...(kind ? { kind } : {}),
         expectedRevision: opened.revision,
       });
       closeRecord();
@@ -355,9 +397,11 @@ function SemanticFactsBrowser({
                 <MoreHorizontal className="size-4" />
               </DropdownMenuTrigger>
               <DropdownMenuContent align="end">
-                <DropdownMenuItem onClick={() => void exportFacts()}>
-                  <Trans>Export</Trans>
-                </DropdownMenuItem>
+                {kind ? null : (
+                  <DropdownMenuItem onClick={() => void exportFacts()}>
+                    <Trans>Export</Trans>
+                  </DropdownMenuItem>
+                )}
                 <DropdownMenuItem
                   onClick={() => {
                     closeRecord();
@@ -371,7 +415,14 @@ function SemanticFactsBrowser({
           </div>
           {!items.length && !list.isError ? (
             <p className="text-body-sm text-muted-foreground">
-              {query ? <Trans>No matching records</Trans> : <Trans>Nothing remembered yet</Trans>}
+              {query ? (
+                <Trans>No matching records</Trans>
+              ) : includeHistory ? (
+                <Trans>Nothing remembered yet</Trans>
+              ) : (
+                // Current records may be empty only because earlier ones are hidden.
+                <Trans>No current records. Show history to include earlier ones.</Trans>
+              )}
             </p>
           ) : null}
           <div className="divide-y divide-border">
@@ -397,15 +448,24 @@ function SemanticFactsBrowser({
                 {opened?.id === fact.id ? (
                   <div className="space-y-3 pb-3">
                     {editing ? (
-                      <Textarea
-                        aria-label={t`Correction`}
-                        value={draft}
-                        disabled={locked || conflicted}
-                        maxLength={20_000}
-                        rows={5}
-                        dir="auto"
-                        onChange={(event) => setDraft(event.target.value)}
-                      />
+                      <>
+                        <Textarea
+                          aria-label={t`Correction`}
+                          value={draft}
+                          disabled={locked || conflicted}
+                          maxLength={20_000}
+                          rows={5}
+                          dir="auto"
+                          onChange={(event) => setDraft(event.target.value)}
+                        />
+                        {draftTooLong ? (
+                          <p role="alert" className="text-body-sm text-destructive">
+                            <Trans>
+                              Too long to save: a memory record holds at most 40 KB of text.
+                            </Trans>
+                          </p>
+                        ) : null}
+                      </>
                     ) : null}
                     <SemanticFactSource fact={opened} />
                     <div className="flex flex-wrap gap-2">
@@ -414,7 +474,9 @@ function SemanticFactsBrowser({
                           <Button
                             variant="secondary"
                             size="sm"
-                            disabled={locked || conflicted || !draft.trim() || !dirty}
+                            disabled={
+                              locked || conflicted || draftTooLong || !draft.trim() || !dirty
+                            }
                             onClick={() => void correct()}
                           >
                             <Trans>Save correction</Trans>
@@ -499,8 +561,23 @@ function SemanticFactsBrowser({
   );
 }
 
+/** An ISO timestamp as the reader's locale writes it; the exact value stays in the title. */
+function factTime(value: string, locale: string) {
+  return (
+    <time dateTime={value} title={value}>
+      {new Date(value).toLocaleString(locale || "en", {
+        year: "numeric",
+        month: "short",
+        day: "numeric",
+        hour: "numeric",
+        minute: "2-digit",
+      })}
+    </time>
+  );
+}
+
 function SemanticFactSource({ fact }: { fact: SemanticFact }) {
-  const { t } = useLingui();
+  const { i18n, t } = useLingui();
   const source = fact.provenance;
   const kinds = {
     user: t`User`,
@@ -511,17 +588,26 @@ function SemanticFactSource({ fact }: { fact: SemanticFact }) {
   };
   const details = [
     { label: t`Source`, value: kinds[source.kind] },
+    ...(source.harness?.domainKey
+      ? [{ label: t({ id: "Domain", message: "Domain" }), value: source.harness.domainKey }]
+      : []),
     ...(source.sourcePath ? [{ label: t`Path`, value: source.sourcePath }] : []),
     ...(source.sourceId ? [{ label: t`Source ID`, value: source.sourceId }] : []),
     ...(source.runId ? [{ label: t`Run`, value: source.runId }] : []),
     ...(source.threadId ? [{ label: t`Thread`, value: source.threadId }] : []),
     ...(source.messageId ? [{ label: t`Message`, value: source.messageId }] : []),
     { label: t`Version`, value: String(fact.revision) },
-    { label: t`Created`, value: fact.createdAt },
-    { label: t`Updated`, value: fact.updatedAt },
-    ...(source.observedAt ? [{ label: t`Observed`, value: source.observedAt }] : []),
-    ...(source.validFrom ? [{ label: t`Valid from`, value: source.validFrom }] : []),
-    ...(source.validTo ? [{ label: t`Valid to`, value: source.validTo }] : []),
+    { label: t`Created`, value: factTime(fact.createdAt, i18n.locale) },
+    { label: t`Updated`, value: factTime(fact.updatedAt, i18n.locale) },
+    ...(source.observedAt
+      ? [{ label: t`Observed`, value: factTime(source.observedAt, i18n.locale) }]
+      : []),
+    ...(source.validFrom
+      ? [{ label: t`Valid from`, value: factTime(source.validFrom, i18n.locale) }]
+      : []),
+    ...(source.validTo
+      ? [{ label: t`Valid to`, value: factTime(source.validTo, i18n.locale) }]
+      : []),
     ...(fact.status === "historical" ? [{ label: t`Status`, value: t`Historical` }] : []),
     ...(fact.status === "forgotten" ? [{ label: t`Status`, value: t`Forgotten` }] : []),
   ];

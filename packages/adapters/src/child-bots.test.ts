@@ -281,38 +281,126 @@ describe("spawned bot archival", () => {
 });
 
 describe("destroyBot", () => {
-  it("refuses destructive teardown when bot-scoped semantic retirement fails", async () => {
+  it("retires the bot's memory scope inside the deleting transaction", async () => {
+    const retireScope = vi.fn().mockResolvedValue(undefined);
+    const deleteBot = vi.fn().mockResolvedValue({});
+    let txClient: Record<string, unknown> | undefined;
+    const transaction = vi.fn(async (callback: (tx: unknown) => Promise<unknown>) => {
+      txClient = {
+        $queryRaw: vi.fn().mockResolvedValue([{ id: "bot-1" }]),
+        chatGroup: {
+          findMany: vi.fn().mockResolvedValue([]),
+          deleteMany: vi.fn().mockResolvedValue({ count: 0 }),
+        },
+        artifact: {
+          findMany: vi.fn().mockResolvedValue([]),
+          deleteMany: vi.fn().mockResolvedValue({ count: 0 }),
+        },
+        page: {
+          updateMany: vi.fn().mockResolvedValue({ count: 0 }),
+          deleteMany: vi.fn().mockResolvedValue({ count: 0 }),
+        },
+        secret: {
+          findMany: vi.fn().mockResolvedValue([]),
+          deleteMany: vi.fn().mockResolvedValue({ count: 0 }),
+        },
+        computerExecutionLease: { deleteMany: vi.fn().mockResolvedValue({ count: 0 }) },
+        computer: { updateMany: vi.fn().mockResolvedValue({ count: 0 }) },
+        botDeletion: { create: vi.fn().mockResolvedValue({}) },
+        bot: { delete: deleteBot },
+      };
+      return callback(txClient);
+    });
+    const prisma = {
+      computer: { findUnique: vi.fn().mockResolvedValue(null) },
+      run: {
+        findMany: vi.fn().mockResolvedValue([]),
+        updateMany: vi.fn().mockResolvedValue({ count: 0 }),
+      },
+      routine: { findMany: vi.fn().mockResolvedValue([]) },
+      $transaction: transaction,
+    } as unknown as PrismaClient;
+
+    await destroyBot(
+      {
+        prisma,
+        sandbox: {} as SandboxProvider,
+        home: {} as AgentHomeStore,
+        jobs: { cancel: vi.fn() } as unknown as JobPublisher,
+        semanticFacts: { retireScope },
+      },
+      { id: "bot-1", spaceId: "workspace-1", userId: "user-1", name: "Gone", archivedAt: null },
+      { ...context, spaceId: "other-space" },
+      { deleteMemories: true },
+    );
+
+    // Retirement acts for the bot's owner and shares the transaction that deletes the bot.
+    expect(retireScope).toHaveBeenCalledWith(
+      { spaceId: "workspace-1", botId: "bot-1" },
+      expect.objectContaining({ spaceId: "workspace-1", botId: "bot-1", userId: "user-1" }),
+      txClient,
+    );
+    expect(retireScope.mock.invocationCallOrder[0]!).toBeLessThan(
+      deleteBot.mock.invocationCallOrder[0]!,
+    );
+  });
+
+  it("aborts the deletion from a failed semantic retirement before removing the bot", async () => {
     const retireScope = vi.fn().mockRejectedValue(new Error("Semantic retirement unavailable"));
-    const removeForBot = vi.fn();
-    const findComputer = vi.fn();
-    const transaction = vi.fn();
+    const deleteBot = vi.fn();
+    const transaction = vi.fn(async (callback: (tx: unknown) => Promise<unknown>) =>
+      callback({
+        $queryRaw: vi.fn().mockResolvedValue([{ id: "bot-1" }]),
+        chatGroup: {
+          findMany: vi.fn().mockResolvedValue([]),
+          deleteMany: vi.fn().mockResolvedValue({ count: 0 }),
+        },
+        artifact: {
+          findMany: vi.fn().mockResolvedValue([]),
+          deleteMany: vi.fn().mockResolvedValue({ count: 0 }),
+        },
+        page: {
+          updateMany: vi.fn().mockResolvedValue({ count: 0 }),
+          deleteMany: vi.fn().mockResolvedValue({ count: 0 }),
+        },
+        secret: {
+          findMany: vi.fn().mockResolvedValue([]),
+          deleteMany: vi.fn().mockResolvedValue({ count: 0 }),
+        },
+        computerExecutionLease: { deleteMany: vi.fn().mockResolvedValue({ count: 0 }) },
+        computer: { updateMany: vi.fn().mockResolvedValue({ count: 0 }) },
+        botDeletion: { create: vi.fn().mockResolvedValue({}) },
+        bot: { delete: deleteBot },
+      }),
+    );
+    const prisma = {
+      computer: { findUnique: vi.fn().mockResolvedValue(null) },
+      run: {
+        findMany: vi.fn().mockResolvedValue([]),
+        updateMany: vi.fn().mockResolvedValue({ count: 0 }),
+      },
+      routine: { findMany: vi.fn().mockResolvedValue([]) },
+      $transaction: transaction,
+    } as unknown as PrismaClient;
 
     await expect(
       destroyBot(
         {
-          prisma: {
-            computer: { findUnique: findComputer },
-            $transaction: transaction,
-          } as unknown as PrismaClient,
+          prisma,
           sandbox: {} as SandboxProvider,
           home: {} as AgentHomeStore,
-          jobs: {} as JobPublisher,
-          messagingInstallations: { removeForBot },
+          jobs: { cancel: vi.fn() } as unknown as JobPublisher,
           semanticFacts: { retireScope },
         },
         { id: "bot-1", spaceId: "workspace-1", userId: "user-1", name: "Gone", archivedAt: null },
-        { ...context, spaceId: "other-space" },
-        { deleteMemories: false },
+        context,
+        { deleteMemories: true },
       ),
     ).rejects.toThrow("Semantic retirement unavailable");
 
-    expect(retireScope).toHaveBeenCalledWith(
-      { spaceId: "workspace-1", botId: "bot-1" },
-      expect.objectContaining({ spaceId: "workspace-1", botId: "bot-1", userId: "user-1" }),
-    );
-    expect(removeForBot).not.toHaveBeenCalled();
-    expect(findComputer).not.toHaveBeenCalled();
-    expect(transaction).not.toHaveBeenCalled();
+    // The retirement and the bot row share one transaction, so nothing was committed.
+    expect(retireScope).toHaveBeenCalledOnce();
+    expect(deleteBot).not.toHaveBeenCalled();
   });
 
   it("removes its deleted pages' link tokens from the secret store once the delete commits", async () => {
@@ -378,7 +466,7 @@ describe("destroyBot", () => {
     expect(order).toEqual(["commit", "store delete"]);
   });
 
-  it("moves bot memories into shared memory before the cascading delete", async () => {
+  it("keeps the semantic scope of a kept-memories bot and moves its Markdown memory", async () => {
     const retireScope = vi.fn().mockResolvedValue(undefined);
     const createDeletion = vi.fn().mockResolvedValue({});
     const deleteBot = vi.fn().mockResolvedValue({});
@@ -443,13 +531,8 @@ describe("destroyBot", () => {
       { deleteMemories: false },
     );
 
-    expect(retireScope).toHaveBeenCalledWith(
-      { spaceId: "workspace-1", botId: "bot-1" },
-      expect.objectContaining({ spaceId: "workspace-1", botId: "bot-1" }),
-    );
-    expect(retireScope.mock.invocationCallOrder[0]).toBeLessThan(
-      transaction.mock.invocationCallOrder[0]!,
-    );
+    // Keeping memories must keep the semantic scope too, not only the Markdown documents.
+    expect(retireScope).not.toHaveBeenCalled();
     expect(transaction).toHaveBeenCalledOnce();
     expect(releaseComputers).toHaveBeenCalledWith({
       where: {

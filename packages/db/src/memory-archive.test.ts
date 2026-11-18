@@ -44,6 +44,7 @@ interface RunRow {
   status: string;
   trigger: string;
   sourceMessageId: string | null;
+  createdAt?: Date;
 }
 
 interface ProgressRow {
@@ -203,6 +204,7 @@ function fixture(
             userId?: string;
             trigger?: { in: string[] };
             sourceMessageId?: { not: null };
+            createdAt?: { lt?: Date };
           };
           take?: number;
         }) => {
@@ -226,6 +228,13 @@ function fixture(
             if (where.trigger?.in)
               rows = rows.filter((run) => where.trigger!.in.includes(run.trigger));
             if (where.sourceMessageId) rows = rows.filter((run) => run.sourceMessageId !== null);
+            if (where.createdAt?.lt)
+              rows = rows.filter(
+                (run) => (run.createdAt?.getTime() ?? 0) < where.createdAt!.lt!.getTime(),
+              );
+            rows = [...rows].sort(
+              (left, right) => (right.createdAt?.getTime() ?? 0) - (left.createdAt?.getTime() ?? 0),
+            );
           }
           return take === undefined ? rows : rows.slice(0, take);
         },
@@ -244,7 +253,7 @@ function fixture(
         }) => {
           progress = progress
             ? { ...progress, ...(update as Partial<ProgressRow>) }
-            : ({ ...create } as ProgressRow);
+            : ({ ...create } as unknown as ProgressRow);
           return progress;
         },
       ),
@@ -252,6 +261,18 @@ function fixture(
         progress = { ...progress!, ...data };
         return progress;
       }),
+      updateMany: vi.fn(
+        async ({ where, data }: { where: Partial<ProgressRow>; data: Partial<ProgressRow> }) => {
+          const matches =
+            progress !== null &&
+            Object.entries(where).every(
+              ([key, value]) => progress![key as keyof ProgressRow] === value,
+            );
+          if (!matches) return { count: 0 };
+          progress = { ...progress!, ...data };
+          return { count: 1 };
+        },
+      ),
     },
     semanticFact: {
       findFirst: vi.fn(async ({ where }: { where: Record<string, unknown> }) => {
@@ -268,12 +289,11 @@ function fixture(
           let rows = [...facts];
           if (typeof where.namespace === "string")
             rows = rows.filter((row) => row.namespace === where.namespace);
-          const status = where.status as { in?: string[] } | undefined;
-          if (status?.in) rows = rows.filter((row) => status.in!.includes(row.status));
-          if (where.OR)
-            rows = rows.filter(
-              (row) => row.status === "forgotten" || row.sourceThreadId === "thread-a",
-            );
+          const status = where.status as { in?: string[] } | string | undefined;
+          if (typeof status === "string") rows = rows.filter((row) => row.status === status);
+          else if (status?.in) rows = rows.filter((row) => status.in!.includes(row.status));
+          if (typeof where.sourceThreadId === "string")
+            rows = rows.filter((row) => row.sourceThreadId === where.sourceThreadId);
           return take === undefined ? rows : rows.slice(0, take);
         },
       ),
@@ -317,6 +337,16 @@ function fixture(
       create: vi.fn(async ({ data }: { data: Record<string, unknown> }) => {
         revisions.push(data);
         return data;
+      }),
+      deleteMany: vi.fn(async ({ where }: { where: { factId: string } }) => {
+        let count = 0;
+        for (let index = revisions.length - 1; index >= 0; index -= 1) {
+          if (revisions[index]!.factId === where.factId) {
+            revisions.splice(index, 1);
+            count += 1;
+          }
+        }
+        return { count };
       }),
     },
     semanticMemoryRetirement: {
@@ -466,6 +496,42 @@ describe("automatic memory archive", () => {
     });
   });
 
+  it("seeds before an unarchived failed turn that preceded the first completed one", async () => {
+    const f = fixture({
+      thread: threadRow({ nextMessageSeq: 5 }),
+      messages: [
+        message(2, { blocks: [{ kind: "text", text: "第一轮就失败的那句话" }] }),
+        assistant(3),
+        message(4, { blocks: [{ kind: "text", text: "第二轮成功" }] }),
+      ],
+      runs: [
+        {
+          id: "run-b",
+          botId: "bot-a",
+          threadId: "thread-a",
+          userId: "user-a",
+          status: "completed",
+          trigger: "user",
+          sourceMessageId: "m4",
+          createdAt: new Date(now.getTime() + 1_000),
+        },
+        {
+          id: "run-a",
+          botId: "bot-a",
+          threadId: "thread-a",
+          userId: "user-a",
+          status: "failed",
+          trigger: "user",
+          sourceMessageId: "m2",
+          createdAt: now,
+        },
+      ],
+    });
+    expect(await f.store.markPending("run-b", ctx, now)).toBe(true);
+    // The failed turn's message would otherwise sit before the seed and never be archived.
+    expect(f.progress()).toMatchObject({ processedUpToSeq: 1, throughSeq: 4 });
+  });
+
   it("schedules only trusted direct personal runs with real user text", async () => {
     const base = {
       id: "run-a",
@@ -505,7 +571,9 @@ describe("automatic memory archive", () => {
       messages: [message(2)],
       runs: [base],
     });
-    await expect(group.store.markPending("run-a", ctx, now)).rejects.toBeInstanceOf(IsolationError);
+    // A group turn completes here too; it has no personal archive, so this is a quiet no-op.
+    expect(await group.store.markPending("run-a", ctx, now)).toBe(false);
+    expect(group.progress()).toBeNull();
   });
 
   it("counts the run's claimed steering messages as its own user sources", async () => {
@@ -579,6 +647,38 @@ describe("automatic memory archive", () => {
     expect(f.db.message.findMany.mock.calls[0]![0]).toMatchObject({ take: 8 });
   });
 
+  it("stops a batch at its byte budget so one request can hold it", async () => {
+    const huge = "字".repeat(100_000);
+    const f = fixture({
+      thread: threadRow(),
+      progress: {
+        threadId: "thread-a",
+        spaceId: "space-a",
+        botId: "bot-a",
+        userId: "user-a",
+        scope: "isolated",
+        generation: 0,
+        throughSeq: 3,
+        processedUpToSeq: 0,
+        pending: true,
+        availableAt: now,
+      },
+      messages: [
+        message(1, { blocks: [{ kind: "text", text: huge }] }),
+        message(2, { blocks: [{ kind: "text", text: huge }] }),
+        message(3, { blocks: [{ kind: "text", text: huge }] }),
+      ],
+    });
+    const batch = await f.store.loadBatch(
+      { threadId: "thread-a", botId: "bot-a", userId: "user-a" },
+      ctx,
+    );
+    // Each message is ~300 KiB; only the first fits the batch, and the cursor stops there.
+    expect(batch!.messages.map((message) => message.id)).toEqual(["m1"]);
+    expect(batch!.newSources.map((source) => source.id)).toEqual(["m1"]);
+    expect(batch!.throughSeq).toBe(1);
+  });
+
   it("never advances the cursor past a page it truncated", async () => {
     const f = fixture({
       thread: threadRow(),
@@ -628,6 +728,54 @@ describe("automatic memory archive", () => {
     expect(
       await empty.store.loadBatch({ threadId: "thread-a", botId: "bot-a", userId: "user-a" }, ctx),
     ).toBeNull();
+  });
+
+  it("stops automatic retries without losing the unprocessed range", async () => {
+    const f = fixture({
+      thread: threadRow(),
+      progress: {
+        threadId: "thread-a",
+        spaceId: "space-a",
+        botId: "bot-a",
+        userId: "user-a",
+        scope: "isolated",
+        generation: 0,
+        throughSeq: 9,
+        processedUpToSeq: 3,
+        pending: true,
+        availableAt: now,
+      },
+    });
+    await f.store.pause({ threadId: "thread-a", botId: "bot-a", userId: "user-a" }, ctx);
+    expect(f.progress()).toMatchObject({
+      pending: false,
+      processedUpToSeq: 3,
+      throughSeq: 9,
+    });
+    expect(
+      await f.store.loadBatch({ threadId: "thread-a", botId: "bot-a", userId: "user-a" }, ctx),
+    ).toBeNull();
+  });
+
+  it("arms a caught-up cursor for messages added since it finished", async () => {
+    const f = fixture({
+      thread: threadRow({ nextMessageSeq: 9 }),
+      progress: {
+        threadId: "thread-a",
+        spaceId: "space-a",
+        botId: "bot-a",
+        userId: "user-a",
+        scope: "isolated",
+        generation: 0,
+        throughSeq: 5,
+        processedUpToSeq: 5,
+        pending: false,
+        availableAt: now,
+      },
+      messages: [message(6)],
+    });
+    await f.store.prepareClear({ threadId: "thread-a", botId: "bot-a", userId: "user-a" }, ctx);
+    expect(f.progress()).toMatchObject({ throughSeq: 8, pending: true });
   });
 
   it("offers only bounded forgotten or same-thread retirement evidence", async () => {
@@ -681,10 +829,47 @@ describe("automatic memory archive", () => {
     expect(batch!.retirementEvidence.find((fact) => fact.id === "forgotten")).toMatchObject({
       status: "forgotten",
       revision: 3,
+      // Forgetting erases the stored body; the quoted words are the surviving evidence.
+      content: "narrow",
       sourceMessageId: "m1",
       sourceQuote: "narrow",
       category: "preference",
     });
+  });
+
+  it("keeps the stored placeholder as evidence when a forgotten fact had no quote", async () => {
+    const f = fixture({
+      thread: threadRow(),
+      progress: {
+        threadId: "thread-a",
+        spaceId: "space-a",
+        botId: "bot-a",
+        userId: "user-a",
+        scope: "isolated",
+        generation: 0,
+        throughSeq: 4,
+        processedUpToSeq: 3,
+        pending: true,
+        availableAt: now,
+      },
+      messages: [message(4)],
+      facts: [
+        factRecord({
+          id: "forgotten",
+          status: "forgotten",
+          revision: 2,
+          content: "[forgotten]",
+          provenance: JSON.stringify({ kind: "manual", observedAt: now.toISOString() }),
+        }),
+      ],
+    });
+    const batch = await f.store.loadBatch(
+      { threadId: "thread-a", botId: "bot-a", userId: "user-a" },
+      ctx,
+    );
+    expect(batch!.retirementEvidence).toEqual([
+      { id: "forgotten", revision: 2, content: "[forgotten]", status: "forgotten" },
+    ]);
   });
 
   it("saves a source-bound fact and checkpoints in the same transaction", async () => {
@@ -709,7 +894,7 @@ describe("automatic memory archive", () => {
       [change],
       ctx,
     );
-    expect(result).toEqual({ saved: 1, updated: 0, skipped: 0 });
+    expect(result).toEqual({ saved: 1, updated: 0, skipped: 0, removed: 0 });
     expect(f.progress()).toMatchObject({ processedUpToSeq: 6, pending: false });
     expect(f.facts).toHaveLength(1);
     expect(JSON.parse(f.facts[0]!.provenance)).toMatchObject({
@@ -750,7 +935,7 @@ describe("automatic memory archive", () => {
         [change, repeat],
         ctx,
       ),
-    ).toEqual({ saved: 1, updated: 0, skipped: 1 });
+    ).toEqual({ saved: 1, updated: 0, skipped: 1, removed: 0 });
     f.facts[0]!.status = "forgotten";
     const p = f.progress()!;
     f.db.memoryArchiveProgress.findUnique.mockResolvedValue({
@@ -765,7 +950,7 @@ describe("automatic memory archive", () => {
         [repeat],
         ctx,
       ),
-    ).toEqual({ saved: 0, updated: 0, skipped: 1 });
+    ).toEqual({ saved: 0, updated: 0, skipped: 1, removed: 0 });
     expect(f.facts).toHaveLength(1);
   });
 
@@ -800,7 +985,7 @@ describe("automatic memory archive", () => {
         [correction],
         ctx,
       ),
-    ).toEqual({ saved: 0, updated: 1, skipped: 0 });
+    ).toEqual({ saved: 0, updated: 1, skipped: 0, removed: 0 });
     expect(f.facts[0]).toMatchObject({ revision: 2, content: "Use a wide console." });
     expect(JSON.parse(f.facts[0]!.provenance)).toMatchObject({
       kind: "run",
@@ -820,7 +1005,7 @@ describe("automatic memory archive", () => {
         [{ ...correction, content: "Another wide console.", expectedRevision: 1 }],
         ctx,
       ),
-    ).toEqual({ saved: 0, updated: 0, skipped: 1 });
+    ).toEqual({ saved: 0, updated: 0, skipped: 1, removed: 0 });
     expect(f.facts[0]).toMatchObject({ revision: 2 });
   });
 
@@ -859,9 +1044,72 @@ describe("automatic memory archive", () => {
       ],
       ctx,
     );
-    expect(result).toEqual({ saved: 0, updated: 0, skipped: 5 });
+    expect(result).toEqual({ saved: 0, updated: 0, skipped: 5, removed: 0 });
     expect(f.facts).toHaveLength(0);
     expect(f.progress()).toMatchObject({ processedUpToSeq: 6 });
+  });
+
+  it("tombstones a cited removal only at the revision the extractor was shown", async () => {
+    const f = fixture({
+      thread: threadRow(),
+      messages: [
+        message(4, { blocks: [{ kind: "text", text: "别再记我的地址了，我早就不住北京了。" }] }),
+      ],
+      facts: [factRecord({ id: "fact-a", revision: 2, content: "用户住在北京" })],
+      progress: {
+        threadId: "thread-a",
+        spaceId: "space-a",
+        botId: "bot-a",
+        userId: "user-a",
+        scope: "isolated",
+        generation: 0,
+        throughSeq: 6,
+        processedUpToSeq: 3,
+        pending: true,
+        availableAt: now,
+      },
+    });
+    const removal = {
+      content: "用户住在北京",
+      sourceMessageId: "m4",
+      sourceQuote: "别再记我的地址了",
+      category: "preference" as const,
+      replacesId: "fact-a",
+      expectedRevision: 2,
+      remove: true as const,
+    };
+    expect(
+      await f.store.applyBatch(
+        { ...batchBase, messages: [], newSources: [], retirementEvidence: [] },
+        [{ ...removal, expectedRevision: 1 }],
+        ctx,
+      ),
+    ).toEqual({ saved: 0, updated: 0, skipped: 1, removed: 0 });
+    expect(f.facts[0]).toMatchObject({ status: "active", revision: 2 });
+
+    const p = f.progress()!;
+    f.db.memoryArchiveProgress.findUnique.mockResolvedValue({
+      ...p,
+      processedUpToSeq: 3,
+      pending: true,
+    } as never);
+    f.db.thread.findFirst.mockResolvedValue(threadRow() as never);
+    expect(
+      await f.store.applyBatch(
+        { ...batchBase, messages: [], newSources: [], retirementEvidence: [] },
+        [removal],
+        ctx,
+      ),
+    ).toEqual({ saved: 0, updated: 0, skipped: 0, removed: 1 });
+    expect(f.facts[0]).toMatchObject({
+      status: "forgotten",
+      revision: 3,
+      content: "[forgotten]",
+    });
+    expect(f.revisions.filter((row) => row.factId === "fact-a").map((row) => row.status)).toEqual([
+      "forgotten",
+    ]);
+    expect([...f.outbox.values()].map((work) => work.action)).toEqual(["delete", "delete"]);
   });
 
   it("writes nothing for another generation and checkpoints an empty batch", async () => {
@@ -887,7 +1135,7 @@ describe("automatic memory archive", () => {
         [change],
         ctx,
       ),
-    ).toEqual({ saved: 0, updated: 0, skipped: 1 });
+    ).toEqual({ saved: 0, updated: 0, skipped: 1, removed: 0 });
     expect(stale.db.semanticFact.create).not.toHaveBeenCalled();
     expect(stale.db.memoryArchiveProgress.update).not.toHaveBeenCalled();
 
@@ -912,7 +1160,7 @@ describe("automatic memory archive", () => {
         [],
         ctx,
       ),
-    ).toEqual({ saved: 0, updated: 0, skipped: 0 });
+    ).toEqual({ saved: 0, updated: 0, skipped: 0, removed: 0 });
     expect(empty.progress()).toMatchObject({ processedUpToSeq: 6, pending: false });
   });
 

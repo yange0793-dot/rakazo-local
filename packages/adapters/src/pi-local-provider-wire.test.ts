@@ -111,13 +111,108 @@ describe("local model output limit on the wire", () => {
     expect(outputLimit(request)).toBe(8000);
   });
 
-  it("leaves other providers on the default", async () => {
+  it("leaves other providers on the default for the unconfigured window", async () => {
     const request = await wireRequest(
       { ...localServer, RAKAZO_LOCAL_MAX_TOKENS: "20000" },
       {},
       "openai-compatible",
     );
-    expect(outputLimit(request)).toBe(4096);
+    // The operator's local limit does not apply; the default 262144-token window reserves a
+    // quarter of itself for output.
+    expect(outputLimit(request)).toBe(65_536);
+  });
+});
+
+/**
+ * Runs one real turn against a fake Anthropic Messages endpoint and returns the request it
+ * received. The connection sets no output limit, as the deployed anthropic-messages ones do.
+ */
+async function anthropicWireRequest(): Promise<WireRequest> {
+  vi.resetModules();
+  const { PiAgentRuntime } = await import("./pi-runtime.js");
+  const requests: WireRequest[] = [];
+  const server = createServer((request, response) => {
+    void (async () => {
+      const chunks: Buffer[] = [];
+      for await (const chunk of request) chunks.push(Buffer.from(chunk));
+      requests.push(JSON.parse(Buffer.concat(chunks).toString("utf8")));
+      const event = (type: string, data: unknown) =>
+        `event: ${type}\ndata: ${JSON.stringify(data)}\n\n`;
+      response.writeHead(200, { "content-type": "text/event-stream" });
+      response.end(
+        event("message_start", {
+          type: "message_start",
+          message: {
+            id: "msg_fixture",
+            model: "example-model",
+            usage: { input_tokens: 5, output_tokens: 0 },
+          },
+        }) +
+          event("content_block_start", {
+            type: "content_block_start",
+            index: 0,
+            content_block: { type: "text", text: "" },
+          }) +
+          event("content_block_delta", {
+            type: "content_block_delta",
+            index: 0,
+            delta: { type: "text_delta", text: "Ready" },
+          }) +
+          event("content_block_stop", { type: "content_block_stop", index: 0 }) +
+          event("message_delta", {
+            type: "message_delta",
+            delta: { stop_reason: "end_turn" },
+            usage: { output_tokens: 1 },
+          }) +
+          event("message_stop", { type: "message_stop" }),
+      );
+    })().catch(() => response.destroy());
+  });
+  server.listen(0, "127.0.0.1");
+  await once(server, "listening");
+  const address = server.address();
+  if (!address || typeof address === "string") throw new Error("Fixture endpoint unavailable");
+  const baseUrl = `http://127.0.0.1:${address.port}/v1`;
+  try {
+    const events = [];
+    for await (const event of new PiAgentRuntime().run(
+      {
+        botId: "bot-fixture",
+        threadId: "thread-fixture",
+        runId: "run-anthropic-wire",
+        prompt: "Continue",
+        instructions: "Answer briefly.",
+        history: [],
+        tools: [],
+        model: {
+          provider: "openai-compatible",
+          id: "example-model",
+          baseUrl,
+          allowPrivateEndpoint: true,
+          apiProtocol: "anthropic-messages",
+          // The deployed connections store no limit at all: the column reads back null.
+          maxTokens: null as unknown as number,
+        },
+      },
+      { signal: AbortSignal.timeout(15_000) },
+    )) {
+      events.push(event);
+    }
+    expect(events).toContainEqual(expect.objectContaining({ type: "done", text: "Ready" }));
+    expect(requests).toHaveLength(1);
+    return requests[0]!;
+  } finally {
+    server.close();
+    server.closeAllConnections();
+    await once(server, "close");
+  }
+}
+
+describe("an anthropic-messages connection without an output limit", () => {
+  it("sends the window's quarter, not the uncapped default", async () => {
+    const request = await anthropicWireRequest();
+    // 262144-token default window; the connection sets no maxTokens of its own.
+    expect(request.max_tokens).toBe(65_536);
   });
 });
 

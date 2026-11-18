@@ -221,6 +221,8 @@ async function runWithModel(
     },
     attempt: {
       create: vi.fn(async () => ({ id: "attempt-1" })),
+      // The turn's own row is the first attempt of the run.
+      count: vi.fn(async () => 1),
       update: vi.fn(),
       updateMany: vi.fn(async () => ({ count: 1 })),
     },

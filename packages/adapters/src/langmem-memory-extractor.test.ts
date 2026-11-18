@@ -1,5 +1,5 @@
 import { once } from "node:events";
-import { chmodSync, mkdtempSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { createServer } from "node:http";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -12,6 +12,7 @@ import type {
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { MemoryCompletionRequest } from "./langmem-memory-extractor.js";
 import {
+  completionReasoning,
   createLangMemExtractor,
   createRuntimeMemoryCompletion,
   validateChanges,
@@ -86,6 +87,7 @@ function childHeader(header: string): string {
 function writeChild(header: string, terminal: unknown) {
   const directory = mkdtempSync(join(tmpdir(), "langmem-extractor-"));
   const childPath = join(directory, "child.js");
+  const extractFramePath = join(directory, "extract.json");
   writeFileSync(
     childPath,
     `${childHeader(header)}
@@ -94,6 +96,7 @@ const rl = readline.createInterface({ input: process.stdin });
 rl.on("line", (line) => {
   const message = JSON.parse(line);
   if (message.type === "extract") {
+    require("node:fs").writeFileSync(${JSON.stringify(extractFramePath)}, line);
     process.stdout.write(${JSON.stringify(
       JSON.stringify({ type: "completion", id: "c1", request: completionRequest }),
     )} + "\\n");
@@ -113,7 +116,10 @@ rl.on("line", (line) => {
     `#!/bin/sh\nexec ${JSON.stringify(process.execPath)} ${JSON.stringify(childPath)}\n`,
   );
   chmodSync(wrapper, 0o755);
-  return { pythonPath: wrapper, scriptPath: "ignored", directory };
+  // The adapter checks both configured paths exist before spawning.
+  const scriptPath = join(directory, "child.py");
+  writeFileSync(scriptPath, "");
+  return { pythonPath: wrapper, scriptPath, directory, extractFramePath };
 }
 
 async function startChatFixture() {
@@ -178,7 +184,7 @@ describe("LangMem extractor transport", () => {
         },
       ],
     });
-    const complete = vi.fn(async () => ({
+    const complete = vi.fn(async (_request: MemoryCompletionRequest) => ({
       content: "",
       toolCalls: [
         {
@@ -205,7 +211,45 @@ describe("LangMem extractor transport", () => {
     expect(complete.mock.calls[0]?.[0]).toEqual(completionRequest);
   });
 
-  it("rejects a quote that is not in a new user message", async () => {
+  it("asks the child for the removal-capable protocol and returns a verified removal", async () => {
+    const child = writeChild("", {
+      type: "result",
+      changes: [
+        {
+          content: "用户喜欢浅色模式",
+          sourceMessageId: "m1",
+          sourceQuote: "以后都用深色模式",
+          category: "preference",
+          replacesId: "f1",
+          expectedRevision: 2,
+          remove: true,
+        },
+      ],
+    });
+    const extractor = createLangMemExtractor({
+      pythonPath: child.pythonPath,
+      scriptPath: child.scriptPath,
+      complete: async () => ({ content: "", toolCalls: [] }),
+    });
+
+    await expect(extractor.extract(request, context)).resolves.toEqual([
+      {
+        content: "用户喜欢浅色模式",
+        sourceMessageId: "m1",
+        sourceQuote: "以后都用深色模式",
+        category: "preference",
+        replacesId: "f1",
+        expectedRevision: 2,
+        remove: true,
+      },
+    ]);
+    expect(JSON.parse(readFileSync(child.extractFramePath, "utf8"))).toMatchObject({
+      type: "extract",
+      allowRemovals: true,
+    });
+  });
+
+  it("drops a quote that is not in a new user message instead of failing the batch", async () => {
     const child = writeChild("", {
       type: "result",
       changes: [
@@ -215,6 +259,12 @@ describe("LangMem extractor transport", () => {
           sourceQuote: "not in the message",
           category: "preference",
         },
+        {
+          content: "用户偏好先写测试",
+          sourceMessageId: "m1",
+          sourceQuote: "以后都用深色模式",
+          category: "preference",
+        },
       ],
     });
     const extractor = createLangMemExtractor({
@@ -222,9 +272,28 @@ describe("LangMem extractor transport", () => {
       scriptPath: child.scriptPath,
       complete: async () => ({ content: "", toolCalls: [] }),
     });
+    await expect(extractor.extract(request, context)).resolves.toEqual([
+      {
+        content: "用户偏好先写测试",
+        sourceMessageId: "m1",
+        sourceQuote: "以后都用深色模式",
+        category: "preference",
+      },
+    ]);
+  });
+
+  it("names a configured extractor path that is gone instead of failing the spawn", async () => {
+    const complete = vi.fn(async () => ({ content: "", toolCalls: [] }));
+    const extractor = createLangMemExtractor({
+      pythonPath: "/langmem-test/missing-python",
+      scriptPath: "/langmem-test/missing-script.py",
+      complete,
+    });
+
     await expect(extractor.extract(request, context)).rejects.toThrow(
-      "quote is not in the cited new user message",
+      "LangMem extractor Python is missing at /langmem-test/missing-python",
     );
+    expect(spawnSpy).not.toHaveBeenCalled();
   });
 
   it("surfaces a completion failure and terminates the child", async () => {
@@ -271,7 +340,7 @@ describe("LangMem extractor transport", () => {
     };
 
     await expect(extractor.extract(oversized, context)).rejects.toThrow(
-      "Memory extraction request exceeds the 1 MiB protocol limit.",
+      /over the \d+-byte extractor limit/,
     );
     expect(spawnSpy).not.toHaveBeenCalled();
     expect(complete).not.toHaveBeenCalled();
@@ -279,6 +348,27 @@ describe("LangMem extractor transport", () => {
 });
 
 describe("validated LangMem changes", () => {
+  it("keeps a removal only at the active target's revision", () => {
+    const removal = {
+      content: "用户喜欢浅色模式",
+      sourceMessageId: "m1",
+      sourceQuote: "以后都用深色模式",
+      category: "preference" as const,
+      replacesId: "f1",
+      expectedRevision: 2,
+      remove: true as const,
+    };
+
+    expect(validateChanges(request, [removal])).toEqual({ changes: [removal], dropped: 0 });
+    expect(
+      validateChanges(request, [
+        { ...removal, expectedRevision: 1 },
+        { ...removal, replacesId: "missing" },
+        { ...removal, sourceQuote: "not in the message" },
+      ]),
+    ).toEqual({ changes: [], dropped: 3 });
+  });
+
   it("binds an update to the active fact and its observed revision", () => {
     expect(
       validateChanges(request, [
@@ -291,20 +381,23 @@ describe("validated LangMem changes", () => {
           expectedRevision: 2,
         },
       ]),
-    ).toEqual([
-      {
-        content: "用户偏好深色模式",
-        sourceMessageId: "m1",
-        sourceQuote: "以后都用深色模式",
-        category: "preference",
-        replacesId: "f1",
-        expectedRevision: 2,
-      },
-    ]);
+    ).toEqual({
+      changes: [
+        {
+          content: "用户偏好深色模式",
+          sourceMessageId: "m1",
+          sourceQuote: "以后都用深色模式",
+          category: "preference",
+          replacesId: "f1",
+          expectedRevision: 2,
+        },
+      ],
+      dropped: 0,
+    });
   });
 
-  it("refuses an update at a stale revision", () => {
-    expect(() =>
+  it("drops an update at a stale revision and keeps the rest", () => {
+    expect(
       validateChanges(request, [
         {
           content: "用户偏好深色模式",
@@ -314,8 +407,35 @@ describe("validated LangMem changes", () => {
           replacesId: "f1",
           expectedRevision: 1,
         },
+        {
+          content: "用户偏好先写测试",
+          sourceMessageId: "m1",
+          sourceQuote: "以后都用深色模式",
+          category: "preference",
+        },
       ]),
-    ).toThrow("stale expected revision");
+    ).toEqual({
+      changes: [
+        {
+          content: "用户偏好先写测试",
+          sourceMessageId: "m1",
+          sourceQuote: "以后都用深色模式",
+          category: "preference",
+        },
+      ],
+      dropped: 1,
+    });
+  });
+});
+
+describe("memory completion reasoning", () => {
+  it("drops thinking for every forced tool choice the way Anthropic refuses", () => {
+    expect(completionReasoning("any", "high")).toBeUndefined();
+    expect(completionReasoning("required", "high")).toBeUndefined();
+    expect(completionReasoning("any", "off")).toBeUndefined();
+    expect(completionReasoning("auto", "high")).toBe("high");
+    expect(completionReasoning("none", "high")).toBe("high");
+    expect(completionReasoning(undefined, "medium")).toBe("medium");
   });
 });
 

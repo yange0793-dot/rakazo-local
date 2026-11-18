@@ -13,7 +13,8 @@ type SkillDraftBlock = {
   name: string;
   goal: string;
   playbook: SkillPlaybook;
-  status: "draft" | "saved";
+  /** "deleted" marks a card whose skill was removed; it has nothing left to act on. */
+  status: "draft" | "saved" | "deleted";
 };
 
 function fieldsOf(block: SkillDraftBlock): string {
@@ -49,6 +50,9 @@ export function SkillDraftCard({
   const [savedFields, setSavedFields] = useState(savedSnapshot(block));
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  // Deleting removes the saved skill; the card the thread keeps has nothing left to act on.
+  const [removed, setRemoved] = useState(false);
+  const [confirmingDelete, setConfirmingDelete] = useState(false);
   const saved = savedFields === JSON.stringify({ name, playbook });
 
   // The fields last loaded from the server, and whether this card has written since. A later
@@ -97,7 +101,28 @@ export function SkillDraftCard({
 
   const testDraft = () => persist(() => rpc.skills.testRun({ skillId: block.skillId }));
 
+  async function remove() {
+    if (busy) return;
+    if (!confirmingDelete) {
+      setConfirmingDelete(true);
+      return;
+    }
+    setBusy(true);
+    setError(null);
+    try {
+      await rpc.skills.remove({ skillId: block.skillId });
+      setRemoved(true);
+    } catch (err) {
+      setError(errorText(err, t`Could not delete skill`));
+      setBusy(false);
+      return;
+    }
+    await onRefresh().catch(() => undefined);
+    setBusy(false);
+  }
+
   const skillName = name || block.name || block.goal.slice(0, 80);
+  if (removed || block.status === "deleted") return null;
 
   return (
     <BuiCard data-testid="skill-draft-card" className="w-[520px] max-w-full px-5 py-4">
@@ -191,6 +216,14 @@ export function SkillDraftCard({
           onClick={() => onAddRoutine(skillName, formatSkillRunPrompt(skillName, playbook))}
         >
           <Trans>Add to routine</Trans>
+        </Button>
+        <Button
+          variant="ghost"
+          className="ms-auto text-destructive"
+          disabled={busy}
+          onClick={() => void remove()}
+        >
+          {confirmingDelete ? <Trans>Confirm delete</Trans> : <Trans>Delete</Trans>}
         </Button>
       </div>
       {error ? <p className="mt-2 text-label text-destructive">{error}</p> : null}

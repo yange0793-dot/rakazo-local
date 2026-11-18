@@ -1,3 +1,4 @@
+import { i18n } from "@lingui/core";
 import type { SpaceMemoryConfig } from "@rakazo/contracts";
 import type { ComponentType } from "react";
 import { HonchoSettingsForm } from "./HonchoSettingsForm";
@@ -22,10 +23,13 @@ export interface MemoryProviderSettingsRegistration {
   connectedLabel: (config: SpaceMemoryConfig) => string;
 }
 
+// The overlay paints these through the shared catalog, so a Chinese Space reads them in Chinese.
 export const MEMORY_PROVIDER_SETTINGS: readonly MemoryProviderSettingsRegistration[] = [
   {
     id: "local",
-    name: "Local memory",
+    get name() {
+      return i18n._({ id: "Local memory", message: "Local memory" });
+    },
     SettingsForm: LocalMemorySettingsForm,
     connectedLabel: (config) => config.settings.baseUrl ?? "",
   },
@@ -35,18 +39,24 @@ export const MEMORY_PROVIDER_SETTINGS: readonly MemoryProviderSettingsRegistrati
     SettingsForm: SupermemorySettingsForm,
     connectedLabel: (config) =>
       config.settings.mode === "cloud"
-        ? "Supermemory Cloud"
-        : `Self-hosted (${config.settings.baseUrl})`,
+        ? i18n._({ id: "Supermemory Cloud", message: "Supermemory Cloud" })
+        : i18n._({
+            id: "Self-hosted ({baseUrl})",
+            message: "Self-hosted ({baseUrl})",
+            values: { baseUrl: config.settings.baseUrl ?? "" },
+          }),
   },
   {
     id: "serenity",
     name: "Serenity",
     SettingsForm: SerenitySettingsForm,
     connectedLabel: (config) => {
-      const label = config.settings.brainLabel?.trim();
       const endpoint = config.settings.endpoint ?? "Serenity";
-      const mode = config.settings.allowWrites === "true" ? "read/write" : "recall only";
-      return `${label || endpoint}, ${mode}`;
+      const mode =
+        config.settings.allowWrites === "true"
+          ? i18n._({ id: "read/write", message: "read/write" })
+          : i18n._({ id: "recall only", message: "recall only" });
+      return `${config.settings.brainLabel?.trim() || endpoint}, ${mode}`;
     },
   },
   {
@@ -56,8 +66,22 @@ export const MEMORY_PROVIDER_SETTINGS: readonly MemoryProviderSettingsRegistrati
     connectedLabel: (config) => {
       const { mode, baseUrl, workspaceId } = config.settings;
       if (mode === "local")
-        return [`Self-hosted (${baseUrl})`, workspaceId].filter(Boolean).join(", ");
-      return workspaceId ? `Honcho Cloud (${workspaceId})` : "Honcho Cloud";
+        return [
+          i18n._({
+            id: "Self-hosted ({baseUrl})",
+            message: "Self-hosted ({baseUrl})",
+            values: { baseUrl: baseUrl ?? "" },
+          }),
+          workspaceId,
+        ]
+          .filter(Boolean)
+          .join(", ");
+      if (!workspaceId) return i18n._({ id: "Honcho Cloud", message: "Honcho Cloud" });
+      return i18n._({
+        id: "Honcho Cloud ({workspaceId})",
+        message: "Honcho Cloud ({workspaceId})",
+        values: { workspaceId },
+      });
     },
   },
 ];

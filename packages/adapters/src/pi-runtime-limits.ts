@@ -156,7 +156,9 @@ export function operatorMaxTokens(
  * Completions add no output cap of their own: a model runs up to its own ceiling unless a
  * connection (or the operator) sets a limit, and the context window still reserves room for
  * input by trimming output to a quarter of it. Reasoning models share thinking and reply
- * budget, so they get the same uncapped default.
+ * budget, so they get the same uncapped default. A per-call budget from the agent is already
+ * sized against the window (a call repeated for more room), so the reserve does not trim it
+ * again; otherwise raising it past the quarter would be undone by the same line.
  */
 export function resolveCompletionMaxTokens(
   modelMaxTokens?: number,
@@ -174,15 +176,15 @@ export function resolveCompletionMaxTokens(
         : reasoning
           ? REASONING_MODEL_MAX_TOKENS
           : DEFAULT_MODEL_MAX_TOKENS;
-  const optionCap =
-    typeof optionsMaxTokens === "number" && optionsMaxTokens >= 1
-      ? Math.min(optionsMaxTokens, userCap)
-      : userCap;
+  const agentCap = typeof optionsMaxTokens === "number" && optionsMaxTokens >= 1;
+  const optionCap = agentCap ? Math.min(optionsMaxTokens, userCap) : userCap;
   const maxTokens =
     typeof modelMaxTokens === "number" && modelMaxTokens >= 1
       ? Math.min(modelMaxTokens, optionCap)
       : optionCap;
-  return contextWindow === undefined ? maxTokens : effectiveOutputReserve(contextWindow, maxTokens);
+  return contextWindow === undefined || agentCap
+    ? maxTokens
+    : effectiveOutputReserve(contextWindow, maxTokens);
 }
 
 function nonNegativeCount(value: number | undefined): number {

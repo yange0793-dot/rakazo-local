@@ -24,6 +24,7 @@ import {
   recordComputerRunEnd,
   releaseSpaceDeletionClaim,
   renewSpaceDeletionClaim,
+  runAsSystem,
   SPACE_DELETION_CLAIM_TIMEOUT_MS,
   SpaceDeletionInProgressError,
 } from "@rakazo/db";
@@ -174,8 +175,10 @@ export async function deleteSpaceWithContent(
       });
       await recordComputerRunEnd(deps.prisma, computer, "deleted");
     }
-    // Keep the claim and credentials until every retired index revision is removed.
-    // A missing resolver is safe only when the outbox has no pending work.
+    // Index cleanup is best effort: the bots and computers are already gone and the Space's
+    // credentials go with the rows below, so an unreachable index must not leave the Space
+    // stuck in deletion. Recall reads facts from the database, so revisions left in the index
+    // cannot surface text once these rows are gone.
     await teardown(
       () =>
         syncSemanticMemorySpace(
@@ -184,7 +187,9 @@ export async function deleteSpaceWithContent(
             memoryProviders: deps.memoryProviders ?? { resolve: async () => null },
           },
           spaceId,
-        ),
+        ).catch((error) => {
+          getLogger().error("space semantic memory cleanup skipped", error);
+        }),
       "Space semantic memory cleanup timed out",
     );
     await assertClaim();
@@ -195,6 +200,14 @@ export async function deleteSpaceWithContent(
     }
     await rehomeItemsLeaving(deps.prisma, spaceId);
     const deleted = await deleteClaimedSpaceForMember(deps.prisma, claimedInput);
+    // The Space's memory configuration went with its rows, so index pointers that outlived
+    // the skipped drain above can never run; left in place they would make the index sweep
+    // enqueue a syncing job that fails on every pass.
+    await runAsSystem("drop semantic memory index pointers of a deleted space", () =>
+      deps.prisma.semanticMemoryIndexOutbox.deleteMany({ where: { spaceId } }),
+    ).catch((error) => {
+      getLogger().error("space semantic memory index pointer cleanup", error);
+    });
     // Rows are gone; leftover stored files are unreachable, so cleanup failures only log.
     const cleanup = await Promise.allSettled([
       ...deleted.artifactKeys.map((storageKey) => deps.artifacts.remove(storageKey, context())),

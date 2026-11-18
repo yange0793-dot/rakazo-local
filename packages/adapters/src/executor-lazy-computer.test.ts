@@ -177,6 +177,8 @@ async function runRoutine(
     },
     attempt: {
       create: vi.fn(async () => ({ id: "attempt-1" })),
+      // The turn's own row is the first attempt of the run.
+      count: vi.fn(async () => 1),
       findMany: vi.fn(async () =>
         Array.from({ length: options.priorSetupFailures ?? 0 }, () => ({
           status: "setup_failed",

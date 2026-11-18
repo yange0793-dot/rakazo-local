@@ -30,6 +30,15 @@ export type FleetCardSummary = {
 };
 
 /**
+ * A page action as its card shows it: the browser's own description, plus the text each fill or
+ * type step would enter. Saved logins, cards and codes never reach it, because the browser
+ * refuses to describe those steps, so a protected value stays off the card.
+ */
+export type ApprovalBrowserAction = Omit<BrowserActionDescription, "steps"> & {
+  steps: Array<BrowserActionDescription["steps"][number] & { text?: string }>;
+};
+
+/**
  * The child instruction card shows the whole new text, so its detail holds the longest
  * instructions plus the two length lines above them.
  */
@@ -62,7 +71,7 @@ export function buildApprovalAskBlock(
     /** The approval asks every time, so the card never offers Always allow. */
     onceOnly?: boolean;
     /** The page the action would act on, read from the browser's last observation. */
-    browserAction?: BrowserActionDescription;
+    browserAction?: ApprovalBrowserAction;
   },
 ): MessageBlock {
   const onceOnly = toolRequiresExplicitApproval(toolName) || Boolean(options?.onceOnly);
@@ -184,8 +193,11 @@ export function buildApprovalAskBlock(
     };
   }
   const fetchSite = webFetchSite(toolName, args);
-  // A page action shows the page and elements it would touch, not the raw call.
+  // A page action shows the page and elements it would touch, not the raw call. A page action's
+  // own site is the page it acts on, so "Always allow" on its card covers that site, never
+  // every site the browser can reach.
   const browserAction = toolName === "browser_act" ? options?.browserAction : undefined;
+  const site = fetchSite ?? (browserAction ? urlSite(browserAction.url) : undefined);
   const summary = browserAction
     ? describeBrowserTarget(browserAction.url)
     : describeApprovalAction(toolName, args, options?.batch);
@@ -204,7 +216,7 @@ export function buildApprovalAskBlock(
       MAX_APPROVAL_SUMMARY_LENGTH,
     ),
     detail: safeDetail ? truncate(safeDetail, MAX_APPROVAL_DETAIL_LENGTH) : undefined,
-    ...(fetchSite ? { site: fetchSite } : {}),
+    ...(site ? { site } : {}),
     status: "pending",
     actions:
       toolName === "create_space"
@@ -221,15 +233,18 @@ export function buildApprovalAskBlock(
               { id: "allow", label: "Allow once" },
               {
                 id: "always",
-                label: fetchSite ? `Always allow ${fetchSite}` : "Always allow this tool",
+                label: site ? `Always allow ${site}` : "Always allow this tool",
               },
               { id: "deny", label: "Deny" },
             ],
   };
 }
 
+/** The site a url-carrying call names. A page action names its page instead (see the card). */
 function webFetchSite(toolName: string, args: Record<string, unknown>): string | undefined {
-  return SITE_SENDING_TOOLS.has(toolName) && typeof args.url === "string"
+  return SITE_SENDING_TOOLS.has(toolName) &&
+    toolName !== "browser_act" &&
+    typeof args.url === "string"
     ? urlSite(args.url)
     : undefined;
 }
@@ -238,11 +253,20 @@ function describeBrowserTarget(url: string): string {
   return `browser_act → ${URL.parse(url)?.hostname || url}`;
 }
 
-/** The page and elements an approved action would touch, without typed values or file paths. */
-function browserActionDetail(action: BrowserActionDescription): string {
+/** Longer typed text is cut on the card; the whole value is still what the action enters. */
+const MAX_PREVIEW_TEXT_LENGTH = 240;
+
+/** The page and elements an approved action would touch, with a preview of text it would type. */
+function browserActionDetail(action: ApprovalBrowserAction): string {
   return [
     `url: ${action.url}`,
-    ...action.steps.map((step) => `${step.kind} ${step.role} ${JSON.stringify(step.name)}`),
+    ...action.steps.map((step) => {
+      const preview =
+        step.text === undefined
+          ? ""
+          : ` ${JSON.stringify(truncate(step.text, MAX_PREVIEW_TEXT_LENGTH))}`;
+      return `${step.kind} ${step.role} ${JSON.stringify(step.name)}${preview}`;
+    }),
   ].join("\n");
 }
 
@@ -288,7 +312,10 @@ function formatApprovalDetail(
   const shown = (values: Record<string, unknown>) =>
     argumentLines(
       redactLeaves(values, secrets) as Record<string, unknown>,
-      SITE_SENDING_TOOLS.has(toolName) ? ["url", "method", "body"] : undefined,
+      // A page action's arguments are its steps, which the description above already shows.
+      SITE_SENDING_TOOLS.has(toolName) && toolName !== "browser_act"
+        ? ["url", "method", "body"]
+        : undefined,
     );
   const items = batch ? args[batch.items] : undefined;
   if (batch && Array.isArray(items)) {

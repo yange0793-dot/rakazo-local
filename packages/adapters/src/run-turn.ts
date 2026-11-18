@@ -48,6 +48,7 @@ import {
 } from "./routine-backoff.js";
 import type { RunContext, RunState } from "./run-context.js";
 import { persistTurnCheckpoint } from "./run-context.js";
+import { collectRunSignals, finishRunLearning, persistRunTaint } from "./run-learning.js";
 import { enqueueSteeringContinuation, renewRunLease, requeueComputerRun } from "./run-lifecycle.js";
 import { publishMessage, redactBlocks } from "./run-messages.js";
 import {
@@ -120,6 +121,23 @@ import {
 } from "./user-progress.js";
 
 type RuntimeEvent<T extends AgentRuntimeEvent["type"]> = Extract<AgentRuntimeEvent, { type: T }>;
+
+/**
+ * Lesson bookkeeping after the run is already finalized: a failure to record or queue it must
+ * not reroute a saved run into the failure path.
+ */
+async function recordRunLearning(
+  ctx: RunContext,
+  outcome: "completed" | "failed",
+  learnableFailure = false,
+) {
+  try {
+    const signals = await collectRunSignals(ctx, outcome, learnableFailure);
+    await finishRunLearning(ctx, signals);
+  } catch (error) {
+    getLogger().error("run learning", error);
+  }
+}
 
 /**
  * Stream the runtime's events into the thread. Returns true when the attempt stopped before
@@ -626,6 +644,7 @@ async function stopStuckToolLoop(ctx: RunContext, toolName: string, refusal?: To
   // Otherwise the model keeps calling tools while the stop is saved. The run's own signal stays
   // live, so the save still finishes.
   ctx.runtimeAbortController.abort();
+  ctx.state.toolLoopStopped = true;
   ctx.tools.approvedReplays.assertDrained();
   flushPendingTools(reply);
   // Calls that had not finished when the loop was stopped never ran to the end.
@@ -643,6 +662,7 @@ async function stopStuckToolLoop(ctx: RunContext, toolName: string, refusal?: To
       ? overLimitStopText(humanName, overLimit)
       : loopGuardStopText(humanName, ctx.state.toolCallStreak);
   await ctx.settleRunningHelpers();
+  await persistRunTaint(ctx);
   const stopped = await deps.events.finalizeRun({
     spaceId: run.spaceId,
     threadId: thread.id,
@@ -656,6 +676,7 @@ async function stopStuckToolLoop(ctx: RunContext, toolName: string, refusal?: To
     blocks: isBackgroundRunTrigger(run.trigger) ? [] : [{ kind: "text", text: stuckText }],
   });
   if (!stopped) return;
+  await recordRunLearning(ctx, "completed");
   const stoppedForOverLimit = overLimit >= MAX_CONSECUTIVE_OVER_LIMIT_ACTION_CALLS;
   logLoopGuardStop(
     {
@@ -938,6 +959,7 @@ export async function completeRun(ctx: RunContext) {
     ctx.source.peerMessage?.repliesToRequest === true,
   );
   await ctx.settleRunningHelpers();
+  await persistRunTaint(ctx);
   const completed = await deps.events.finalizeRun({
     spaceId: run.spaceId,
     threadId: thread.id,
@@ -952,6 +974,7 @@ export async function completeRun(ctx: RunContext) {
     markUnread: !groupSilentEnd && marksUnread,
   });
   if (!completed) return;
+  await recordRunLearning(ctx, "completed");
   if (groupSilentEnd) await noteGroupPass(ctx);
   ctx.stopHeartbeatAfterCompletion();
   if (run.trigger === "routine" && run.routineId) {
@@ -1099,6 +1122,16 @@ export async function failRun(
       ? [{ kind: "text" as const, text: partialText }]
       : [];
   await ctx.settleRunningHelpers();
+  // Provider, account, model-output and rate-limit failures say nothing about this task.
+  const learnableFailure = !(
+    error instanceof TransientModelError ||
+    error instanceof ModelAccountError ||
+    error instanceof ModelOutputError ||
+    error instanceof SandboxRateLimitError ||
+    error instanceof SandboxAllowanceUsedError ||
+    error instanceof SandboxProviderAccountError
+  );
+  await persistRunTaint(ctx);
   const failed = await deps.events.finalizeRun({
     spaceId: run.spaceId,
     threadId: thread.id,
@@ -1113,6 +1146,7 @@ export async function failRun(
     ...(partialReply.length > 0 ? { partialReply } : {}),
   });
   if (!failed) return;
+  await recordRunLearning(ctx, "failed", learnableFailure);
   if (
     error instanceof TransientModelError ||
     error instanceof ModelAccountError ||

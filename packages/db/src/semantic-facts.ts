@@ -18,6 +18,7 @@ import type {
 } from "@rakazo/contracts";
 import { SemanticFactProvenanceSchema } from "@rakazo/contracts";
 import { sanitizeUtf16ForJson, withAbort } from "@rakazo/core";
+import { getLogger } from "@rakazo/logging";
 import type { ContentEncryption } from "./content-encryption.js";
 import { contentEncryptionOf } from "./content-encryption.js";
 import type {
@@ -56,6 +57,19 @@ export interface SemanticIndexWork {
   content: string | null;
 }
 
+/** A host-written lesson; no model tool can produce one, so only the reflection job calls this. */
+export interface LessonWriteInput {
+  botId: string;
+  /** The situation that should bring this lesson to mind (1-200 characters). */
+  cue: string;
+  /** What to do or avoid (1-600 characters). */
+  lesson: string;
+  /** A run of this bot authored the lesson; the store re-checks that run before writing. */
+  provenance: Provenance & { runId: string; harness: NonNullable<Provenance["harness"]> };
+  /** An existing lesson this one refines, with the revision the reviewer observed. */
+  replaces?: { id: string; expectedRevision: number };
+}
+
 /**
  * A live user message the archive host re-read in the transaction that applies a batch. The
  * extraction proposal may name it, but only this host-read text authorizes a write.
@@ -87,6 +101,14 @@ const ARCHIVE_CATEGORIES: ReadonlySet<string> = new Set([
   "reference",
 ]);
 
+/** Bulk retirement tombstones every fact in a scope; Prisma's 5s default expires mid-run. */
+const BULK_RETIRE_TRANSACTION_OPTIONS = { timeout: 120_000 };
+
+/** Forgetting keeps the tombstone and its source fingerprints, never the body. */
+const FORGOTTEN_CONTENT = "[forgotten]";
+
+const DURABLE_SCOPES: readonly DurableMemoryScope[] = ["isolated", "shared"];
+
 type Tx = Prisma.TransactionClient;
 type ReadDb = Pick<
   PrismaClient,
@@ -111,6 +133,12 @@ export function semanticFactNamespace(
   return `sm1:${Buffer.from(JSON.stringify([spaceId, scope, scope === "isolated" ? botId : null])).toString("base64url")}`;
 }
 
+/** Host-written lessons get their own per-bot namespace, so ordinary recall never sees them. */
+export function lessonFactNamespace(spaceId: string, botId: string): string {
+  if (!spaceId || !botId) throw new Error("A lesson requires an explicit space and bot.");
+  return `hl1:${Buffer.from(JSON.stringify([spaceId, botId])).toString("base64url")}`;
+}
+
 function indexId(factId: string, revision: number): string {
   return `sm:${factId}:${revision}`;
 }
@@ -126,6 +154,16 @@ function contentValue(value: string): string {
       "Memory fact content must contain 1 to 20000 characters and fit within 40 KiB.",
     );
   return content;
+}
+
+/** Case, character width, spacing and punctuation variants of one assertion compare equal. */
+function dedupeContent(content: string): string {
+  return content
+    .normalize("NFKC")
+    .toLowerCase()
+    .replace(/\s+/g, " ")
+    .replace(/[\p{P}]+/gu, "")
+    .trim();
 }
 
 function positiveRevision(value: number): void {
@@ -237,8 +275,39 @@ export class SemanticFactStore {
     return runAsTenant(ctx, fn);
   }
 
-  private transaction<T>(ctx: AdapterContext, fn: (tx: Tx) => Promise<T>): Promise<T> {
-    return this.inTenant(ctx, () => withTransactionRetry(() => this.prisma.$transaction(fn)));
+  private transaction<T>(
+    ctx: AdapterContext,
+    fn: (tx: Tx) => Promise<T>,
+    options?: { timeout?: number },
+  ): Promise<T> {
+    return this.inTenant(ctx, () =>
+      withTransactionRetry(() => this.prisma.$transaction(fn, options)),
+    );
+  }
+
+  /**
+   * A recall citation names one of the two namespaces this bot may read; management acts on
+   * exactly that namespace instead of the caller's default scope.
+   */
+  private citationNamespace(
+    request: { botId: string; entity: string },
+    ctx: AdapterContext,
+  ): string {
+    for (const scope of DURABLE_SCOPES) {
+      const namespace = semanticFactNamespace(ctx.spaceId, scope, request.botId);
+      if (namespace === request.entity) return namespace;
+    }
+    throw new IsolationError();
+  }
+
+  /** Lessons live in their own per-bot namespace; every management path picks it this way. */
+  private scopeNamespace(
+    request: { botId: string; scope: DurableMemoryScope; kind?: SemanticFact["kind"] },
+    ctx: AdapterContext,
+  ): string {
+    return request.kind === "lesson"
+      ? lessonFactNamespace(ctx.spaceId, request.botId)
+      : semanticFactNamespace(ctx.spaceId, request.scope, request.botId);
   }
 
   private async requireScope(
@@ -527,7 +596,7 @@ export class SemanticFactStore {
       botId: string;
       scope: DurableMemoryScope;
       namespace: string;
-      kind: "durable" | "history";
+      kind: SemanticFact["kind"];
       content: string;
       provenance: Provenance;
       status: SemanticFact["status"];
@@ -597,9 +666,16 @@ export class SemanticFactStore {
     return factValue(updated);
   }
 
-  async save(request: SemanticMemorySaveRequest, ctx: AdapterContext): Promise<SemanticFact> {
+  async save(
+    request: SemanticMemorySaveRequest & { entity?: string },
+    ctx: AdapterContext,
+  ): Promise<SemanticFact> {
     const content = contentValue(request.content);
-    const namespace = semanticFactNamespace(ctx.spaceId, request.scope, request.botId);
+    if (request.entity !== undefined && request.replacesId === undefined)
+      throw new Error("A memory citation entity only selects the scope of a correction.");
+    const namespace = request.entity
+      ? this.citationNamespace({ botId: request.botId, entity: request.entity }, ctx)
+      : semanticFactNamespace(ctx.spaceId, request.scope, request.botId);
     if ((request.replacesId === undefined) !== (request.expectedRevision === undefined))
       throw new Error("A correction requires both a fact id and its expected revision.");
     if (request.expectedRevision !== undefined) positiveRevision(request.expectedRevision);
@@ -659,6 +735,110 @@ export class SemanticFactStore {
         },
         ctx,
       );
+    });
+  }
+
+  /**
+   * Host-only lesson write. The reflection job calls this after checking a run; no model tool
+   * reaches it, so a run cannot write its own note into later prompts.
+   */
+  async saveLesson(input: LessonWriteInput, ctx: AdapterContext): Promise<SemanticFact | null> {
+    const cue = input.cue.trim();
+    const lesson = input.lesson.trim();
+    if (!cue || cue.length > 200 || !lesson || lesson.length > 600)
+      throw new Error("A lesson needs a cue of 1-200 characters and a lesson of 1-600.");
+    const content = contentValue(`cue: ${cue}\nlesson: ${lesson}`);
+    const provenance = SemanticFactProvenanceSchema.parse(input.provenance);
+    if (provenance.kind !== "run")
+      throw new Error("A lesson must be attributed to the run that produced it.");
+    if (input.replaces) positiveRevision(input.replaces.expectedRevision);
+    const namespace = lessonFactNamespace(ctx.spaceId, input.botId);
+    return this.transaction(ctx, async (tx) => {
+      await this.lockSpace(tx, ctx.spaceId);
+      await this.requireScope(tx, input.botId, ctx);
+      // The lesson must cite a real run of this bot in this space. Space membership is already
+      // required above, and a member may confirm a review card for a run someone else started.
+      const run = await tx.run.findFirst({
+        where: { id: input.provenance.runId, spaceId: ctx.spaceId, botId: input.botId },
+        select: { id: true },
+      });
+      if (!run) throw new IsolationError();
+      await this.lockNamespace(tx, namespace);
+      await this.requireNotRetired(tx, namespace, input.botId);
+      const sourceKey = await this.sourceKey(ctx.spaceId, [
+        "lesson",
+        input.provenance.runId,
+        content,
+      ]);
+      const contentKey = await this.sourceKey(ctx.spaceId, ["lesson-content", content]);
+      await this.lockSource(tx, namespace, sourceKey);
+      await this.lockSource(tx, namespace, contentKey);
+      // A replay of the same run, or the same wording from another run, keeps the first row.
+      const bound = await this.boundSource(tx, namespace, sourceKey);
+      if (bound) return factValue(bound);
+      const sameContent = input.replaces ? null : await this.boundSource(tx, namespace, contentKey);
+      if (sameContent) return factValue(sameContent);
+      const source: Source = {
+        provenance,
+        identity: ["lesson", input.provenance.runId, content],
+      };
+      const now = new Date();
+      if (!input.replaces) {
+        const saved = await this.insert(
+          tx,
+          {
+            botId: input.botId,
+            scope: "isolated",
+            namespace,
+            kind: "lesson",
+            content,
+            provenance,
+            status: "active",
+            source,
+            sourceKey,
+            createdAt: now,
+            updatedAt: now,
+          },
+          ctx,
+        );
+        await this.bindContent(tx, namespace, [contentKey], saved.id, ctx);
+        return saved;
+      }
+      let target: FactRecord | null = null;
+      try {
+        target = await this.lockFact(tx, input.replaces.id, namespace);
+      } catch (error) {
+        if (!(error instanceof IsolationError)) throw error;
+      }
+      const dropped = !target
+        ? "missing"
+        : target.kind !== "lesson"
+          ? "not_lesson"
+          : target.status !== "active"
+            ? "not_active"
+            : target.revision !== input.replaces.expectedRevision
+              ? "revision_changed"
+              : null;
+      if (!target || dropped) {
+        // A stale replacement loses its own line; the reviewer still saves other lessons.
+        getLogger().warn("lesson replacement skipped", {
+          "lesson.id": input.replaces.id,
+          "lesson.expected_revision": input.replaces.expectedRevision,
+          "lesson.reason": dropped,
+        });
+        return null;
+      }
+      const updated = await this.replace(
+        tx,
+        target,
+        content,
+        provenance,
+        input.replaces.expectedRevision,
+        sourceKey,
+        source,
+      );
+      await this.bindContent(tx, namespace, [contentKey], updated.id, ctx);
+      return updated;
     });
   }
 
@@ -722,17 +902,19 @@ export class SemanticFactStore {
     tx: Tx,
     input: SemanticArchiveApplyInput,
     ctx: AdapterContext,
-  ): Promise<{ saved: number; updated: number; skipped: number }> {
+  ): Promise<{ saved: number; updated: number; removed: number; skipped: number }> {
     this.encryption();
     const namespace = semanticFactNamespace(ctx.spaceId, input.scope, input.botId);
-    const result = { saved: 0, updated: 0, skipped: 0 };
+    const result = { saved: 0, updated: 0, removed: 0, skipped: 0 };
     const prepared: Array<{
       content: string;
       source: SemanticArchiveSource;
       quote: string;
       category: MemoryExtractionChange["category"];
+      remove: boolean;
       sourceKey: string;
-      contentKey: string;
+      contentKey?: string;
+      normalizedKey?: string;
       replacesId?: string;
       expectedRevision?: number;
     }> = [];
@@ -742,6 +924,7 @@ export class SemanticFactStore {
         continue;
       }
       const source = input.sources.get(change.sourceMessageId);
+      const remove = change.remove === true;
       const paired = (change.replacesId === undefined) === (change.expectedRevision === undefined);
       const revision =
         change.expectedRevision === undefined ||
@@ -755,30 +938,43 @@ export class SemanticFactStore {
         !change.sourceQuote.trim() ||
         !source.text.includes(change.sourceQuote) ||
         !paired ||
-        !revision
+        !revision ||
+        // A removal must name the exact fact it retires; content is not used for it.
+        (remove && change.replacesId === undefined)
       ) {
         result.skipped += 1;
         continue;
       }
-      let content: string;
-      try {
-        content = contentValue(change.content);
-      } catch {
-        result.skipped += 1;
-        continue;
+      let content = "";
+      if (!remove) {
+        try {
+          content = contentValue(change.content);
+        } catch {
+          result.skipped += 1;
+          continue;
+        }
       }
       prepared.push({
         content,
         source,
         quote: change.sourceQuote,
         category: change.category,
+        remove,
         sourceKey: await this.sourceKey(ctx.spaceId, [
           "auto",
           input.threadId,
           source.messageId,
           change.sourceQuote,
         ]),
-        contentKey: await this.sourceKey(ctx.spaceId, ["auto-content", content]),
+        ...(remove
+          ? {}
+          : {
+              contentKey: await this.sourceKey(ctx.spaceId, ["auto-content", content]),
+              normalizedKey: await this.sourceKey(ctx.spaceId, [
+                "auto-content",
+                dedupeContent(content),
+              ]),
+            }),
         ...(change.replacesId !== undefined
           ? { replacesId: change.replacesId, expectedRevision: change.expectedRevision }
           : {}),
@@ -797,7 +993,13 @@ export class SemanticFactStore {
     }
     // Stable lock order across transactions: every source key, then every corrected fact.
     for (const key of [
-      ...new Set(prepared.flatMap((item) => [item.sourceKey, item.contentKey])),
+      ...new Set(
+        prepared.flatMap((item) =>
+          [item.sourceKey, item.contentKey, item.normalizedKey].filter(
+            (key): key is string => key !== undefined,
+          ),
+        ),
+      ),
     ].sort())
       await this.lockSource(tx, namespace, key);
     const replacements = new Map<string, FactRecord>();
@@ -815,10 +1017,48 @@ export class SemanticFactStore {
     const corrected = new Set<string>();
     const now = new Date();
     for (const item of prepared) {
-      // An exact source/content identity never writes twice and never revives a tombstone.
+      // An exact source identity never writes twice and never revives a tombstone.
+      if (await this.boundSource(tx, namespace, item.sourceKey)) {
+        result.skipped += 1;
+        continue;
+      }
+      if (item.remove) {
+        const row = replacements.get(item.replacesId!);
+        const dropped = !row
+          ? "missing"
+          : corrected.has(item.replacesId!)
+            ? "duplicate_in_batch"
+            : row.kind !== "durable"
+              ? "not_durable"
+              : row.status !== "active"
+                ? "not_active"
+                : row.revision !== item.expectedRevision
+                  ? "revision_changed"
+                  : null;
+        if (!row || dropped) {
+          getLogger().warn("memory archive removal skipped", {
+            "memory.fact_id": item.replacesId,
+            "memory.expected_revision": item.expectedRevision,
+            "memory.reason": dropped,
+          });
+          result.skipped += 1;
+          continue;
+        }
+        // The user's words are the evidence for the deletion; keep the binding so a replay of
+        // this batch cannot retire a different fact that reused the id later.
+        corrected.add(item.replacesId!);
+        await this.rememberSource(tx, row, item.sourceKey);
+        await this.tombstone(tx, row);
+        result.removed += 1;
+        continue;
+      }
+      // Content identity only guards a new fact: a correction may legitimately restore wording
+      // that an earlier revision or an already-forgotten fact once used.
       if (
-        (await this.boundSource(tx, namespace, item.sourceKey)) ||
-        (await this.boundSource(tx, namespace, item.contentKey))
+        item.replacesId === undefined &&
+        ((await this.boundSource(tx, namespace, item.contentKey!)) ||
+          (item.normalizedKey !== item.contentKey &&
+            (await this.boundSource(tx, namespace, item.normalizedKey!))))
       ) {
         result.skipped += 1;
         continue;
@@ -839,14 +1079,26 @@ export class SemanticFactStore {
       };
       if (item.replacesId !== undefined) {
         const row = replacements.get(item.replacesId);
-        if (
-          !row ||
-          corrected.has(item.replacesId) ||
-          row.kind !== "durable" ||
-          row.status !== "active" ||
-          row.revision !== item.expectedRevision ||
-          row.content === item.content
-        ) {
+        const dropped = !row
+          ? "missing"
+          : corrected.has(item.replacesId)
+            ? "duplicate_in_batch"
+            : row.kind !== "durable"
+              ? "not_durable"
+              : row.status !== "active"
+                ? "not_active"
+                : row.revision !== item.expectedRevision
+                  ? "revision_changed"
+                  : row.content === item.content
+                    ? "unchanged"
+                    : null;
+        if (!row || dropped) {
+          // Dropping a correction silently left the fact on its old value with no trace.
+          getLogger().warn("memory archive correction skipped", {
+            "memory.fact_id": item.replacesId,
+            "memory.expected_revision": item.expectedRevision,
+            "memory.reason": dropped,
+          });
           result.skipped += 1;
           continue;
         }
@@ -860,7 +1112,13 @@ export class SemanticFactStore {
           item.sourceKey,
           source,
         );
-        await this.bindContent(tx, namespace, item.contentKey, updated.id, ctx);
+        await this.bindContent(
+          tx,
+          namespace,
+          [item.contentKey!, item.normalizedKey!],
+          updated.id,
+          ctx,
+        );
         result.updated += 1;
         continue;
       }
@@ -881,30 +1139,38 @@ export class SemanticFactStore {
         },
         ctx,
       );
-      await this.bindContent(tx, namespace, item.contentKey, saved.id, ctx);
+      await this.bindContent(tx, namespace, [item.contentKey!, item.normalizedKey!], saved.id, ctx);
       result.saved += 1;
     }
     return result;
   }
 
-  /** Index this exact content as already known so a wording-identical retry cannot duplicate it. */
+  /** Index these contents as already known so a retry cannot duplicate them. */
   private async bindContent(
     tx: Tx,
     namespace: string,
-    contentKey: string,
+    contentKeys: readonly string[],
     factId: string,
     ctx: AdapterContext,
   ): Promise<void> {
-    await tx.semanticFactSource.create({
-      data: { spaceId: ctx.spaceId, namespace, sourceKey: contentKey, factId },
-    });
+    for (const contentKey of new Set(contentKeys)) {
+      // A correction may restore content an earlier revision already bound.
+      const existing = await tx.semanticFactSource.findUnique({
+        where: { namespace_sourceKey: { namespace, sourceKey: contentKey } },
+        select: { id: true },
+      });
+      if (existing) continue;
+      await tx.semanticFactSource.create({
+        data: { spaceId: ctx.spaceId, namespace, sourceKey: contentKey, factId },
+      });
+    }
   }
 
   async correct(request: SemanticFactCorrectRequest, ctx: AdapterContext): Promise<SemanticFact> {
     if (ctx.runId) throw new Error("Use the source-bound save operation for a run correction.");
     positiveRevision(request.expectedRevision);
     const content = contentValue(request.content);
-    const namespace = semanticFactNamespace(ctx.spaceId, request.scope, request.botId);
+    const namespace = this.scopeNamespace(request, ctx);
     return this.transaction(ctx, async (tx) => {
       await this.lockSpace(tx, ctx.spaceId);
       await this.requireScope(tx, request.botId, ctx);
@@ -941,7 +1207,7 @@ export class SemanticFactStore {
   }
 
   async list(request: SemanticFactListRequest, ctx: AdapterContext): Promise<SemanticFactPage> {
-    const namespace = semanticFactNamespace(ctx.spaceId, request.scope, request.botId);
+    const namespace = this.scopeNamespace(request, ctx);
     const limit = request.limit ?? 50;
     if (!Number.isSafeInteger(limit) || limit < 1 || limit > 100)
       throw new Error("Invalid memory page size.");
@@ -1008,9 +1274,12 @@ export class SemanticFactStore {
 
   private async tombstone(tx: Tx, row: FactRecord): Promise<void> {
     if (row.status === "forgotten") return;
+    // Forgetting must not leave the body recoverable in the live row or in any revision.
+    // Source fingerprints and the tombstone itself stay to block a later identical learn.
+    await tx.semanticFactRevision.deleteMany({ where: { factId: row.id } });
     const updated = await tx.semanticFact.update({
       where: { id: row.id },
-      data: { status: "forgotten", revision: { increment: 1 } },
+      data: { status: "forgotten", revision: { increment: 1 }, content: FORGOTTEN_CONTENT },
     });
     await this.snapshot(tx, updated);
     await this.enqueueIndex(tx, updated, row.revision, "delete");
@@ -1024,15 +1293,20 @@ export class SemanticFactStore {
     if (request.expectedRevision !== undefined) positiveRevision(request.expectedRevision);
     if (request.expectedRevision === undefined && !ctx.runId)
       throw new Error("Forgetting a managed fact requires its expected revision.");
-    const namespace = semanticFactNamespace(ctx.spaceId, request.scope, request.botId);
-    if (request.entity && request.entity !== namespace) throw new IsolationError();
+    const namespace = request.entity
+      ? this.citationNamespace({ botId: request.botId, entity: request.entity }, ctx)
+      : this.scopeNamespace(request, ctx);
     return this.transaction(ctx, async (tx) => {
       await this.lockSpace(tx, ctx.spaceId);
       await this.requireScope(tx, request.botId, ctx);
       await this.lockNamespace(tx, namespace);
       const row = await this.lockFact(tx, request.id, namespace);
-      if (request.expectedRevision !== undefined && row.revision !== request.expectedRevision)
+      if (request.expectedRevision !== undefined && row.revision !== request.expectedRevision) {
+        // A retry after a committed forget sees exactly one revision past its expectation.
+        if (row.status === "forgotten" && row.revision === request.expectedRevision + 1)
+          return { id: row.id, expired: true, reason: null };
         throw new Error(MEMORY_REVISION_CONFLICT_ERROR);
+      }
       if (ctx.runId)
         await this.sourceFor(
           tx,
@@ -1049,6 +1323,36 @@ export class SemanticFactStore {
     });
   }
 
+  /** Auto-retirement: an active lesson becomes historical and leaves the recall index. */
+  async retireLesson(id: string, ctx: AdapterContext): Promise<void> {
+    return this.transaction(ctx, async (tx) => {
+      await this.lockSpace(tx, ctx.spaceId);
+      const found = await tx.semanticFact.findFirst({
+        where: { id, spaceId: ctx.spaceId, kind: "lesson" },
+        select: { botId: true, namespace: true },
+      });
+      if (!found) return;
+      await this.requireScope(tx, found.botId, ctx);
+      await this.lockNamespace(tx, found.namespace);
+      let row: FactRecord;
+      try {
+        row = await this.lockFact(tx, id, found.namespace);
+      } catch (error) {
+        // A concurrent forget or deletion already retired it; nothing left to do.
+        if (error instanceof IsolationError) return;
+        throw error;
+      }
+      if (row.status !== "active") return;
+      const retired = await tx.semanticFact.update({
+        where: { id: row.id },
+        data: { status: "historical", revision: { increment: 1 } },
+      });
+      await this.snapshot(tx, retired);
+      await this.enqueueIndex(tx, retired, row.revision, "delete");
+      await this.enqueueIndex(tx, retired, retired.revision, "delete");
+    });
+  }
+
   async purgeHistory(
     request: SemanticMemoryPurgeHistoryRequest,
     ctx: AdapterContext,
@@ -1059,43 +1363,47 @@ export class SemanticFactStore {
       semanticFactNamespace(ctx.spaceId, "isolated", request.botId),
       semanticFactNamespace(ctx.spaceId, "shared", request.botId),
     ].sort();
-    return this.transaction(ctx, async (tx) => {
-      await this.lockSpace(tx, ctx.spaceId);
-      await this.requireScope(tx, request.botId, ctx);
-      for (const namespace of namespaces) await this.lockNamespace(tx, namespace, true);
-      // Omitted thread is a deliberate bot-wide generation fence for legacy callers.
-      if (request.threadId) await this.requireThread(tx, request.botId, request.threadId, ctx);
-      for (const namespace of namespaces)
-        for (const generation of new Set(request.generations)) {
-          const id = `sm-retired:${Buffer.from(JSON.stringify([namespace, request.botId, request.threadId ?? null, generation])).toString("base64url")}`;
-          await tx.semanticMemoryRetirement.upsert({
-            where: { id },
-            update: {},
-            create: {
-              id,
-              spaceId: ctx.spaceId,
-              userId: ctx.userId,
-              namespace,
-              kind: "history",
-              botId: request.botId,
-              threadId: request.threadId ?? null,
-              generation,
-            },
-          });
-        }
-      const rows = await tx.semanticFact.findMany({
-        where: {
-          spaceId: ctx.spaceId,
-          botId: request.botId,
-          kind: "history",
-          status: { not: "forgotten" },
-          sourceGeneration: { in: request.generations },
-          ...(request.threadId ? { sourceThreadId: request.threadId } : {}),
-        },
-        orderBy: { id: "asc" },
-      });
-      for (const row of rows) await this.tombstone(tx, row);
-    });
+    return this.transaction(
+      ctx,
+      async (tx) => {
+        await this.lockSpace(tx, ctx.spaceId);
+        await this.requireScope(tx, request.botId, ctx);
+        for (const namespace of namespaces) await this.lockNamespace(tx, namespace, true);
+        // Omitted thread is a deliberate bot-wide generation fence for legacy callers.
+        if (request.threadId) await this.requireThread(tx, request.botId, request.threadId, ctx);
+        for (const namespace of namespaces)
+          for (const generation of new Set(request.generations)) {
+            const id = `sm-retired:${Buffer.from(JSON.stringify([namespace, request.botId, request.threadId ?? null, generation])).toString("base64url")}`;
+            await tx.semanticMemoryRetirement.upsert({
+              where: { id },
+              update: {},
+              create: {
+                id,
+                spaceId: ctx.spaceId,
+                userId: ctx.userId,
+                namespace,
+                kind: "history",
+                botId: request.botId,
+                threadId: request.threadId ?? null,
+                generation,
+              },
+            });
+          }
+        const rows = await tx.semanticFact.findMany({
+          where: {
+            spaceId: ctx.spaceId,
+            botId: request.botId,
+            kind: "history",
+            status: { not: "forgotten" },
+            sourceGeneration: { in: request.generations },
+            ...(request.threadId ? { sourceThreadId: request.threadId } : {}),
+          },
+          orderBy: { id: "asc" },
+        });
+        for (const row of rows) await this.tombstone(tx, row);
+      },
+      BULK_RETIRE_TRANSACTION_OPTIONS,
+    );
   }
 
   async resolveCandidates(
@@ -1103,7 +1411,7 @@ export class SemanticFactStore {
     candidates: Array<{ id: string; revision: number; score: number }>,
     ctx: AdapterContext,
   ): Promise<SemanticMemoryResult[]> {
-    const namespace = semanticFactNamespace(ctx.spaceId, request.scope, request.botId);
+    const namespace = this.scopeNamespace(request, ctx);
     if (!Number.isSafeInteger(request.limit) || request.limit < 1 || request.limit > 100)
       throw new Error("Invalid memory recall limit.");
     return this.inTenant(ctx, async () => {
@@ -1168,59 +1476,92 @@ export class SemanticFactStore {
   async retireScope(
     request: { spaceId: string; botId?: string },
     ctx: AdapterContext,
+    tx?: Tx,
   ): Promise<void> {
     if (request.spaceId !== ctx.spaceId) throw new IsolationError();
-    return this.transaction(ctx, async (tx) => {
-      await this.lockSpace(tx, ctx.spaceId);
-      if (request.botId) {
-        const bot = await this.requireScope(tx, request.botId, ctx, true);
-        if (bot.userId !== ctx.userId) throw new IsolationError();
-      } else {
-        const space = await tx.space.findFirst({
-          where: { id: ctx.spaceId },
-          select: { deletingAt: true },
-        });
-        if (!space?.deletingAt)
-          throw new Error("Only a deleting space can retire every memory scope.");
-      }
-      const namespaces = request.botId
-        ? [semanticFactNamespace(ctx.spaceId, "isolated", request.botId)]
-        : [
-            ...new Set(
-              (
-                await tx.semanticFact.findMany({
-                  where: { spaceId: ctx.spaceId },
-                  select: { namespace: true },
-                })
-              ).map((row) => row.namespace),
-            ),
-          ].sort();
-      for (const namespace of namespaces) {
-        await this.lockNamespace(tx, namespace, true);
-        const id = `sm-scope-retired:${namespace}`;
-        await tx.semanticMemoryRetirement.upsert({
-          where: { id },
-          update: {},
-          create: {
-            id,
-            spaceId: ctx.spaceId,
-            userId: ctx.userId,
-            namespace,
-            kind: "scope",
-            botId: request.botId ?? null,
-          },
-        });
-      }
-      const rows = await tx.semanticFact.findMany({
-        where: {
-          spaceId: ctx.spaceId,
-          status: { not: "forgotten" },
-          ...(request.botId ? { namespace: namespaces[0] } : {}),
-        },
-        orderBy: { id: "asc" },
+    // A caller deleting the scope's owner passes its transaction so a failed delete cannot
+    // leave the bot alive with its memory already retired.
+    if (tx) return this.retireScopeInTransaction(tx, request, ctx);
+    return this.transaction(
+      ctx,
+      (owned) => this.retireScopeInTransaction(owned, request, ctx),
+      BULK_RETIRE_TRANSACTION_OPTIONS,
+    );
+  }
+
+  private async retireScopeInTransaction(
+    tx: Tx,
+    request: { spaceId: string; botId?: string },
+    ctx: AdapterContext,
+  ): Promise<void> {
+    await this.lockSpace(tx, ctx.spaceId);
+    if (request.botId) {
+      const bot = await this.requireScope(tx, request.botId, ctx, true);
+      if (bot.userId !== ctx.userId) throw new IsolationError();
+    } else {
+      const space = await tx.space.findFirst({
+        where: { id: ctx.spaceId },
+        select: { deletingAt: true },
       });
-      for (const row of rows) await this.tombstone(tx, row);
+      if (!space?.deletingAt)
+        throw new Error("Only a deleting space can retire every memory scope.");
+    }
+    const namespaces = request.botId
+      ? [
+          semanticFactNamespace(ctx.spaceId, "isolated", request.botId),
+          lessonFactNamespace(ctx.spaceId, request.botId),
+        ]
+      : [
+          ...new Set(
+            (
+              await tx.semanticFact.findMany({
+                where: { spaceId: ctx.spaceId },
+                select: { namespace: true },
+              })
+            ).map((row) => row.namespace),
+          ),
+        ].sort();
+    for (const namespace of namespaces) {
+      await this.lockNamespace(tx, namespace, true);
+      const id = `sm-scope-retired:${namespace}`;
+      await tx.semanticMemoryRetirement.upsert({
+        where: { id },
+        update: {},
+        create: {
+          id,
+          spaceId: ctx.spaceId,
+          userId: ctx.userId,
+          namespace,
+          kind: "scope",
+          botId: request.botId ?? null,
+        },
+      });
+    }
+    const rows = await tx.semanticFact.findMany({
+      where: {
+        spaceId: ctx.spaceId,
+        status: { not: "forgotten" },
+        ...(request.botId ? { namespace: { in: namespaces } } : {}),
+      },
+      orderBy: { id: "asc" },
     });
+    for (const row of rows) await this.tombstone(tx, row);
+    if (!request.botId) return;
+    // The deleted bot's history facts in the shared scope are unreachable once it is gone:
+    // recall requires the requesting bot to own them, so nothing would ever clear them.
+    const shared = semanticFactNamespace(ctx.spaceId, "shared", request.botId);
+    await this.lockNamespace(tx, shared, true);
+    const sharedHistory = await tx.semanticFact.findMany({
+      where: {
+        spaceId: ctx.spaceId,
+        namespace: shared,
+        botId: request.botId,
+        kind: "history",
+        status: { not: "forgotten" },
+      },
+      orderBy: { id: "asc" },
+    });
+    for (const row of sharedHistory) await this.tombstone(tx, row);
   }
 
   private async indexWork(db: Tx | PrismaClient, record: IndexRecord): Promise<SemanticIndexWork> {

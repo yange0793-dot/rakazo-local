@@ -11,9 +11,11 @@ import { MessageView } from "./message-view";
 const skills = vi.hoisted(() => ({
   updateDraft: vi.fn(async () => ({})),
   save: vi.fn(async () => ({})),
+  remove: vi.fn(async () => ({ ok: true })),
   testRun: vi.fn(async () => ({ runId: "run" })),
 }));
-vi.mock("../../lib/rpc", () => ({ rpc: { skills, artifacts: { get: vi.fn() } } }));
+const memory = vi.hoisted(() => ({ saveLesson: vi.fn(async () => ({})) }));
+vi.mock("../../lib/rpc", () => ({ rpc: { skills, memory, artifacts: { get: vi.fn() } } }));
 
 vi.mock("@lingui/core/macro", () => ({
   plural: (count: number, forms: { one: string; other: string }) =>
@@ -113,6 +115,76 @@ function renderMessage(
   act(() => mention.click());
   return { mention, onOpenBot };
 }
+
+it("deletes a draft skill only on the second, confirming click", async () => {
+  skills.remove.mockClear();
+  renderView(
+    "bot",
+    [
+      {
+        kind: "skill_draft",
+        skillId: "skill",
+        name: "Weekly report",
+        goal: "Send the weekly report",
+        playbook: {
+          whenToUse: "Fridays",
+          inputs: [],
+          steps: ["Collect"],
+          howToCheck: "",
+          whatToReturn: "",
+          approvalBoundaries: "",
+          failureHandling: "",
+        },
+        status: "saved",
+      },
+    ],
+    { onRefresh: async () => undefined },
+  );
+  const card = () => container.querySelector<HTMLElement>('[data-testid="skill-draft-card"]');
+  const del = () =>
+    [...(card()?.querySelectorAll<HTMLButtonElement>("button") ?? [])].find(
+      (entry) => entry.textContent === "Delete" || entry.textContent === "Confirm delete",
+    )!;
+  act(() => del().click());
+  expect(skills.remove).not.toHaveBeenCalled();
+  expect(del().textContent).toBe("Confirm delete");
+  await act(async () => del().click());
+  expect(skills.remove).toHaveBeenCalledWith({ skillId: "skill" });
+  expect(card()).toBeNull();
+});
+
+it("renders a lesson draft and saves it from its card", async () => {
+  memory.saveLesson.mockClear();
+  renderView(
+    "bot",
+    [
+      {
+        kind: "lesson_draft",
+        lessonId: "lesson-draft:run-1:0",
+        runId: "run-1",
+        cue: "The build failed twice.",
+        lesson: "Read the whole log before retrying.",
+        evidence: { kind: "run_failed", quote: "build failed" },
+        status: "draft",
+      },
+    ],
+    { onRefresh: async () => undefined },
+  );
+  const card = container.querySelector('[data-testid="lesson-draft-card"]');
+  expect(card?.textContent).toContain("The build failed twice.");
+  expect(card?.textContent).toContain("Read the whole log before retrying.");
+  const save = [...(card?.querySelectorAll<HTMLButtonElement>("button") ?? [])].find(
+    (entry) => entry.textContent === "Save",
+  );
+  await act(async () => save?.click());
+  expect(memory.saveLesson).toHaveBeenCalledWith({
+    botId: "parent",
+    lessonId: "lesson-draft:run-1:0",
+  });
+  expect(container.querySelector('[data-testid="lesson-draft-card"]')?.textContent).toContain(
+    "Saved",
+  );
+});
 
 it("keeps a received peer marker off the user's side while user replies align to the end", () => {
   renderView("user", [

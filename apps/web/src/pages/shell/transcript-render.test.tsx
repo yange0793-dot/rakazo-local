@@ -156,7 +156,9 @@ it.each([false, true])(
   },
 );
 
-it("redraws a page card's reply only when a newer card supersedes it", () => {
+// The chat stopped drawing page cards, so a reply holds no page state any more: progress
+// ticks and newer cards alike leave it untouched.
+it("keeps a reply unrendered through page card changes now that the chat draws no cards", () => {
   const card = (id: string, version: number): ThreadMessage => ({
     ...message(id, ""),
     botId: "bot",
@@ -172,7 +174,8 @@ it("redraws a page card's reply only when a newer card supersedes it", () => {
   expect(messageRenders.get("reply")).toBe(1);
 
   act(() => root.render(<Host messages={[...earlier, card("card-2", 2)]} />));
-  expect(messageRenders.get("reply")).toBe(2);
+  expect(messageRenders.has("card-2")).toBe(false);
+  expect(messageRenders.get("reply")).toBe(1);
 });
 
 it.each(["Build a plan", "👍"])(
