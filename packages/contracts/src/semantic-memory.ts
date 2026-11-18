@@ -17,15 +17,23 @@ export const LessonEvidenceKindSchema = z.enum([
   "approval_denied",
   "tool_error",
   "user_steering",
+  "user_feedback",
 ]);
 export type LessonEvidenceKind = z.infer<typeof LessonEvidenceKindSchema>;
+
+export const LessonEvidenceSchema = z.object({
+  kind: LessonEvidenceKindSchema,
+  quote: z.string().max(300),
+  /** Only the host can attach the authenticated message behind a feedback quote. */
+  messageId: Id.optional(),
+});
 
 /** Why a host-written lesson exists and which observed event it cites. */
 export const LessonHarnessProvenanceSchema = z.object({
   domainKey: z.string().max(120),
   signals: z.array(z.string().max(40)).max(8),
   autoApplied: z.boolean(),
-  evidence: z.object({ kind: LessonEvidenceKindSchema, quote: z.string().max(300) }),
+  evidence: LessonEvidenceSchema,
 });
 export type LessonHarnessProvenance = z.infer<typeof LessonHarnessProvenanceSchema>;
 

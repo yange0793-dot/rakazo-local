@@ -70,7 +70,7 @@ describe("thumb-down reflection", () => {
     const h = harness({ id: "run-done", status: "completed" });
     await h.react();
     expect(h.runFindFirst).toHaveBeenCalledWith({
-      where: { id: "run-done", spaceId: "space-1" },
+      where: { id: "run-done", spaceId: "space-1", userId: "user-1" },
       select: { id: true, status: true },
     });
     expect(h.enqueue).toHaveBeenCalledWith({

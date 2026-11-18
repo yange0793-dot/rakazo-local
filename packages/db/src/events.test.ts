@@ -4961,6 +4961,13 @@ describe("claimSteering", () => {
         seenIds: [],
       });
       expect(claimed?.origin).toBe(origin);
+      expect(tx.event.create).toHaveBeenCalledWith({
+        data: expect.objectContaining({
+          payload: expect.objectContaining({
+            userMessageIds: origin === "user" ? ["message-1"] : [],
+          }),
+        }),
+      });
     },
   );
 
@@ -5052,7 +5059,11 @@ describe("claimSteering", () => {
     expect(tx.event.create).toHaveBeenCalledWith({
       data: expect.objectContaining({
         type: "run.steering.claimed",
-        payload: { steeringIds: ["steer-1", "steer-2"], nextMessageSeq: 7 },
+        payload: {
+          steeringIds: ["steer-1", "steer-2"],
+          nextMessageSeq: 7,
+          userMessageIds: ["message-1"],
+        },
       }),
     });
     expect(tx.steeringMessage.updateMany).toHaveBeenCalledWith({

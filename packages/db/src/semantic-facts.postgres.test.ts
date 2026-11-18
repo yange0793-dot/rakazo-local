@@ -712,7 +712,10 @@ postgres("semantic fact authority (isolated PostgreSQL)", () => {
       ).items.map((item) => [item.id, item.status]),
     ).toEqual([[lesson!.id, "historical"]]);
     const work = await runAsTenant(ctx, () =>
-      prisma.semanticMemoryIndexOutbox.findMany({ where: { factId: lesson!.id } }),
+      prisma.semanticMemoryIndexOutbox.findMany({
+        where: { factId: lesson!.id },
+        orderBy: [{ revision: "asc" }, { action: "desc" }],
+      }),
     );
     expect(work.map((row) => [row.revision, row.action])).toEqual([
       [1, "upsert"],

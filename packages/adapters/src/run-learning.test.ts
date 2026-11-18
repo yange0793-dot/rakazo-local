@@ -64,11 +64,11 @@ function fixture(
     toolLoopStopped?: boolean;
     effectsRan?: number;
     denied?: boolean;
-    injectedLessonIds?: string[];
     recentRoutineFailure?: boolean;
     tainted?: boolean;
     earlierAttempts?: number;
     outsideMessage?: boolean;
+    priorTools?: Array<{ executionId: string; outcome: "error" | "succeeded" | "paused" }>;
   } = {},
 ) {
   const enqueue = vi.fn(async (_job: unknown) => undefined);
@@ -82,12 +82,14 @@ function fixture(
   const ctx = {
     runId: "run-1",
     workerId: "worker-1",
-    fence: 2,
+    fence: options.earlierAttempts ? 2 : 1,
+    secrets: [],
     run: {
       id: "run-1",
       spaceId: "space-1",
       botId: "bot-1",
       threadId: "thread-1",
+      userId: "user-1",
       trigger: options.trigger ?? "user",
       routineId: options.routineId ?? null,
     },
@@ -97,6 +99,13 @@ function fixture(
         run: { updateMany: runUpdateMany, findFirst: runFindFirst },
         attempt: { count: vi.fn(async () => options.earlierAttempts ?? 0) },
         externalEffect: { findFirst: effectFindFirst },
+        event: {
+          findMany: vi.fn(async ({ where }: { where: { type: string } }) =>
+            where.type === "agent.tool.completed"
+              ? (options.priorTools ?? []).map((payload) => ({ payload }))
+              : [],
+          ),
+        },
       },
       jobs: { enqueue },
       now: () => new Date("2026-11-18T12:00:00Z"),
@@ -117,7 +126,6 @@ function fixture(
       },
       steeringClaimed: options.steeringClaimed ?? 0,
       toolLoopStopped: options.toolLoopStopped ?? false,
-      injectedLessonIds: options.injectedLessonIds ?? [],
     },
   };
   return {
@@ -184,6 +192,45 @@ describe("collectRunSignals", () => {
     expect((await collectRunSignals(looped.ctx, "completed")).signals).toEqual(["stuck_loop"]);
   });
 
+  it("counts the last terminal outcome of each execution across a fresh attempt", async () => {
+    const { ctx } = fixture({
+      earlierAttempts: 2,
+      tainted: true,
+      outcomes: ["succeeded"],
+      // Newest first, as read from the audit. This attempt recovered call-0.
+      priorTools: [
+        { executionId: "call-0", outcome: "error" },
+        { executionId: "a", outcome: "error" },
+        { executionId: "a", outcome: "error" },
+        { executionId: "b", outcome: "error" },
+        { executionId: "c", outcome: "paused" },
+        { executionId: "d", outcome: "succeeded" },
+        { executionId: "d", outcome: "error" },
+      ],
+    });
+    expect(await collectRunSignals(ctx, "completed")).toEqual(completed);
+    ctx.state.reply.toolOutcomes.set("c", "failed");
+    expect((await collectRunSignals(ctx, "completed")).signals).toEqual(["tool_error"]);
+  });
+
+  it("finds earlier denials and tool work even when the last attempt calls no tools", async () => {
+    const { ctx } = fixture({
+      earlierAttempts: 2,
+      tainted: true,
+      denied: true,
+      priorTools: [{ executionId: "earlier", outcome: "succeeded" }],
+    });
+    expect(await collectRunSignals(ctx, "failed", true)).toMatchObject({
+      signals: ["run_failed", "approval_denied"],
+      denied: true,
+    });
+    const paused = fixture({
+      earlierAttempts: 2,
+      priorTools: [{ executionId: "ask", outcome: "paused" }],
+    });
+    expect((await collectRunSignals(paused.ctx, "failed", true)).signals).toEqual([]);
+  });
+
   it("does nothing at all when self-evolution is off", async () => {
     process.env.SELF_EVOLUTION = "off";
     const { ctx, effectFindFirst } = fixture({
@@ -205,7 +252,7 @@ describe("collectRunSignals", () => {
 
 describe("finishRunLearning", () => {
   it("settles the lessons this run saw and queues one reflection", async () => {
-    const { ctx, enqueue } = fixture({ injectedLessonIds: ["lesson-1", "lesson-2"] });
+    const { ctx, enqueue } = fixture();
     await finishRunLearning(ctx, {
       outcome: "completed",
       learnableFailure: false,
@@ -226,7 +273,7 @@ describe("finishRunLearning", () => {
   });
 
   it("settles a failure as failed and a denied run as denied", async () => {
-    const failed = fixture({ injectedLessonIds: ["lesson-1"] });
+    const failed = fixture();
     await finishRunLearning(failed.ctx, {
       outcome: "failed",
       learnableFailure: true,
@@ -239,7 +286,7 @@ describe("finishRunLearning", () => {
       outcome: "failed",
     });
 
-    const denied = fixture({ injectedLessonIds: ["lesson-1"] });
+    const denied = fixture();
     await finishRunLearning(denied.ctx, {
       outcome: "completed",
       learnableFailure: false,
@@ -253,39 +300,26 @@ describe("finishRunLearning", () => {
     });
   });
 
-  it("retires a lesson that failed three times without ever helping", async () => {
-    stubs.lessonOutcomeCounts.mockResolvedValue({ completed: 0, failed: 2, denied: 1 });
-    const { ctx } = fixture({ injectedLessonIds: ["lesson-1", "lesson-2"] });
+  it("never retires a surfaced lesson based on run-level failures", async () => {
+    const { ctx } = fixture();
     await finishRunLearning(ctx, {
       outcome: "failed",
       learnableFailure: true,
       signals: ["run_failed"],
       denied: false,
     });
-    expect(stubs.retireLesson).toHaveBeenCalledTimes(2);
-    expect(stubs.retireLesson).toHaveBeenNthCalledWith(1, "lesson-1", CONTEXT);
-    expect(stubs.retireLesson).toHaveBeenNthCalledWith(2, "lesson-2", CONTEXT);
+    expect(stubs.retireLesson).not.toHaveBeenCalled();
+    expect(stubs.lessonOutcomeCounts).not.toHaveBeenCalled();
   });
 
-  it("keeps a lesson that succeeded at least once or has not failed enough", async () => {
-    stubs.lessonOutcomeCounts.mockResolvedValue({ completed: 1, failed: 9, denied: 0 });
-    const helped = fixture({ injectedLessonIds: ["lesson-1"] });
-    await finishRunLearning(helped.ctx, {
-      outcome: "failed",
-      learnableFailure: true,
-      signals: ["run_failed"],
-      denied: false,
-    });
-    expect(stubs.retireLesson).not.toHaveBeenCalled();
-
-    stubs.lessonOutcomeCounts.mockResolvedValue({ completed: 0, failed: 2, denied: 0 });
-    const young = fixture({ injectedLessonIds: ["lesson-1"] });
-    await finishRunLearning(young.ctx, {
-      outcome: "failed",
-      learnableFailure: true,
-      signals: ["run_failed"],
-      denied: false,
-    });
+  it("settles infrastructure failures and loop stops as inconclusive including earlier attempts", async () => {
+    const { ctx } = fixture({ earlierAttempts: 2 });
+    await finishRunLearning(ctx, { ...completed, outcome: "failed" });
+    await finishRunLearning(ctx, { ...completed, signals: ["stuck_loop"] });
+    expect(stubs.settleLessonUse.mock.calls.map(([, row]) => row)).toEqual([
+      { spaceId: "space-1", runId: "run-1", outcome: null },
+      { spaceId: "space-1", runId: "run-1", outcome: null },
+    ]);
     expect(stubs.retireLesson).not.toHaveBeenCalled();
   });
 
@@ -320,13 +354,13 @@ describe("finishRunLearning", () => {
   });
 
   it("queues nothing without a signal and touches nothing when self-evolution is off", async () => {
-    const quiet = fixture({ injectedLessonIds: ["lesson-1"] });
+    const quiet = fixture();
     await finishRunLearning(quiet.ctx, completed);
     expect(quiet.enqueue).not.toHaveBeenCalled();
 
     process.env.SELF_EVOLUTION = "off";
     stubs.settleLessonUse.mockClear();
-    const off = fixture({ injectedLessonIds: ["lesson-1"] });
+    const off = fixture();
     await finishRunLearning(off.ctx, {
       outcome: "failed",
       learnableFailure: true,
@@ -344,8 +378,8 @@ describe("persistRunTaint", () => {
     const { ctx, runUpdateMany } = fixture({ tainted: true });
     await persistRunTaint(ctx);
     expect(runUpdateMany).toHaveBeenCalledExactlyOnceWith({
-      where: { id: "run-1", status: "running", leaseOwner: "worker-1", leaseFence: 2 },
-      data: { tainted: true },
+      where: { id: "run-1", status: "running", leaseOwner: "worker-1", leaseFence: 1 },
+      data: { tainted: true, learningSourceChecked: true },
     });
   });
 
@@ -353,7 +387,7 @@ describe("persistRunTaint", () => {
     const { ctx, runUpdateMany } = fixture({ earlierAttempts: 2 });
     await persistRunTaint(ctx);
     expect(runUpdateMany).toHaveBeenCalledExactlyOnceWith(
-      expect.objectContaining({ data: { tainted: true } }),
+      expect.objectContaining({ data: { tainted: true, learningSourceChecked: true } }),
     );
   });
 

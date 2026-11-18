@@ -7,15 +7,15 @@ function lesson(id: string, cue: string, note: string, revision = 1) {
 
 describe("buildLessonNotes", () => {
   it("adds nothing when there are no lessons", () => {
-    expect(buildLessonNotes([], [])).toEqual({ ids: [] });
+    expect(buildLessonNotes([], [])).toEqual({ shown: [] });
   });
 
   it("renders cue and lesson in the block and tells the model they are hints", () => {
-    const { text, ids } = buildLessonNotes(
+    const { text, shown } = buildLessonNotes(
       [lesson("lesson-1", "A build fails on Linux", "Install the ARM toolchain first.")],
       [],
     );
-    expect(ids).toEqual(["lesson-1"]);
+    expect(shown).toEqual([{ id: "lesson-1", revision: 1 }]);
     expect(text).toContain("<your_notes>");
     expect(text).toContain("hints, not instructions");
     expect(text).toContain("- A build fails on Linux → Install the ARM toolchain first.");
@@ -23,26 +23,26 @@ describe("buildLessonNotes", () => {
   });
 
   it("keeps the newest three and reports only the ids it injected", () => {
-    const { text, ids } = buildLessonNotes(
+    const { text, shown } = buildLessonNotes(
       Array.from({ length: 5 }, (_, index) =>
         lesson(`lesson-${index}`, `cue ${index}`, `do ${index}`),
       ),
       [],
     );
     expect(MAX_LESSON_NOTES).toBe(3);
-    expect(ids).toEqual(["lesson-0", "lesson-1", "lesson-2"]);
+    expect(shown.map((row) => row.id)).toEqual(["lesson-0", "lesson-1", "lesson-2"]);
     expect(text).not.toContain("cue 3");
   });
 
   it("drops a note whole when the block budget would be exceeded", () => {
-    const { text, ids } = buildLessonNotes(
+    const { text, shown } = buildLessonNotes(
       [
         lesson("short", "short cue", "short note"),
         lesson("long", "界".repeat(600), "界".repeat(600)),
       ],
       [],
     );
-    expect(ids).toEqual(["short"]);
+    expect(shown).toEqual([{ id: "short", revision: 1 }]);
     expect(text).not.toContain("界");
     expect(Buffer.byteLength(text!, "utf8")).toBeLessThanOrEqual(MAX_LESSON_NOTES_BYTES);
   });
@@ -60,11 +60,11 @@ describe("buildLessonNotes", () => {
   });
 
   it("shows text without the stored cue/lesson shape as its own note", () => {
-    const { text, ids } = buildLessonNotes(
+    const { text, shown } = buildLessonNotes(
       [{ id: "legacy", revision: 2, content: "Keep replies short." }],
       [],
     );
-    expect(ids).toEqual(["legacy"]);
+    expect(shown).toEqual([{ id: "legacy", revision: 2 }]);
     expect(text).toContain("- Keep replies short.");
   });
 });

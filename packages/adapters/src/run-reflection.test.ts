@@ -39,6 +39,7 @@ const RUN = {
   routineId: null,
   sourceMessageId: "message-source",
   tainted: false,
+  learningSourceChecked: true,
   thread: { groupId: null, externalConversationId: null },
 };
 
@@ -78,13 +79,15 @@ type HarnessOptions = {
   status?: string;
   error?: string | null;
   tainted?: boolean;
+  learningSourceChecked?: boolean;
+  feedback?: Array<{ id: string; text: string }>;
   trigger?: string;
   routineId?: string | null;
   thread?: { groupId: string | null; externalConversationId: string | null };
   sourceMessage?: typeof SOURCE_MESSAGE | null;
   drafts?: unknown[];
   managedFacts?: boolean | null;
-  steering?: Array<{ message: { blocks: unknown } }>;
+  steering?: Array<{ id: string; text: string }>;
   denials?: Array<{ kind: string; reviewDecision: string | null; reviewReason: string | null }>;
   toolEvents?: Array<{ type: string; payload: unknown }>;
   savedLessons?: Array<{ id: string; revision: number; content: string; updatedAt: string }>;
@@ -193,6 +196,7 @@ function harness(options: HarnessOptions = {}) {
         status: options.status ?? RUN.status,
         error: options.error !== undefined ? options.error : RUN.error,
         tainted: options.tainted ?? RUN.tainted,
+        learningSourceChecked: options.learningSourceChecked ?? RUN.learningSourceChecked,
         trigger: options.trigger ?? RUN.trigger,
         routineId: options.routineId !== undefined ? options.routineId : RUN.routineId,
         thread: options.thread ?? RUN.thread,
@@ -200,9 +204,22 @@ function harness(options: HarnessOptions = {}) {
     },
     task: { findUnique: vi.fn(async () => ({ prompt: "compare three venues in Lisbon" })) },
     message: {
-      findMany: vi.fn(async () => [
-        { seq: 5, role: "bot", blocks: [{ kind: "text", text: "Three venues fit the budget." }] },
-      ]),
+      findMany: vi.fn(async (args: { where: { role?: string; authorUserId?: string } }) =>
+        args.where.role === "user"
+          ? ((args.where.authorUserId ? options.feedback : options.steering) ?? []).map(
+              ({ id, text }) => ({
+                id,
+                blocks: [{ kind: "text", text }],
+              }),
+            )
+          : [
+              {
+                seq: 5,
+                role: "bot",
+                blocks: [{ kind: "text", text: "Three venues fit the budget." }],
+              },
+            ],
+      ),
       findFirst: vi.fn(async () => ({
         blocks: [{ kind: "text", text: "next time skip the paid ones" }],
       })),
@@ -211,23 +228,23 @@ function harness(options: HarnessOptions = {}) {
       ),
     },
     event: {
-      findMany: vi.fn(
-        async () =>
-          options.toolEvents ?? [
-            { type: "agent.tool.called", payload: { name: "web_search", executionId: "call-1" } },
-            {
-              type: "agent.tool.completed",
-              payload: {
-                name: "web_search",
-                executionId: "call-1",
-                durationMs: 1200,
-                outcome: "succeeded",
+      findMany: vi.fn(async ({ where }: { where: { type: unknown } }) =>
+        where.type === "run.steering.claimed"
+          ? [{ payload: { userMessageIds: (options.steering ?? []).map(({ id }) => id) } }]
+          : (options.toolEvents ?? [
+              { type: "agent.tool.called", payload: { name: "web_search", executionId: "call-1" } },
+              {
+                type: "agent.tool.completed",
+                payload: {
+                  name: "web_search",
+                  executionId: "call-1",
+                  durationMs: 1200,
+                  outcome: "succeeded",
+                },
               },
-            },
-          ],
+            ]),
       ),
     },
-    steeringMessage: { findMany: vi.fn(async () => options.steering ?? []) },
     externalEffect: { findMany: vi.fn(async () => options.denials ?? []) },
     taughtSkill: {
       findFirst: vi.fn(async () => (options.drafts ?? [])[0] ?? null),
@@ -412,9 +429,7 @@ describe("reflectRun", () => {
     expect(request.prompt).toContain("<run_task>\ncompare three venues in Lisbon\n</run_task>");
     expect(request.prompt).toContain("- web_search → succeeded (1200 ms)");
     expect(request.prompt).toContain("<final_reply>\nThree venues fit the budget.\n</final_reply>");
-    expect(request.prompt).toContain(
-      "<user_follow_up>\nnext time skip the paid ones\n</user_follow_up>",
-    );
+    expect(request.prompt).toContain("<user_feedback>\n(none)\n</user_feedback>");
     expect(request.prompt).toContain('<run_outcome status="completed"></run_outcome>');
     expect(request.prompt).toContain("<skill_requested>true</skill_requested>");
     expect(request.instructions).toContain("language of the run task");
@@ -513,7 +528,10 @@ describe("reflectRun", () => {
 
   it("leaves a card instead of a lesson when the run read outside content", async () => {
     const h = harness({
-      output: JSON.stringify({ lessons: [LESSON], skill: null }),
+      output: JSON.stringify({
+        lessons: [{ ...LESSON, replaces: { id: "old", revision: 4 } }],
+        skill: null,
+      }),
       tainted: true,
       toolEvents: [
         {
@@ -539,12 +557,14 @@ describe("reflectRun", () => {
         lessonId: "lesson-draft:run-1:0",
         runId: "run-1",
         cue: LESSON.cue,
+        replaces: { id: "old", expectedRevision: 4 },
+        domainKey: "research",
         status: "draft",
       }),
     ]);
     expect(card.markUnread).toBe(false);
     // The card the review writes has to survive the thread's own block contract.
-    expect(MessageBlock.safeParse(card.blocks[0]).success).toBe(true);
+    expect(MessageBlock.parse(card.blocks[0])).toEqual(card.blocks[0]);
   });
 
   it("leaves a card when the run was not started by its owner", async () => {
@@ -596,19 +616,109 @@ describe("reflectRun", () => {
     });
   });
 
-  it("leaves the asking message out of the follow-up it reads", async () => {
-    const h = harness();
-    await reflectRun(h.deps, { runId: "run-1", exceptMessageId: "message-ask" });
-    expect(h.prisma.message.findFirst).toHaveBeenCalledWith({
-      where: {
-        threadId: "thread-1",
-        seq: { gt: 5 },
-        role: "user",
-        id: { not: "message-ask" },
-      },
-      orderBy: { seq: "asc" },
-      select: { blocks: true },
+  it("reads only linked replies by this owner or the manual request naming this run", async () => {
+    const fix = "For this project skip paid venues.";
+    const h = harness({
+      feedback: [{ id: "message-ask", text: `Review this. ${fix}` }],
+      output: JSON.stringify({
+        lessons: [
+          { ...LESSON, evidence: { kind: "user_feedback", quote: fix, messageId: "made-up" } },
+        ],
+      }),
     });
+    await reflectRun(h.deps, { runId: "run-1", exceptMessageId: "message-ask" });
+    expect(h.prisma.message.findMany).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: {
+          threadId: "thread-1",
+          authorUserId: "user-1",
+          role: "user",
+          OR: [
+            { replyTo: { is: { threadId: "thread-1", runId: "run-1", role: "bot" } } },
+            { id: "message-ask", createdAt: { gte: RUN.completedAt }, replyToMessageId: null },
+          ],
+        },
+      }),
+    );
+    expect(h.saveLesson).toHaveBeenCalledWith(
+      expect.objectContaining({
+        provenance: expect.objectContaining({
+          harness: expect.objectContaining({
+            evidence: { kind: "user_feedback", quote: fix, messageId: "message-ask" },
+          }),
+        }),
+      }),
+      expect.anything(),
+    );
+  });
+
+  it("treats a dislike as a signal without inventing its reason, even after an earlier skill", async () => {
+    const h = harness({
+      drafts: [{ id: "prior", status: "saved", name: "Prior" }],
+      feedback: [{ id: "reaction", text: "👎" }],
+      output: JSON.stringify({
+        lessons: [{ ...LESSON, evidence: { kind: "user_feedback", quote: "👎" } }],
+        skill: DRAFT,
+      }),
+    });
+    await reflectRun(h.deps, { runId: "run-1", auto: true });
+    expect(h.runtimeRun.mock.calls[0]![0].prompt).toContain("<review_signals>\nuser_disliked\n");
+    expect(h.saveLesson).not.toHaveBeenCalled();
+    expect(h.create).not.toHaveBeenCalled();
+  });
+
+  it("does not misattribute tool output to the user's feedback", async () => {
+    const h = harness({
+      toolEvents: failedToolEvents(),
+      output: JSON.stringify({
+        lessons: [{ ...LESSON, evidence: { ...LESSON.evidence, kind: "user_feedback" } }],
+      }),
+    });
+    await reflectRun(h.deps, { runId: "run-1", auto: true });
+    expect(h.saveLesson).not.toHaveBeenCalled();
+  });
+
+  it("does not teach a reason from a reaction claimed as steering", async () => {
+    const h = harness({
+      steering: [{ id: "reaction", text: "👎" }],
+      output: JSON.stringify({
+        lessons: [{ ...LESSON, evidence: { kind: "user_steering", quote: "👎" } }],
+      }),
+    });
+    await reflectRun(h.deps, { runId: "run-1", auto: true });
+    expect(h.saveLesson).not.toHaveBeenCalled();
+  });
+
+  it("does not reuse errors that disappeared from the rendered tool history", async () => {
+    const error = failedToolEvents(1)[0]!;
+    const h = harness({
+      // The query returns newest first. These failures belong to one replayed execution.
+      toolEvents: [
+        { ...error, payload: { ...error.payload, outcome: "succeeded" } },
+        error,
+        error,
+        error,
+      ],
+      output: JSON.stringify({ lessons: [LESSON] }),
+    });
+    await reflectRun(h.deps, { runId: "run-1", auto: true });
+    expect(h.runtimeRun.mock.calls[0]![0].prompt).toContain("<review_signals>\n(none)\n");
+    expect(h.saveLesson).not.toHaveBeenCalled();
+  });
+
+  it("leaves an unchecked historical run for a person even if tainted is false", async () => {
+    const h = harness({
+      learningSourceChecked: false,
+      toolEvents: failedToolEvents(),
+      output: JSON.stringify({ lessons: [LESSON] }),
+    });
+    await reflectRun(h.deps, { runId: "run-1", auto: true });
+    expect(h.saveLesson).not.toHaveBeenCalled();
+    expect(
+      vi
+        .mocked(createThreadMessageInTransaction)
+        .mock.calls.some(([, r]) => r.clientNonce?.startsWith("reflect-lesson:")),
+    ).toBe(true);
   });
 
   it("shows a failed run's own error as the outcome", async () => {

@@ -113,15 +113,32 @@ postgres("lesson usage (isolated PostgreSQL)", () => {
         spaceId,
         botId,
         runId,
-        lessonIds: ["lesson-a", "lesson-a", "lesson-b"],
+        lessons: [
+          { id: "lesson-a", revision: 2 },
+          { id: "lesson-a", revision: 2 },
+          { id: "lesson-b", revision: 1 },
+        ],
       }),
     );
     // A requeued attempt re-records the same lessons; the primary key absorbs it.
     await runAsTenant(tenant, () =>
-      recordLessonUse(prisma, { spaceId, botId, runId, lessonIds: ["lesson-a", "lesson-b"] }),
+      recordLessonUse(prisma, {
+        spaceId,
+        botId,
+        runId,
+        lessons: [
+          { id: "lesson-a", revision: 3 },
+          { id: "lesson-b", revision: 1 },
+        ],
+      }),
     );
     await runAsTenant(tenant, () =>
-      recordLessonUse(prisma, { spaceId, botId, runId: secondRunId, lessonIds: ["lesson-a"] }),
+      recordLessonUse(prisma, {
+        spaceId,
+        botId,
+        runId: secondRunId,
+        lessons: [{ id: "lesson-a", revision: 3 }],
+      }),
     );
     expect(
       await runAsSystem("inspect synthetic lesson usage", () =>
@@ -132,10 +149,11 @@ postgres("lesson usage (isolated PostgreSQL)", () => {
     const settled = await runAsSystem("inspect synthetic lesson usage", () =>
       prisma.lessonUsage.findMany({
         where: { runId },
-        select: { lessonId: true, outcome: true, settledAt: true },
+        select: { lessonId: true, outcome: true, settledAt: true, firstRevision: true },
         orderBy: { lessonId: "asc" },
       }),
     );
+    expect(settled.map((row) => row.firstRevision)).toEqual([2, 1]);
     expect(settled.map((row) => [row.lessonId, row.outcome, row.settledAt !== null])).toEqual([
       ["lesson-a", "failed", true],
       ["lesson-b", "failed", true],

@@ -1,7 +1,7 @@
 import type { PrismaClient } from "./generated/prisma/client.js";
 
-/** How a run that saw a lesson ended; a denied approval counts against the lesson too. */
-export type LessonOutcome = "completed" | "failed" | "denied";
+/** Run-level observation, not a verdict on the lesson. A settled null is uninformative. */
+export type LessonOutcome = "completed" | "failed" | "denied" | null;
 
 /**
  * Record the lessons a run actually put in front of the model. A run may be requeued and retry
@@ -9,15 +9,20 @@ export type LessonOutcome = "completed" | "failed" | "denied";
  */
 export async function recordLessonUse(
   db: PrismaClient,
-  input: { spaceId: string; botId: string; runId: string; lessonIds: readonly string[] },
+  input: {
+    spaceId: string;
+    botId: string;
+    runId: string;
+    lessons: ReadonlyArray<{ id: string; revision: number }>;
+  },
 ): Promise<void> {
-  const lessonIds = [...new Set(input.lessonIds)];
-  if (!lessonIds.length) return;
+  if (!input.lessons.length) return;
   await db.lessonUsage.createMany({
-    data: lessonIds.map((lessonId) => ({
+    data: input.lessons.map(({ id, revision }) => ({
       spaceId: input.spaceId,
       botId: input.botId,
-      lessonId,
+      lessonId: id,
+      firstRevision: revision,
       runId: input.runId,
     })),
     skipDuplicates: true,
@@ -30,7 +35,7 @@ export async function settleLessonUse(
   input: { spaceId: string; runId: string; outcome: LessonOutcome },
 ): Promise<void> {
   await db.lessonUsage.updateMany({
-    where: { spaceId: input.spaceId, runId: input.runId },
+    where: { spaceId: input.spaceId, runId: input.runId, settledAt: null },
     data: { outcome: input.outcome, settledAt: new Date() },
   });
 }

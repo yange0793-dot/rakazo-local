@@ -7,7 +7,7 @@ import type {
   SemanticFactListRequest,
   SemanticFactPage,
 } from "@rakazo/contracts";
-import { LessonEvidenceKindSchema } from "@rakazo/contracts";
+import { LessonEvidenceKindSchema, MessageReactionSchema } from "@rakazo/contracts";
 import type { SkillPlaybook } from "@rakazo/core";
 import {
   blocksToAgentHistoryText,
@@ -19,6 +19,7 @@ import type { LessonWriteInput, Prisma, PrismaClient, ThreadEvents } from "@raka
 import {
   appendEventInTransaction,
   createThreadMessageInTransaction,
+  listClaimedUserSteering,
   recordUsage,
   runAsTenant,
   SemanticFactStore,
@@ -28,6 +29,7 @@ import { sanitizeConnectorError } from "./connector-safety.js";
 import { resolveDeploymentModel } from "./deployment-model.js";
 import { lessonDomain } from "./lesson-domain.js";
 import type { MemoryProviderResolver } from "./memory-provider-factory.js";
+import { TOOL_ERROR_SIGNAL_MIN } from "./run-learning.js";
 import { selfEvolutionEnabled } from "./self-evolution.js";
 import { listAgentSkillRecords } from "./skill-tools.js";
 import { emitSkillDraftMessages, parsePlaybook } from "./teaching-session.js";
@@ -60,7 +62,7 @@ export interface ReflectionPayload {
   runId: string;
   /** A signal-triggered review: lessons only, never a skill card. */
   auto?: true;
-  /** The message that asked for a manual review, so it is not read back as a follow-up. */
+  /** Legacy wire name for the manual request. Its author and thread are checked before use. */
   exceptMessageId?: string;
 }
 
@@ -96,7 +98,7 @@ type ReflectionDraft = { name: string; goal: string; playbook: SkillPlaybook };
 export interface ParsedLesson {
   cue: string;
   lesson: string;
-  evidence: { kind: LessonEvidenceKind; quote: string };
+  evidence: { kind: LessonEvidenceKind; quote: string; messageId?: string };
   replaces?: { id: string; revision: number };
 }
 
@@ -269,9 +271,7 @@ interface ToolCallDigest {
 }
 
 function toolCallDigest(events: Array<{ type: string; payload: unknown }>): ToolCallDigest {
-  const lines = new Map<string, string>();
-  const errorLines: string[] = [];
-  const errors: string[] = [];
+  const calls = new Map<string, { line: string; outcome: string; error?: string }>();
   const names: string[] = [];
   let anonymous = 0;
   for (const event of events) {
@@ -285,10 +285,17 @@ function toolCallDigest(events: Array<{ type: string; payload: unknown }>): Tool
       typeof payload.executionId === "string" ? payload.executionId : `anonymous:${anonymous++}`;
     if (event.type === "agent.tool.called") {
       // A completion the query returned first already says how the call ended.
-      if (!lines.has(executionId)) lines.set(executionId, `- ${escapePromptData(name)} → started`);
+      if (!calls.has(executionId)) {
+        calls.set(executionId, {
+          line: `- ${escapePromptData(name)} → started`,
+          outcome: "started",
+        });
+      }
       continue;
     }
     const outcome = typeof payload.outcome === "string" ? payload.outcome : "succeeded";
+    const previous = calls.get(executionId)?.outcome;
+    if (outcome === "paused" && (previous === "succeeded" || previous === "error")) continue;
     const durationMs =
       typeof payload.durationMs === "number" && Number.isFinite(payload.durationMs)
         ? ` (${Math.max(0, Math.round(payload.durationMs))} ms)`
@@ -297,13 +304,18 @@ function toolCallDigest(events: Array<{ type: string; payload: unknown }>): Tool
       outcome === "error" && payload.error !== undefined
         ? sanitizeConnectorError(payload.error).slice(0, MAX_TOOL_ERROR_CHARS)
         : undefined;
-    if (rawError) errors.push(rawError);
     const renderedError = rawError ? `: ${escapePromptData(rawError)}` : "";
     const line = `- ${escapePromptData(name)} → ${outcome}${durationMs}${renderedError}`;
-    if (outcome === "error") errorLines.push(line);
-    lines.set(executionId, line);
+    calls.set(executionId, { line, outcome, error: rawError });
   }
-  return { lines: [...lines.values()], errorLines, errors, names };
+  const results = [...calls.values()];
+  const failures = results.filter((call) => call.outcome === "error");
+  return {
+    lines: results.map(({ line }) => line),
+    errorLines: failures.map(({ line }) => line),
+    errors: failures.flatMap(({ error }) => (error ? [error] : [])),
+    names,
+  };
 }
 
 function finalBotReply(messages: Array<{ role: string; blocks: unknown }>): string {
@@ -327,7 +339,7 @@ function reflectionInstructions(options: { lessons: boolean; skill: boolean }): 
   ];
   if (options.lessons) {
     parts.push(
-      `You may write at most ${MAX_LESSONS} lessons. A lesson is a short private note for future runs: cue = the situation that should bring it to mind; lesson = what to do or avoid; evidence.quote must be copied verbatim from <run_outcome>, a failed line in <tool_calls>, <user_steering> or <approval_denials> — a quote that is not found there is discarded.`,
+      `You may write at most ${MAX_LESSONS} lessons. A lesson is a short private note for future runs: cue = when it applies; lesson = what to do or avoid. Copy evidence.quote verbatim from the matching run error, failed tool call, user steering, approval denial or explicit correction in <user_feedback>. A dislike alone has no explanation. A request to review, a new task, or praise is not a correction. Skip when the cause or scope is unknown.`,
       "Prefer updating an existing lesson (same situation) over a near duplicate.",
     );
   }
@@ -342,7 +354,7 @@ function reflectionInstructions(options: { lessons: boolean; skill: boolean }): 
   parts.push(
     'If nothing is worth keeping, answer exactly {"skip": true, "reason": "<short reason>"}.',
     "Otherwise answer ONLY this JSON, with no prose before or after:",
-    `{"lessons": [{"cue": string, "lesson": string, "evidence": {"kind": "run_failed"|"approval_denied"|"tool_error"|"user_steering", "quote": string}, "replaces": {"id": string, "revision": number}}], "skill": {"name": string, "goal": string, "playbook": {"whenToUse": string, "inputs": string[], "steps": string[], "howToCheck": string, "whatToReturn": string, "approvalBoundaries": string, "failureHandling": string}} | null}`,
+    `{"lessons": [{"cue": string, "lesson": string, "evidence": {"kind": ${LessonEvidenceKindSchema.options.map((kind) => JSON.stringify(kind)).join("|")}, "quote": string}, "replaces": {"id": string, "revision": number}}], "skill": {"name": string, "goal": string, "playbook": {"whenToUse": string, "inputs": string[], "steps": string[], "howToCheck": string, "whatToReturn": string, "approvalBoundaries": string, "failureHandling": string}} | null}`,
     `Caps: cue ${MAX_CUE_CHARS} characters, lesson ${MAX_LESSON_CHARS}, quote ${MAX_EVIDENCE_QUOTE_CHARS}; skill name ${MAX_NAME_CHARS} (2-5 words), goal ${MAX_GOAL_CHARS}, steps 3-${MAX_STEPS} items of at most ${MAX_STEP_CHARS} characters.`,
   );
   if (!options.lessons) parts.push('Answer with "lessons": [] — this run keeps no lessons.');
@@ -438,6 +450,9 @@ async function writeLessonDrafts(
   run: { id: string; spaceId: string; botId: string },
   threadId: string | null,
   lessons: readonly ParsedLesson[],
+  domainKey: string,
+  signals: string[],
+  feedbackId?: string,
 ): Promise<void> {
   if (!threadId) {
     getLogger().warn(`harness.reflect found lessons for run ${run.id} but the bot has no chat`, {
@@ -445,16 +460,22 @@ async function writeLessonDrafts(
     });
     return;
   }
+  const key = feedbackId ? `${run.id}:${feedbackId}` : run.id;
   const blocks: MessageBlock[] = lessons.map((lesson, index) => ({
     kind: "lesson_draft",
-    lessonId: `lesson-draft:${run.id}:${index}`,
+    lessonId: `lesson-draft:${key}:${index}`,
     runId: run.id,
     cue: lesson.cue,
     lesson: lesson.lesson,
     evidence: lesson.evidence,
+    domainKey,
+    signals,
+    ...(lesson.replaces
+      ? { replaces: { id: lesson.replaces.id, expectedRevision: lesson.replaces.revision } }
+      : {}),
     status: "draft",
   }));
-  const clientNonce = `reflect-lesson:${run.id}`;
+  const clientNonce = `reflect-lesson:${key}`;
   const seq = await deps.prisma.$transaction(async (tx) => {
     const existing = await tx.message.findUnique({
       where: { threadId_clientNonce: { threadId, clientNonce } },
@@ -514,6 +535,7 @@ export async function reflectRun(deps: ReflectionDeps, payload: ReflectionPayloa
       routineId: true,
       sourceMessageId: true,
       tainted: true,
+      learningSourceChecked: true,
       thread: { select: { groupId: true, externalConversationId: true } },
     },
   });
@@ -522,7 +544,7 @@ export async function reflectRun(deps: ReflectionDeps, payload: ReflectionPayloa
     throw new Error(`harness.reflect run ${runId} is not finished (${run.status})`);
   }
   const existing = await findSkillForRun(deps.prisma, run.botId, run.id);
-  if (existing) {
+  if (existing && !payload.auto && !payload.exceptMessageId) {
     getLogger().info(
       `harness.reflect skipped for run ${run.id}: it already has skill ${existing.id} (${existing.status})`,
     );
@@ -534,7 +556,7 @@ export async function reflectRun(deps: ReflectionDeps, payload: ReflectionPayloa
   if (!lessonsEnabled) {
     getLogger().info("lessons skipped: no managed memory provider", { "run.id": run.id });
     // A signal-triggered review exists to write lessons; without them there is nothing to do.
-    if (!manual) return;
+    if (!manual || existing) return;
   }
 
   // Match normal run model selection when the executor provides its resolver. "scripted" means
@@ -581,6 +603,7 @@ export async function reflectRun(deps: ReflectionDeps, payload: ReflectionPayloa
       bot,
       payload,
       manual,
+      draftSkill: manual && !existing,
       lessonsEnabled,
       model,
       operationId,
@@ -611,12 +634,14 @@ async function reviewAndRecord(
       routineId: string | null;
       sourceMessageId: string | null;
       tainted: boolean;
+      learningSourceChecked: boolean;
       thread: { groupId: string | null; externalConversationId: string | null } | null;
     };
     botThreadId: string | null;
     bot: { id: string; thread: { id: string } | null };
     payload: ReflectionPayload;
     manual: boolean;
+    draftSkill: boolean;
     lessonsEnabled: boolean;
     model: AgentRunRequest["model"];
     operationId: string;
@@ -665,22 +690,43 @@ async function reviewAndRecord(
           })
         : null,
     ]);
-  const [steering, denials] = await Promise.all([
-    deps.prisma.steeringMessage.findMany({
-      where: { runId: run.id },
-      orderBy: { createdAt: "asc" },
-      take: MAX_STEERING_MESSAGES,
-      select: { message: { select: { blocks: true } } },
-    }),
+  // A free-standing message later in the conversation might be an entirely different task.
+  // Read only the owner's linked replies or the explicit manual request about this run.
+  const [steering, denials, feedbackRows] = await Promise.all([
+    listClaimedUserSteering(deps.prisma, run, MAX_STEERING_MESSAGES),
     deps.prisma.externalEffect.findMany({
       where: { runId: run.id, status: "denied" },
       orderBy: { updatedAt: "asc" },
       take: MAX_APPROVAL_DENIALS,
       select: { kind: true, reviewDecision: true, reviewReason: true },
     }),
+    deps.prisma.message.findMany({
+      where: {
+        threadId,
+        authorUserId: userId,
+        role: "user",
+        OR: [
+          { replyTo: { is: { threadId, runId: run.id, role: "bot" } } },
+          ...(manual && payload.exceptMessageId && run.completedAt
+            ? [
+                {
+                  id: payload.exceptMessageId,
+                  createdAt: { gte: run.completedAt },
+                  replyToMessageId: null,
+                },
+              ]
+            : []),
+        ],
+      },
+      orderBy: { seq: "desc" },
+      take: MAX_STEERING_MESSAGES,
+      select: { id: true, blocks: true },
+    }),
   ]);
   const digest = toolCallDigest([...toolEvents].reverse());
-  const steeringTexts = steering.map((entry) => messageText(entry.message?.blocks)).filter(Boolean);
+  const steeringSources = steering
+    .map(({ id, blocks }) => ({ id, text: messageText(blocks).slice(0, MAX_FOLLOW_UP_CHARS) }))
+    .filter(({ text }) => text && !MessageReactionSchema.safeParse(text).success);
   const denialLines = denials.map(
     (denial) =>
       `- ${escapePromptData(denial.kind)} → denied${
@@ -691,25 +737,23 @@ async function reviewAndRecord(
   const signals: string[] = [];
   if (run.status === "failed") signals.push("run_failed");
   if (denials.length > 0) signals.push("approval_denied");
-  if (digest.errors.length >= 3) signals.push("tool_error");
-  if (steeringTexts.length > 0) signals.push("user_steering");
+  if (digest.errorLines.length >= TOOL_ERROR_SIGNAL_MIN) signals.push("tool_error");
+  if (steeringSources.length > 0) signals.push("user_steering");
 
-  const lastSeq = recentMessages[0]?.seq;
-  const followUp =
-    manual && lastSeq !== undefined
-      ? await deps.prisma.message.findFirst({
-          where: {
-            threadId: run.threadId,
-            seq: { gt: lastSeq },
-            role: "user",
-            // The message that asked for this review is not a reaction to the run itself.
-            ...(payload.exceptMessageId ? { id: { not: payload.exceptMessageId } } : {}),
-          },
-          orderBy: { seq: "asc" },
-          select: { blocks: true },
-        })
-      : null;
-  const followUpText = followUp ? messageText(followUp.blocks).slice(0, MAX_FOLLOW_UP_CHARS) : "";
+  const feedback: Array<{ id: string; text: string }> = [];
+  let disliked = false;
+  for (const row of feedbackRows) {
+    const blocks = (Array.isArray(row.blocks) ? row.blocks : []) as MessageBlock[];
+    const text = blocks
+      .flatMap((block) => (block.kind === "text" ? [block.text] : []))
+      .join("\n")
+      .trim()
+      .slice(0, MAX_FOLLOW_UP_CHARS);
+    if (text === "👎") disliked = true;
+    if (text && !MessageReactionSchema.safeParse(text).success) feedback.push({ id: row.id, text });
+  }
+  if (disliked) signals.push("user_disliked");
+  if (feedback.length) signals.push("user_feedback");
 
   const existingLessons = lessonsEnabled
     ? existingLessonLines(
@@ -738,15 +782,16 @@ async function reviewAndRecord(
     section("final_reply", finalReply ? [escapePromptData(finalReply)] : []),
     section(
       "user_steering",
-      steeringTexts.map((text) => escapePromptData(text)),
+      steeringSources.map(({ text }) => escapePromptData(text)),
     ),
-    ...(manual
-      ? [section("user_follow_up", followUpText ? [escapePromptData(followUpText)] : [])]
-      : []),
+    section(
+      "user_feedback",
+      feedback.map((entry) => escapePromptData(entry.text)),
+    ),
     section("approval_denials", denialLines),
     ...(lessonsEnabled ? [section("existing_lessons", existingLessons)] : []),
     section("existing_skills", skillLines),
-    `<skill_requested>${manual}</skill_requested>`,
+    `<skill_requested>${input.draftSkill}</skill_requested>`,
   ];
   const prompt = sections.join("\n\n");
 
@@ -769,7 +814,7 @@ async function reviewAndRecord(
         await recordUsage(deps.prisma, usageEvent, usage);
       },
       prompt,
-      instructions: reflectionInstructions({ lessons: lessonsEnabled, skill: manual }),
+      instructions: reflectionInstructions({ lessons: lessonsEnabled, skill: input.draftSkill }),
       history: [],
       tools: [],
       model: input.model,
@@ -808,15 +853,23 @@ async function reviewAndRecord(
     return;
   }
 
-  const evidence: EvidenceSources = [
-    run.error ?? "",
-    ...digest.errors,
-    ...digest.errorLines,
-    ...steeringTexts,
-    ...denialLines,
-  ];
+  const evidence = {
+    run_failed: run.error ? [run.error] : [],
+    tool_error: [...digest.errors, ...digest.errorLines],
+    approval_denied: denialLines,
+  };
   const lessons = parsed.lessons.filter((lesson) => {
-    if (verifyLessonEvidence(lesson.evidence.quote, evidence)) return true;
+    if (lesson.evidence.kind === "user_feedback" || lesson.evidence.kind === "user_steering") {
+      const sources = lesson.evidence.kind === "user_feedback" ? feedback : steeringSources;
+      const source = sources.find((entry) =>
+        verifyLessonEvidence(lesson.evidence.quote, [entry.text]),
+      );
+      if (source) {
+        lesson.evidence.messageId = source.id;
+        return true;
+      }
+    } else if (verifyLessonEvidence(lesson.evidence.quote, evidence[lesson.evidence.kind]))
+      return true;
     getLogger().warn("harness.reflect dropped a lesson with unverifiable evidence", {
       "run.id": run.id,
       "lesson.evidence_kind": lesson.evidence.kind,
@@ -827,6 +880,7 @@ async function reviewAndRecord(
   if (lessonsEnabled && lessons.length > 0) {
     // Auto-apply needs a run nobody outside started and whose source words are their owner's.
     const autoApplied =
+      run.learningSourceChecked &&
       !run.tainted &&
       isOwnerStartedRun(run.trigger, sourceMessage?.role === "user") &&
       run.thread?.groupId == null &&
@@ -865,12 +919,20 @@ async function reviewAndRecord(
         }
       }
     } else {
-      await writeLessonDrafts(deps, run, input.botThreadId, lessons);
+      await writeLessonDrafts(
+        deps,
+        run,
+        input.botThreadId,
+        lessons,
+        domainKey,
+        signals,
+        feedback[0]?.id,
+      );
     }
   }
 
   // A signal-triggered review never drafts a skill: cards are for a review a person asked for.
-  const draft = manual ? parsed.draft : null;
+  const draft = input.draftSkill ? parsed.draft : null;
   if (!draft) return;
 
   let row: Prisma.TaughtSkillGetPayload<object>;

@@ -25,9 +25,9 @@ function splitLesson(content: string): string {
 export function buildLessonNotes(
   lessons: Array<{ id: string; revision: number; content: string }>,
   secrets: readonly string[],
-): { text?: string; ids: string[] } {
+): { text?: string; shown: Array<{ id: string; revision: number }> } {
   const items: string[] = [];
-  const ids: string[] = [];
+  const shown: Array<{ id: string; revision: number }> = [];
   let remaining = MAX_LESSON_NOTES_BYTES - Buffer.byteLength(`${HEADER}\n${FOOTER}`, "utf8");
   for (const lesson of lessons) {
     if (items.length >= MAX_LESSON_NOTES) break;
@@ -37,8 +37,8 @@ export function buildLessonNotes(
     const size = Buffer.byteLength(`${item}\n`, "utf8");
     if (size > remaining) continue;
     items.push(item);
-    ids.push(lesson.id);
+    shown.push({ id: lesson.id, revision: lesson.revision });
     remaining -= size;
   }
-  return items.length ? { text: `${HEADER}\n${items.join("\n")}\n${FOOTER}`, ids } : { ids };
+  return items.length ? { text: `${HEADER}\n${items.join("\n")}\n${FOOTER}`, shown } : { shown };
 }

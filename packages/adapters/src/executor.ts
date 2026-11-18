@@ -1551,7 +1551,6 @@ export function createRunExecutor(executorDeps: ExecutorDeps) {
           overLimitActionCalls: 0,
           steeringClaimed: 0,
           toolLoopStopped: false,
-          injectedLessonIds: [],
           toolResults: new Map(),
           tainted: initiallyTainted,
           ownerSettingsRefused: false,
@@ -1770,14 +1769,13 @@ export function createRunExecutor(executorDeps: ExecutorDeps) {
               ),
               runSecrets,
             )
-          : { ids: [] };
-        if (lessonNotes.ids.length > 0) {
-          ctx.state.injectedLessonIds = lessonNotes.ids;
+          : { shown: [] };
+        if (lessonNotes.shown.length > 0) {
           await recordLessonUse(deps.prisma, {
             spaceId: run.spaceId,
             botId: bot.id,
             runId,
-            lessonIds: lessonNotes.ids,
+            lessons: lessonNotes.shown,
           });
         }
         // Recalled facts and notes change every turn, so they ride at the end of the current turn
@@ -2178,7 +2176,9 @@ export function createRunExecutor(executorDeps: ExecutorDeps) {
                     hasImages: Boolean(currentTurnImages?.length),
                   },
                 );
-                ctx.state.steeringClaimed += claimed.length;
+                ctx.state.steeringClaimed += claimed.filter(
+                  (item) => item.origin === "user",
+                ).length;
                 return claimed;
               },
             },

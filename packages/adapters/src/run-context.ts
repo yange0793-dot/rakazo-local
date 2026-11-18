@@ -186,8 +186,6 @@ export interface RunState {
   steeringClaimed: number;
   /** The repeated-call guard stopped this attempt's turn (see stopStuckToolLoop). */
   toolLoopStopped: boolean;
-  /** Lessons whose notes went into this attempt's prompt, settled when the run ends. */
-  injectedLessonIds: string[];
   /**
    * Whether outside content has entered the run. A run someone else started begins tainted,
    * and so does a later attempt, including one with restored untrusted tool results.

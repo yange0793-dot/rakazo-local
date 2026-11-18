@@ -1,5 +1,6 @@
 import { reflectRunJob } from "@rakazo/adapter-kit";
-import { lessonOutcomeCounts, SemanticFactStore, settleLessonUse } from "@rakazo/db";
+import { redactSecrets } from "@rakazo/core";
+import { listClaimedUserSteering, settleLessonUse } from "@rakazo/db";
 import type { RunContext } from "./run-context.js";
 import { isRunTainted } from "./run-context.js";
 import { selfEvolutionEnabled } from "./self-evolution.js";
@@ -20,8 +21,6 @@ export interface RunSignals {
 
 /** One failed tool call is noise; three in one run say the procedure itself went wrong. */
 export const TOOL_ERROR_SIGNAL_MIN = 3;
-/** A lesson that failed this often with no success at all is no longer a hint, so it retires. */
-const FAILURES_BEFORE_RETIRE = 3;
 /** A broken routine retries; one review per six hours is enough to learn from it. */
 const ROUTINE_REVIEW_BACKOFF_MS = 6 * 60 * 60 * 1000;
 
@@ -36,23 +35,13 @@ export async function persistRunTaint(ctx: RunContext): Promise<void> {
       leaseOwner: ctx.workerId,
       leaseFence: ctx.fence,
     },
-    data: { tainted },
+    data: { tainted, learningSourceChecked: true },
   });
-}
-
-/** Only a run that asked for an approval can have a denial to find. */
-async function approvalDenied(ctx: RunContext): Promise<boolean> {
-  if (ctx.state.effects.counts.size === 0) return false;
-  const denied = await ctx.deps.prisma.externalEffect.findFirst({
-    where: { runId: ctx.runId, status: "denied" },
-    select: { id: true },
-  });
-  return denied !== null;
 }
 
 /**
- * What this run is worth learning from, read from the attempt's own state plus one refusal
- * lookup. Off when self-evolution is off: no queries, no queue entries.
+ * The first lease has all its signals in memory. Later leases can follow an approval, a
+ * requeue, or a wait before the first turn, so consult the run's durable records too.
  */
 export async function collectRunSignals(
   ctx: RunContext,
@@ -62,30 +51,48 @@ export async function collectRunSignals(
   if (!selfEvolutionEnabled()) {
     return { outcome, learnableFailure, signals: [], denied: false };
   }
-  const denied = await approvalDenied(ctx);
-  const failedTools = [...ctx.state.reply.toolOutcomes.values()].filter(
-    (value) => value === "failed",
-  ).length;
+  const { prisma } = ctx.deps;
+  const resumed = ctx.fence > 1;
+  const [denial, priorTools, earlierSteering] = await Promise.all([
+    resumed || ctx.state.effects.counts.size
+      ? prisma.externalEffect.findFirst({
+          where: { runId: ctx.runId, status: "denied" },
+          select: { id: true },
+        })
+      : null,
+    resumed
+      ? prisma.event.findMany({
+          where: { runId: ctx.runId, type: "agent.tool.completed" },
+          orderBy: { seq: "desc" },
+          select: { payload: true },
+        })
+      : [],
+    resumed && !ctx.state.steeringClaimed ? listClaimedUserSteering(prisma, ctx.run, 1) : [],
+  ]);
+  let outcomes = ctx.state.reply.toolOutcomes;
+  if (priorTools.length) {
+    // Audit IDs use the same redaction. Prefer this attempt (even if its audit append failed),
+    // then the newest terminal result for each execution. A pause has no tool outcome.
+    outcomes = new Map([...outcomes].map(([id, value]) => [redactSecrets(id, ctx.secrets), value]));
+    for (const { payload } of priorTools) {
+      const tool = payload as { executionId?: string; outcome?: string } | null;
+      if (typeof tool?.executionId !== "string" || outcomes.has(tool.executionId)) continue;
+      if (tool.outcome === "error") outcomes.set(tool.executionId, "failed");
+      if (tool.outcome === "succeeded") outcomes.set(tool.executionId, "succeeded");
+    }
+  }
+  const denied = denial !== null;
+  const failedTools = [...outcomes.values()].filter((value) => value === "failed").length;
   const signals: RunSignal[] = [];
   // Provider, account and rate-limit failures end a run without saying anything about its task.
-  if (outcome === "failed" && learnableFailure && ctx.state.reply.toolOutcomes.size > 0) {
+  if (outcome === "failed" && learnableFailure && outcomes.size > 0) {
     signals.push("run_failed");
   }
   if (denied) signals.push("approval_denied");
   if (failedTools >= TOOL_ERROR_SIGNAL_MIN) signals.push("tool_error");
-  if (ctx.state.steeringClaimed > 0) signals.push("user_steering");
+  if (ctx.state.steeringClaimed > 0 || earlierSteering.length > 0) signals.push("user_steering");
   if (ctx.state.toolLoopStopped) signals.push("stuck_loop");
   return { outcome, learnableFailure, signals, denied };
-}
-
-/** A failed run whose lessons never once helped is retired rather than kept as advice. */
-async function retireFailedLessons(ctx: RunContext, lessonIds: readonly string[]): Promise<void> {
-  const store = new SemanticFactStore(ctx.deps.prisma);
-  for (const lessonId of new Set(lessonIds)) {
-    const counts = await lessonOutcomeCounts(ctx.deps.prisma, lessonId);
-    if (counts.completed > 0 || counts.failed + counts.denied < FAILURES_BEFORE_RETIRE) continue;
-    await store.retireLesson(lessonId, ctx.context);
-  }
 }
 
 async function routineReviewedRecently(ctx: RunContext): Promise<boolean> {
@@ -104,19 +111,20 @@ async function routineReviewedRecently(ctx: RunContext): Promise<boolean> {
 }
 
 /**
- * Run close: settle how this run used its lessons, retire ones that keep failing, and queue a
- * reflection when the run said something worth learning. Called after the run is finalized.
+ * Close exposures across all attempts. A run status cannot establish that a particular hint
+ * helped or hurt, so it never retires a lesson. A correction can still replace or forget it.
  */
 export async function finishRunLearning(ctx: RunContext, signals: RunSignals): Promise<void> {
   if (!selfEvolutionEnabled()) return;
   const { deps, run, runId } = ctx;
-  const lessonIds = ctx.state.injectedLessonIds;
-  if (lessonIds.length > 0) {
-    const outcome =
-      signals.outcome === "failed" ? "failed" : signals.denied ? "denied" : "completed";
-    await settleLessonUse(deps.prisma, { spaceId: run.spaceId, runId, outcome });
-    if (outcome !== "completed") await retireFailedLessons(ctx, lessonIds);
-  }
+  const inconclusive =
+    signals.signals.includes("stuck_loop") ||
+    (signals.outcome === "failed" && !signals.learnableFailure);
+  await settleLessonUse(deps.prisma, {
+    spaceId: run.spaceId,
+    runId,
+    outcome: inconclusive ? null : signals.denied ? "denied" : signals.outcome,
+  });
   // One reflection per run: the replace key absorbs a repeat of the same run.
   if (signals.signals.length === 0) return;
   if (run.trigger === "routine" && run.routineId && (await routineReviewedRecently(ctx))) return;

@@ -367,7 +367,7 @@ export const taskTools: ToolHandlers = {
           : "There is no finished run to review in this chat yet.",
       };
     const existing = await findSkillForRun(deps.prisma, bot.id, target.id);
-    if (existing)
+    if (existing && !run.sourceMessageId)
       return {
         ok: true,
         runId: target.id,
@@ -377,7 +377,7 @@ export const taskTools: ToolHandlers = {
       };
     await deps.jobs.enqueue(
       reflectRunJob(target.id, {
-        // The message asking for this review is not a reaction to the run being reviewed.
+        // The owner may include a specific correction in the message asking for the review.
         ...(run.sourceMessageId ? { exceptMessageId: run.sourceMessageId } : {}),
       }),
     );

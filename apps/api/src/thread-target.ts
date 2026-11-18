@@ -6,7 +6,7 @@ import type {
   SandboxProvider,
 } from "@rakazo/adapter-kit";
 import { runContinueJob, runJobKey } from "@rakazo/adapter-kit";
-import { notifyMemberMessage } from "@rakazo/adapters";
+import { notifyMemberMessage, selfEvolutionEnabled } from "@rakazo/adapters";
 import type { Actor, GroupMember, MessageBlock, ReplyPreview } from "@rakazo/contracts";
 import {
   GROUP_MEMBER_MIN,
@@ -57,6 +57,7 @@ import {
 } from "./artifacts.js";
 import type { ImageAdmissionRun } from "./thread-image-admission.js";
 import { assertThreadImageInput } from "./thread-image-admission.js";
+import { logFeedbackReviewError, reviewExplainedDislike } from "./thread-learning.js";
 import { cancelThreadRuns, finishThreadStop, isStopMessage } from "./thread-stop.js";
 
 export type ThreadTarget =
@@ -1179,5 +1180,19 @@ export async function sendThreadMessage(
     }
   }
   await enqueueRunsNeedingContinue(deps.jobs, [...committed.routineRuns, ...committed.runs]);
+  if (
+    target.kind === "bot" &&
+    committed.message.replyToMessageId &&
+    input.text?.trim() &&
+    selfEvolutionEnabled()
+  ) {
+    await reviewExplainedDislike(
+      deps,
+      actor,
+      target.threadId,
+      committed.message.replyToMessageId,
+      committed.message.seq,
+    ).catch(logFeedbackReviewError);
+  }
   return sendResult(committed.message, committed.runs);
 }

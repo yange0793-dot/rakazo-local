@@ -1,12 +1,8 @@
 import type { JobPublisher } from "@rakazo/adapter-kit";
-import { reflectRunJob, runJobKey } from "@rakazo/adapter-kit";
+import { runJobKey } from "@rakazo/adapter-kit";
+import { selfEvolutionEnabled } from "@rakazo/adapters";
 import type { Actor, MessageBlock, MessageReaction } from "@rakazo/contracts";
-import {
-  ACTIVE_RUN_STATUSES,
-  isTerminal,
-  messageReaction,
-  QUEUE_HOLDING_RUN_STATUSES,
-} from "@rakazo/core";
+import { ACTIVE_RUN_STATUSES, messageReaction, QUEUE_HOLDING_RUN_STATUSES } from "@rakazo/core";
 import type { Prisma, PrismaClient } from "@rakazo/db";
 import {
   answerWaitingRunWithTextInTransaction,
@@ -18,6 +14,7 @@ import {
   touchGroupUpdatedAt,
 } from "@rakazo/db";
 import { getLogger } from "@rakazo/logging";
+import { logFeedbackReviewError, reviewDislikedRun } from "./thread-learning.js";
 import type { ThreadTarget } from "./thread-target.js";
 import {
   cancelSupersededQueuedRuns,
@@ -27,34 +24,6 @@ import {
 } from "./thread-target.js";
 
 const REACTION_TURN_COOLDOWN_MS = 30_000;
-
-/**
- * Mirrors the adapters' self-evolution switch, which this package cannot import. The review job
- * re-reads it too, so a stale read here only costs one no-op enqueue.
- */
-function selfEvolutionEnabled(): boolean {
-  const value = process.env.SELF_EVOLUTION?.trim().toLowerCase();
-  return value === "1" || value === "on" || value === "true";
-}
-
-/**
- * A 👎 on a finished bot message is the one deterministic "that was wrong" signal: it asks for a
- * review of the run that wrote it. Reactions to a run still in flight stay steering only.
- */
-async function reviewDislikedRun(
-  deps: { prisma: PrismaClient; jobs: JobPublisher },
-  actor: Actor,
-  runId: string,
-): Promise<void> {
-  const run = await deps.prisma.run.findFirst({
-    where: { id: runId, spaceId: actor.spaceId },
-    select: { id: true, status: true },
-  });
-  if (!run || !isTerminal(run.status)) return;
-  await deps.jobs
-    .enqueue(reflectRunJob(run.id, { auto: true }))
-    .catch((error) => getLogger().error("reaction reflection enqueue", error));
-}
 
 /**
  * Append a human emoji reply with its target. Any reaction to the bot's latest
@@ -170,7 +139,7 @@ export async function reactToThreadMessage(
     );
   }
   if (committed.dislikeRunId && selfEvolutionEnabled()) {
-    await reviewDislikedRun(deps, actor, committed.dislikeRunId);
+    await reviewDislikedRun(deps, actor, committed.dislikeRunId).catch(logFeedbackReviewError);
   }
   if (releaseTakeover) {
     for (const run of committed.runs) {

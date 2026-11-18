@@ -17,18 +17,33 @@ function fixture(groups: Array<{ outcome: string | null; count: number }> = []) 
 }
 
 describe("lesson usage bookkeeping", () => {
-  it("records each injected lesson once per run and dedupes repeats", async () => {
+  it("records the first shown revisions and lets the run/lesson key absorb repeats", async () => {
     const f = fixture();
     await recordLessonUse(f.db, {
       spaceId: "space-a",
       botId: "bot-a",
       runId: "run-a",
-      lessonIds: ["lesson-1", "lesson-1", "lesson-2"],
+      lessons: [
+        { id: "lesson-1", revision: 2 },
+        { id: "lesson-2", revision: 1 },
+      ],
     });
     expect(f.createMany).toHaveBeenCalledWith({
       data: [
-        { spaceId: "space-a", botId: "bot-a", lessonId: "lesson-1", runId: "run-a" },
-        { spaceId: "space-a", botId: "bot-a", lessonId: "lesson-2", runId: "run-a" },
+        {
+          spaceId: "space-a",
+          botId: "bot-a",
+          lessonId: "lesson-1",
+          firstRevision: 2,
+          runId: "run-a",
+        },
+        {
+          spaceId: "space-a",
+          botId: "bot-a",
+          lessonId: "lesson-2",
+          firstRevision: 1,
+          runId: "run-a",
+        },
       ],
       skipDuplicates: true,
     });
@@ -36,7 +51,7 @@ describe("lesson usage bookkeeping", () => {
       spaceId: "space-a",
       botId: "bot-a",
       runId: "run-a",
-      lessonIds: [],
+      lessons: [],
     });
     expect(f.createMany).toHaveBeenCalledTimes(1);
   });
@@ -45,7 +60,7 @@ describe("lesson usage bookkeeping", () => {
     const f = fixture();
     await settleLessonUse(f.db, { spaceId: "space-a", runId: "run-a", outcome: "denied" });
     expect(f.updateMany).toHaveBeenCalledWith({
-      where: { spaceId: "space-a", runId: "run-a" },
+      where: { spaceId: "space-a", runId: "run-a", settledAt: null },
       data: { outcome: "denied", settledAt: expect.any(Date) },
     });
   });

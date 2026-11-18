@@ -7,7 +7,11 @@ import { expireStuckRun } from "./expire-stuck-run.js";
 import { createThreadMessage, loadRunHistoryMessages } from "./messages.js";
 import { provisionMessagingIdentity } from "./messaging.js";
 import { asSystem, runAsSystem, runAsTenant } from "./row-security.js";
-import { claimSteering, createPendingSteeringRun } from "./thread-steering.js";
+import {
+  claimSteering,
+  createPendingSteeringRun,
+  listClaimedUserSteering,
+} from "./thread-steering.js";
 
 const databaseUrl = process.env.DATABASE_URL;
 const describePostgres =
@@ -153,6 +157,26 @@ describePostgres("steering after a run ends without completing (PostgreSQL)", ()
     await expect(failRun(fixture)).resolves.toEqual({ continuationRunId: null });
 
     expect(await system.steeringMessage.count({ where: { runId: fixture.run.id } })).toBe(0);
+  });
+
+  it("recovers an older claim only while its queue row and the person's message still match", async () => {
+    const { run } = await runSteeredByMessage("running");
+    const steer = await system.steeringMessage.findFirstOrThrow({ where: { runId: run.id } });
+    const claim = await system.event.findFirstOrThrow({
+      where: { runId: run.id, type: "run.steering.claimed" },
+      select: { id: true },
+    });
+    await system.event.update({
+      where: { id: claim.id },
+      data: { payload: { steeringIds: [steer.id], nextMessageSeq: 2 } },
+    });
+    await system.message.update({ where: { id: steer.messageId }, data: { runId: run.id } });
+    const read = () => asOwner(() => listClaimedUserSteering(prisma, run, 20));
+    expect(await read()).toEqual([]);
+    await system.message.update({ where: { id: steer.messageId }, data: { authorUserId: userId } });
+    expect(await read()).toMatchObject([{ id: steer.messageId }]);
+    await system.steeringMessage.delete({ where: { id: steer.id } });
+    expect(await read()).toEqual([]);
   });
 
   it("still continues a message the failed run claimed but never replied to", async () => {

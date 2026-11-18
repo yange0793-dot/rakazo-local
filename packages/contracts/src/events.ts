@@ -5,7 +5,7 @@ import { Id, ThinkingLevelSchema } from "./ids.js";
 import { McpTransportSchema } from "./mcp.js";
 import { McpAppCspSchema } from "./mcp-app.js";
 import { PAGE_TITLE_MAX_LENGTH } from "./pages.js";
-import { LessonEvidenceKindSchema } from "./semantic-memory.js";
+import { LessonEvidenceSchema } from "./semantic-memory.js";
 
 export const ProductEventType = z.enum([
   "thread.message.created",
@@ -322,10 +322,10 @@ export const MessageBlock = z.discriminatedUnion("kind", [
     runId: Id,
     cue: z.string().max(200),
     lesson: z.string().max(600),
-    evidence: z.object({
-      kind: LessonEvidenceKindSchema,
-      quote: z.string().max(300),
-    }),
+    evidence: LessonEvidenceSchema,
+    domainKey: z.string().max(120).optional(),
+    signals: z.array(z.string().max(40)).max(8).optional(),
+    replaces: z.object({ id: Id, expectedRevision: z.number().int().positive() }).optional(),
     status: z.enum(["draft", "saved"]),
   }),
   ChartBlock,

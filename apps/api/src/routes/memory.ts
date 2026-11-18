@@ -140,15 +140,15 @@ export function memoryRoutes(ctx: RouterContext) {
             botId: input.botId,
             cue: draft.block.cue,
             lesson: draft.block.lesson,
+            replaces: draft.block.replaces,
             provenance: {
               kind: "run",
               runId: draft.block.runId,
               threadId: bot.thread.id,
               messageId: draft.messageId,
               harness: {
-                // The draft block carries no domain; empty leaves the memory page's Domain row out.
-                domainKey: "",
-                signals: [],
+                domainKey: draft.block.domainKey ?? "",
+                signals: draft.block.signals ?? [],
                 autoApplied: false,
                 evidence: draft.block.evidence,
               },

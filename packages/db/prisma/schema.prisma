@@ -1293,6 +1293,8 @@ model Run {
   lateSince            DateTime?
   /// Outside content entered this run, or it was not started by its owner. Lesson auto-apply requires false.
   tainted              Boolean           @default(false)
+  /// False on historical runs and when learning was disabled: absence of a taint flag is not clearance.
+  learningSourceChecked Boolean          @default(false)
   completedAt          DateTime?
   botOutcomeReturnedAt DateTime?
   messagingMirroredAt  DateTime?
@@ -1331,6 +1333,8 @@ model LessonUsage {
   space      Space    @relation(fields: [spaceId], references: [id], onDelete: Cascade)
   botId      String
   lessonId   String
+  /// First revision surfaced to this run; legacy rows have no revision evidence.
+  firstRevision Int?
   runId      String
   run        Run      @relation(fields: [runId], references: [id], onDelete: Cascade)
   surfacedAt DateTime @default(now())

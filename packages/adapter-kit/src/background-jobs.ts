@@ -40,7 +40,7 @@ const payloadSchemas = {
       runId: z.string().min(1),
       /** A signal-triggered review writes lessons only; a person-asked one may draft a skill. */
       auto: z.literal(true).optional(),
-      /** The message that asked for the review, excluded from the run's follow-up reading. */
+      /** Legacy name of the message asking for review; the worker verifies the author and thread. */
       exceptMessageId: z.string().min(1).optional(),
     })
     .strict(),

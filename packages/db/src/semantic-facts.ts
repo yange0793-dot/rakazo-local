@@ -769,13 +769,24 @@ export class SemanticFactStore {
         "lesson",
         input.provenance.runId,
         content,
+        ...(input.replaces
+          ? ["correction", input.replaces.id, input.replaces.expectedRevision]
+          : []),
       ]);
       const contentKey = await this.sourceKey(ctx.spaceId, ["lesson-content", content]);
       await this.lockSource(tx, namespace, sourceKey);
       await this.lockSource(tx, namespace, contentKey);
       // A replay of the same run, or the same wording from another run, keeps the first row.
       const bound = await this.boundSource(tx, namespace, sourceKey);
-      if (bound) return factValue(bound);
+      if (bound) {
+        if (!input.replaces) return factValue(bound);
+        return bound.id === input.replaces.id &&
+          bound.revision === input.replaces.expectedRevision + 1 &&
+          bound.status === "active" &&
+          bound.content === content
+          ? factValue(bound)
+          : null;
+      }
       const sameContent = input.replaces ? null : await this.boundSource(tx, namespace, contentKey);
       if (sameContent) return factValue(sameContent);
       const source: Source = {

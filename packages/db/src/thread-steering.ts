@@ -109,14 +109,6 @@ async function claimSteeringOnce(
       where: { id: input.threadId },
       select: { nextMessageSeq: true },
     });
-    await appendEventInTransaction(tx, {
-      threadId: input.threadId,
-      spaceId: run.spaceId,
-      botId: input.botId,
-      runId: input.runId,
-      type: "run.steering.claimed",
-      payload: { steeringIds: steering.map((item) => item.id), nextMessageSeq },
-    });
     // In a group chat the row's user is the bot's owner, not the sender, so the sender is
     // matched by the address it wrote from.
     const groupSenders = steering.flatMap((item) =>
@@ -146,7 +138,7 @@ async function claimSteeringOnce(
         ? ownAddresses.has(`${group.provider}:${group.fromAddress}`)
         : item.userId === run.userId;
     };
-    return steering.map((item) => ({
+    const claimed = steering.map((item) => ({
       id: item.id,
       messageId: item.messageId,
       text: blocksToAgentHistoryText(item.message.blocks as MessageBlock[]),
@@ -160,7 +152,68 @@ async function claimSteeringOnce(
               ? ("messaging" as const)
               : ("member" as const),
     }));
+    await appendEventInTransaction(tx, {
+      threadId: input.threadId,
+      spaceId: run.spaceId,
+      botId: input.botId,
+      runId: input.runId,
+      type: "run.steering.claimed",
+      payload: {
+        steeringIds: claimed.map((item) => item.id),
+        nextMessageSeq,
+        // Finalization consumes the queue rows. Keep links to the person's messages, not copies.
+        userMessageIds: claimed
+          .filter((item) => item.origin === "user")
+          .map((item) => item.messageId),
+      },
+    });
+    return claimed;
   }, THREAD_LOCK_TRANSACTION_OPTIONS);
+}
+
+/** The run's own person's words, including steering consumed before an approval or requeue. */
+export async function listClaimedUserSteering(
+  prisma: PrismaClient,
+  run: { id: string; threadId: string; userId: string },
+  take: number,
+) {
+  const claims = await prisma.event.findMany({
+    where: { runId: run.id, threadId: run.threadId, type: "run.steering.claimed" },
+    select: { payload: true },
+  });
+  const messageIds = new Set<string>();
+  const legacyIds = new Set<string>();
+  for (const { payload } of claims) {
+    const claim = payload as { userMessageIds?: unknown; steeringIds?: unknown } | null;
+    const current = Array.isArray(claim?.userMessageIds);
+    const ids = current ? claim?.userMessageIds : claim?.steeringIds;
+    if (Array.isArray(ids)) {
+      for (const id of ids) if (typeof id === "string") (current ? messageIds : legacyIds).add(id);
+    }
+  }
+  if (!messageIds.size && !legacyIds.size) return [];
+  // Older events named only queue rows. A surviving row plus the message author can establish
+  // its source. A timestamp, or even a message's runId, cannot establish that it was claimed.
+  return prisma.message.findMany({
+    where: {
+      threadId: run.threadId,
+      role: "user",
+      OR: [
+        { id: { in: [...messageIds] } },
+        ...(legacyIds.size
+          ? [
+              {
+                authorUserId: run.userId,
+                steeringMessages: { some: { id: { in: [...legacyIds] } } },
+              },
+            ]
+          : []),
+      ],
+    },
+    orderBy: { seq: "desc" },
+    take,
+    select: { id: true, blocks: true },
+  });
 }
 
 export async function discardAnsweredSteering(
