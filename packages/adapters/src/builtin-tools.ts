@@ -34,6 +34,7 @@ import { SCHEDULE_TIMING_FIELDS } from "./schedule-tools.js";
 import { SCRATCHPAD_NOTES_MAX_LENGTH, SCRATCHPAD_TITLE_MAX_LENGTH } from "./scratchpad-tools.js";
 import { messageUserMaxLength } from "./user-progress.js";
 import { MAX_WEB_FETCH_OFFSET } from "./web-limits.js";
+import { WORK_IMPROVEMENT_FAMILIES } from "./work-improvement-families.js";
 
 // The owner flag can land in process.env after static imports run (loadRootEnv
 // parses .env once the entry module is already executing), so the model-facing
@@ -51,7 +52,7 @@ function secretAskToolSurface() {
       allowPrivateHttpOrigins
         ? "HTTPS origin, or an HTTP origin on a private LAN host"
         : "HTTPS origin"
-    }, or connectionId for a one-use connector code. Names start with a lowercase letter and use only lowercase letters, digits, hyphens or underscores (max 64). For a saved website login use auth {type:"login"} with the sign-in form's HTTPS origin and the labels the site signs in with (default Username and Password); the card asks for each and browser_act fill_secret types one by its label. Hidden fields take text only in a password field; a field labelled ID, phone, email or username starts visible and any other hidden, so label each by what the site calls it. If one is refused, ask again with replace true so the user can make it visible. A login the user does not save works only until this run ends; the result says saved false, so never say it was saved. For a value this bot's shell commands need, use auth {type:"command"} with no origin; it reaches them as an environment variable named after the credential in upper case with hyphens as underscores (netbird-setup-key becomes $NETBIRD_SETUP_KEY). Use auth {type:"card"} for a payment card, seen only as brand, last four and expiry, and {type:"contact"} for an address, phone or email named for who or where (home, mom); neither has an origin. Existing credentials and a site's saved login are reused unless replace is true. A sign-in without a password, such as fields ["ID number","Phone"], still uses auth {type:"login"}; never ask for those in chat or on the screen. For a code the site texted or emailed, use oneTimeCode {origin} with the page's origin: you never see it, browser_act fill_code types it, and a wrong or new code needs a new request. Never ask for a code in chat. For CAPTCHA, passkeys or anything else needing the live desktop, call request_takeover.`,
+    }, or connectionId for a one-use connector code. Names start with a lowercase letter and use only lowercase letters, digits, hyphens or underscores (max 64). For a saved website login use auth {type:"login"} with the sign-in form's HTTPS origin and the labels the site signs in with (default Username and Password); the card asks for each and browser_act fill_secret types one by its label. The user decides which fields are hidden: a hidden field takes text only in a password field; a field labelled ID, phone, email or username starts visible and any other hidden, so label each by what the site calls it. If one is refused, ask again with replace true so the user can make it visible. The user may choose not to save a login: the result then says saved false, the login works only until this run ends, so never say it was saved. For a value this bot's shell commands need, use auth {type:"command"} with no origin; it reaches them as an environment variable named after the credential in upper case with hyphens as underscores (netbird-setup-key becomes $NETBIRD_SETUP_KEY). Use auth {type:"card"} for a payment card, seen only as brand, last four and expiry, and {type:"contact"} for an address, phone or email named for who or where (home, mom); neither has an origin. Existing credentials and a site's saved login are reused unless replace is true. A sign-in without a password, such as fields ["ID number","Phone"], still uses auth {type:"login"}; never ask for those in chat or on the screen. For a code the site texted or emailed, use oneTimeCode {origin} with the page's origin: you never see it, browser_act fill_code types it, and a wrong or new code needs a new request. Never ask for a code in chat. For CAPTCHA, passkeys or anything else needing the live desktop, call request_takeover.`,
     inputSchema: {
       oneOf: [
         {
@@ -1577,7 +1578,10 @@ export const builtinAgentTools: ConnectorTool[] = [
         skillId: { type: "string" },
         taughtSkillId: { type: "string" },
         expectedRevisionId: { type: "string" },
-        improvementFamily: { type: "string", enum: ["file-delivery"] },
+        improvementFamily: {
+          type: "string",
+          enum: WORK_IMPROVEMENT_FAMILIES.map((family) => family.id),
+        },
         projectPath: { type: "string" },
         newName: { type: "string" },
         description: { type: "string" },

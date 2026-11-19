@@ -90,6 +90,7 @@ import { USER_COMPUTER_TOOLS, userComputerGate } from "./run-tools-user-computer
 import { connectorTrustKeys } from "./run-trust.js";
 import { watchFromTool } from "./schedule-tools.js";
 import { pagePaymentPrecheck, paysWithWallet } from "./spending-gate.js";
+import { announceTicketAttention } from "./ticket-attention.js";
 import { refusal } from "./tool-refusal.js";
 
 export type AppliedEffect = Awaited<ReturnType<typeof recordEffect>>;
@@ -976,6 +977,7 @@ async function showApprovalCard(ctx: RunContext, call: ToolCall, card: ApprovalC
   if (!paused) {
     throw new Error("Could not pause this run for approval; try sending again.");
   }
+  await announceTicketAttention(deps, run, { waitId: ctx.attempt.id, needs: "approval" });
   await enqueueSteeringContinuation(deps, paused.continuationRunId);
   await notifyRun(deps, run, {
     kind: "help",

@@ -980,17 +980,17 @@ function metrics(runs: WorkImprovementRun[]): WorkImprovementMetrics {
   };
 }
 
-export async function compareWorkImprovement(
-  rawInput: WorkImprovementInput,
-  deps: WorkImprovementDeps,
-): Promise<WorkImprovementComparison> {
-  const input = InputSchema.parse(rawInput);
-  if (new Set(input.cases.map((fixture) => fixture.id)).size !== input.cases.length)
+/** Case-set rules every comparison enforces; exported so a new family can be checked offline. */
+export function validateWorkImprovementCases(
+  cases: WorkImprovementCase[],
+  outputContract: WorkImprovementInput["outputContract"],
+): void {
+  if (new Set(cases.map((fixture) => fixture.id)).size !== cases.length)
     throw new Error("Case ids must be unique.");
-  for (const fixture of input.cases) {
+  for (const fixture of cases) {
     if (
       ![fixture.expected, ...(fixture.alsoAccepted ?? [])].every((answer) =>
-        matchesContract(answer, input.outputContract),
+        matchesContract(answer, outputContract),
       )
     )
       throw new Error("Expected answers must match the public output contract.");
@@ -1015,6 +1015,35 @@ export async function compareWorkImprovement(
         throw new Error("A material path cannot be both a file and a directory.");
     }
   }
+}
+
+// A refused model call, or a reply that wraps its answer in prose, says nothing about the
+// playbook, so that arm gets one fresh try before its case is left undecided.
+async function runArm(
+  input: WorkImprovementInput,
+  fixture: WorkImprovementCase,
+  revision: WorkImprovementInput["baseline"],
+  deps: WorkImprovementDeps,
+  scripted: boolean,
+  maxTokens: number,
+): Promise<WorkImprovementRun> {
+  const first = await runCase(input, fixture, revision, deps, scripted, maxTokens);
+  const refused = first.errors.some((error) => error.code === "upstream_error");
+  const onlyMisformatted =
+    first.errors.length > 0 && first.errors.every((error) => error.code === "invalid_output");
+  if (!refused && !onlyMisformatted) return first;
+  return {
+    ...(await runCase(input, fixture, revision, deps, scripted, maxTokens)),
+    previousAttempt: first,
+  };
+}
+
+export async function compareWorkImprovement(
+  rawInput: WorkImprovementInput,
+  deps: WorkImprovementDeps,
+): Promise<WorkImprovementComparison> {
+  const input = InputSchema.parse(rawInput);
+  validateWorkImprovementCases(input.cases, input.outputContract);
   const createdAt = new Date().toISOString();
   const descriptor = deps.runtime.describe();
   const scripted = descriptor.capabilities.scripted;
@@ -1031,23 +1060,9 @@ export async function compareWorkImprovement(
     cases.push(
       ...(await Promise.all(
         input.cases.slice(start, start + CASE_CONCURRENCY).map(async (fixture) => {
-          // A refused model call, or a reply that wraps its answer in prose, says nothing about the
-          // playbook, so that arm gets one fresh try before its case is left undecided.
-          const arm = async (revision: WorkImprovementInput["baseline"]) => {
-            const first = await runCase(input, fixture, revision, deps, scripted, maxTokens);
-            const refused = first.errors.some((error) => error.code === "upstream_error");
-            const onlyMisformatted =
-              first.errors.length > 0 &&
-              first.errors.every((error) => error.code === "invalid_output");
-            if (!refused && !onlyMisformatted) return first;
-            return {
-              ...(await runCase(input, fixture, revision, deps, scripted, maxTokens)),
-              previousAttempt: first,
-            };
-          };
           const [baseline, candidate] = await Promise.all([
-            arm(input.baseline),
-            arm(input.candidate),
+            runArm(input, fixture, input.baseline, deps, scripted, maxTokens),
+            runArm(input, fixture, input.candidate, deps, scripted, maxTokens),
           ]);
           return { ...fixture, inputHash: hash(canonicalJson(fixture.input)), baseline, candidate };
         }),
@@ -1218,4 +1233,29 @@ export function summarizeWorkImprovementHistory(
         candidateToolCalls: fixture.candidate.tools.length,
       })),
   });
+}
+
+/** One revision on a held-out case set, for checking a chosen version outside the A/B. */
+export async function evaluateWorkImprovementRevision(
+  input: WorkImprovementInput,
+  revision: WorkImprovementInput["baseline"],
+  deps: WorkImprovementDeps,
+): Promise<Array<{ fixture: WorkImprovementCase; run: WorkImprovementRun }>> {
+  validateWorkImprovementCases(input.cases, input.outputContract);
+  const scripted = deps.runtime.describe().capabilities.scripted;
+  const modelOutputLimit =
+    input.execution.model.maxTokens ??
+    Math.max(1, Math.floor(input.execution.budget.maxTotalTokens / 2));
+  const maxTokens = Math.min(modelOutputLimit, input.execution.budget.maxTotalTokens);
+  const results: Array<{ fixture: WorkImprovementCase; run: WorkImprovementRun }> = [];
+  for (let start = 0; start < input.cases.length; start += CASE_CONCURRENCY)
+    results.push(
+      ...(await Promise.all(
+        input.cases.slice(start, start + CASE_CONCURRENCY).map(async (fixture) => ({
+          fixture,
+          run: await runArm(input, fixture, revision, deps, scripted, maxTokens),
+        })),
+      )),
+    );
+  return results;
 }

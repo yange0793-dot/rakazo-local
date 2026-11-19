@@ -39,6 +39,7 @@ import {
   tryCompleteConnectionWithCode,
 } from "./run-secret.js";
 import type { ToolHandlers } from "./run-tool-gate.js";
+import { announceTicketAttention } from "./ticket-attention.js";
 
 /** Saved credentials and protected input. */
 export const secretTools: ToolHandlers = {
@@ -374,6 +375,7 @@ export const secretTools: ToolHandlers = {
     if (!paused) {
       throw new Error("Could not pause this run for protected input; try sending again.");
     }
+    await announceTicketAttention(deps, run, { waitId: ctx.attempt.id, needs: "answer" });
     await enqueueSteeringContinuation(deps, paused.continuationRunId);
     await notifyRun(deps, run, {
       kind: "help",

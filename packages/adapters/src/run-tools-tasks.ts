@@ -52,6 +52,7 @@ import {
   updateTicket,
 } from "./ticket-tools.js";
 import { refusal } from "./tool-refusal.js";
+import { workImprovementFamily } from "./work-improvement-families.js";
 
 /** A command watch may not run what the desktop guard keeps the bot from running itself. */
 function commandWatchGuardError(ctx: RunContext, watch: unknown): string | undefined {
@@ -420,7 +421,14 @@ export const taskTools: ToolHandlers = {
           error: "Read the saved skill's current revision before reverting it.",
         });
       }
-      if (args.improvementFamily === "file-delivery") {
+      const family =
+        typeof args.improvementFamily === "string"
+          ? workImprovementFamily(args.improvementFamily)
+          : undefined;
+      if (args.improvementFamily !== undefined && !family) {
+        return call.finish({ error: "Unsupported improvement family." });
+      }
+      if (family) {
         if (!ctx.bot.computer || typeof args.projectPath !== "string" || !args.projectPath.trim()) {
           return call.finish({
             error: "Choose the project directory for this skill's comparison pilot.",
@@ -436,7 +444,7 @@ export const taskTools: ToolHandlers = {
             skillId: skill.id,
             scope: {
               project: { computerId: ctx.bot.computer.id, path: args.projectPath.trim() },
-              taskFamilies: ["file-delivery"],
+              taskFamilies: [family.id],
             },
           }),
         });

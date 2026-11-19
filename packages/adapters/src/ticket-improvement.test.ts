@@ -21,7 +21,7 @@ import {
 import { attachWorkspaceFileToThread } from "./thread-artifacts.js";
 import type { TicketImprovementDeps } from "./ticket-improvement.js";
 import {
-  FILE_DELIVERY_IMPROVER_REVISION,
+  CURRENT_IMPROVER,
   parseTicketImprovementProposal,
   reflectTicketImprovement,
 } from "./ticket-improvement.js";
@@ -459,7 +459,7 @@ describe("ticket improvement actual isolated comparison", () => {
     expect(result).toMatchObject({
       status: "adopted",
       calibration: { kind: "fixed_synthetic" },
-      improverRevision: FILE_DELIVERY_IMPROVER_REVISION,
+      improverRevision: CURRENT_IMPROVER,
       comparison: {
         decision: "adopt",
         summary: {

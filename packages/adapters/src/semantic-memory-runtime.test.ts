@@ -718,12 +718,20 @@ describe("executor lesson integration", () => {
     expect(request.history.some((message) => message.content.includes("<your_notes>"))).toBe(false);
     expect(request.instructions).toContain("Blocks tagged <recalled_memory> or <your_notes>");
     expect(lessonUsage.createMany).toHaveBeenCalledExactlyOnceWith({
-      data: [{ spaceId: "space-1", botId: "bot-1", lessonId: "lesson-1", runId: "run-1" }],
+      data: [
+        {
+          spaceId: "space-1",
+          botId: "bot-1",
+          lessonId: "lesson-1",
+          firstRevision: 3,
+          runId: "run-1",
+        },
+      ],
       skipDuplicates: true,
     });
     // The close settles the use, and a clean run queues no review.
     expect(lessonUsage.updateMany).toHaveBeenCalledExactlyOnceWith({
-      where: { spaceId: "space-1", runId: "run-1" },
+      where: { spaceId: "space-1", runId: "run-1", settledAt: null },
       data: { outcome: "completed", settledAt: expect.any(Date) },
     });
     expect(enqueue.mock.calls.map(([job]) => (job as { name: string }).name)).not.toContain(

@@ -93,6 +93,7 @@ import {
 } from "./silent-reply.js";
 import { isStrategicInitiativeRun } from "./strategic-initiative.js";
 import { takeoverCheckpointOf } from "./takeover-resume.js";
+import { announceTicketAttention } from "./ticket-attention.js";
 import {
   appendToolCompletionAudit,
   logLoopGuardStop,
@@ -454,6 +455,7 @@ async function pauseForAnswer(ctx: RunContext, event: RuntimeEvent<"ask">) {
     offeredActions: event.actions,
   });
   if (!paused) return;
+  await announceTicketAttention(deps, run, { waitId: ctx.attempt.id, needs: "answer" });
   await enqueueSteeringContinuation(deps, paused.continuationRunId);
   await notifyRun(deps, run, {
     kind: "help",
@@ -520,6 +522,7 @@ async function pauseForTakeover(ctx: RunContext, event: RuntimeEvent<"takeover">
     return;
   }
   ctx.state.lease.retainComputer = true;
+  await announceTicketAttention(deps, run, { waitId: ctx.attempt.id, needs: "takeover" });
   await notifyRun(deps, run, {
     kind: "takeover",
     title: `${displayName(bot.name, "Bot")} needs you on the screen`,
