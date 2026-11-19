@@ -1,6 +1,7 @@
 import type { WorkImprovementCase, WorkImprovementInput } from "./work-improvement.js";
 import { FILE_DELIVERY_PILOT, fileDeliveryPilotCases } from "./work-improvement-pilot-cases.js";
 import { RELEASE_CHECK_PILOT, releaseCheckPilotCases } from "./work-improvement-release-cases.js";
+import { RESEARCH_CHECK_PILOT, researchCheckPilotCases } from "./work-improvement-research-cases.js";
 
 /** One class of work a taught skill can be enrolled in and measured against. */
 export interface WorkImprovementFamily {
@@ -22,6 +23,12 @@ export const WORK_IMPROVEMENT_FAMILIES: readonly WorkImprovementFamily[] = [
     caseSet: { id: RELEASE_CHECK_PILOT.id, revision: RELEASE_CHECK_PILOT.revision },
     outputContract: RELEASE_CHECK_PILOT.outputContract,
     cases: releaseCheckPilotCases,
+  },
+  {
+    id: RESEARCH_CHECK_PILOT.id,
+    caseSet: { id: RESEARCH_CHECK_PILOT.id, revision: RESEARCH_CHECK_PILOT.revision },
+    outputContract: RESEARCH_CHECK_PILOT.outputContract,
+    cases: researchCheckPilotCases,
   },
 ];
 
