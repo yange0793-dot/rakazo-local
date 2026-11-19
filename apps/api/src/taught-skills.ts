@@ -27,6 +27,7 @@ import {
   recordTeachingInputEvent,
   releaseComputerExecutionLease,
   releaseTeachingComputerControlForBot,
+  saveTaughtSkillRevision,
   scheduleComputerControlExpiry,
   screenLeaseIdForRun,
   teachingControlLeaseExpiresAt,
@@ -504,17 +505,27 @@ export function createTaughtSkillsService(deps: TaughtSkillsDeps) {
       if (skill.status !== "draft" && skill.status !== "saved") {
         throw new ORPCError("BAD_REQUEST", { message: "Skill is not editable yet" });
       }
-      const row = await deps.prisma.taughtSkill.update({
-        where: { id: skill.id },
-        // The editor owns the playbook now, so routines run it only on the editor's accounts.
-        data: {
-          userId: actor.userId,
-          ...handedOver(skill, actor),
-          name: input.name ?? skill.name,
-          playbook: input.playbook as never,
-          status: skill.status === "saved" ? "saved" : "draft",
-        },
-      });
+      let row: TaughtSkillRow;
+      if (skill.status === "saved") {
+        await saveTaughtSkillRevision(deps.prisma, actor, {
+          skillId: skill.id,
+          name: input.name,
+          playbook: input.playbook,
+        });
+        row = await getOwnedSkill(deps, actor, skill.id);
+      } else {
+        row = await deps.prisma.taughtSkill.update({
+          where: { id: skill.id },
+          // The editor owns the playbook now, so routines run it only on the editor's accounts.
+          data: {
+            userId: actor.userId,
+            ...handedOver(skill, actor),
+            name: input.name ?? skill.name,
+            playbook: input.playbook as never,
+            status: "draft",
+          },
+        });
+      }
       await updateSkillDraftMessage(deps, actor, row, {
         name: row.name,
         playbook: parsePlaybook(row.playbook),
@@ -528,15 +539,11 @@ export function createTaughtSkillsService(deps: TaughtSkillsDeps) {
       if (skill.status !== "draft" && skill.status !== "saved") {
         throw new ORPCError("BAD_REQUEST", { message: "Finish recording before saving" });
       }
-      const row = await deps.prisma.taughtSkill.update({
-        where: { id: skill.id },
-        data: {
-          userId: actor.userId,
-          ...handedOver(skill, actor),
-          status: "saved",
-          name: name ?? (skill.name || skill.goal.slice(0, 80)),
-        },
+      await saveTaughtSkillRevision(deps.prisma, actor, {
+        skillId: skill.id,
+        name: name ?? (skill.name || skill.goal.slice(0, 80)),
       });
+      const row = await getOwnedSkill(deps, actor, skill.id);
       const bot = await deps.prisma.bot.findUnique({
         where: { id: row.botId },
         include: { thread: true },

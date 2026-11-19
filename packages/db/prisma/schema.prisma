@@ -645,6 +645,8 @@ model Space {
   scratchpadItems             ScratchpadItem[]
   botEmailMessages            BotEmailMessage[]
   taughtSkills                TaughtSkill[]
+  taughtSkillRevisions         TaughtSkillRevision[]
+  runTaughtSkillRevisions      RunTaughtSkillRevision[]
   agentSkills                 AgentSkill[]
   agentImports                AgentImport[]
   connections                 Connection[]
@@ -1149,6 +1151,7 @@ model Thread {
   tasks                       Task[]
   runs                        Run[]
   routines                    Routine[]
+  originTickets               Ticket[]   @relation("TicketOriginThread")
   archiveProgress             MemoryArchiveProgress?
 
   @@index([spaceId])
@@ -1196,6 +1199,7 @@ model Message {
   clientNonce      String?
   /// Blind-index search tokens for the encrypted blocks; NULL until the row is encrypted.
   searchTokens     Int[]
+  originTickets         Ticket[]          @relation("TicketOriginMessage")
   sourceRuns            Run[]             @relation("RunSourceMessage")
   externalTranscriptFor  ExternalMessage?
   steeringMessages SteeringMessage[]
@@ -1296,6 +1300,9 @@ model Run {
   /// False on historical runs and when learning was disabled: absence of a taint flag is not clearance.
   learningSourceChecked Boolean          @default(false)
   completedAt          DateTime?
+  ticketId             String?
+  ticket               Ticket?           @relation("TicketExecutions", fields: [ticketId], references: [id], onDelete: SetNull)
+  startedTickets       Ticket[]          @relation("TicketOriginRun")
   botOutcomeReturnedAt DateTime?
   messagingMirroredAt  DateTime?
   teamChatMirroredAt   DateTime?
@@ -1306,11 +1313,13 @@ model Run {
   steeringMessages     SteeringMessage[]
   externalMessage      ExternalMessage?
   lessonUsages         LessonUsage[]
+  taughtSkillRevisions  RunTaughtSkillRevision[]
 
   @@unique([spaceId, clientNonce])
   @@index([status, wakeAt])
   @@index([status, leaseExpiresAt])
   @@index([status, updatedAt, id])
+  @@index([ticketId])
   @@index([trigger, status, messagingMirroredAt, updatedAt])
   @@index([trigger, status, teamChatMirroredAt, updatedAt])
   @@index([spaceId, botId])
@@ -1669,6 +1678,11 @@ model TaughtSkill {
   goal      String
   status    String
   playbook  Json      @default("{}")
+  // Null until a saved legacy skill is first snapshotted by revision-aware code.
+  currentRevisionId String?
+  // Changes on every activation or rollback, so a pre-rollback trial cannot pass CAS again.
+  currentRevisionGeneration Int @default(0)
+  currentRevision TaughtSkillRevision? @relation("TaughtSkillCurrentRevision", fields: [currentRevisionId, spaceId, id], references: [id, spaceId, skillId], onDelete: NoAction, onUpdate: NoAction)
   recording Json      @default("{\"events\":[],\"snapshots\":[]}")
   startedAt DateTime?
   expiresAt DateTime?
@@ -1681,6 +1695,49 @@ model TaughtSkill {
   // Partial unique index taught_skills_botId_recording_key is created in SQL:
   // one recording session per bot.
   @@map("taught_skills")
+}
+
+/// Append-only playbooks. skillId and botId are historical identities, not cascading relations.
+model TaughtSkillRevision {
+  id                 String @id @default(cuid())
+  spaceId            String
+  space              Space @relation(fields: [spaceId], references: [id], onDelete: Cascade)
+  skillId            String
+  botId              String
+  userId             String
+  previousRevisionId String?
+  previousRevision   TaughtSkillRevision? @relation("TaughtSkillPreviousRevision", fields: [previousRevisionId, spaceId, skillId], references: [id, spaceId, skillId], onDelete: NoAction, onUpdate: NoAction)
+  nextRevisions      TaughtSkillRevision[] @relation("TaughtSkillPreviousRevision")
+  activeSkills       TaughtSkill[] @relation("TaughtSkillCurrentRevision")
+  runPins            RunTaughtSkillRevision[]
+  /// Encrypted JSON: name, goal, playbook, explicit scope and optional trial evidence.
+  snapshot           Json
+  createdAt          DateTime @default(now())
+
+  @@unique([id, spaceId, skillId])
+  @@index([spaceId, skillId, createdAt, id])
+  @@map("taught_skill_revisions")
+}
+
+/// The first skill snapshot a run used. It survives skill removal and is never repinned.
+model RunTaughtSkillRevision {
+  id         String @id @default(cuid())
+  spaceId    String
+  space      Space @relation(fields: [spaceId], references: [id], onDelete: Cascade)
+  userId     String
+  botId      String
+  runId      String
+  run        Run @relation(fields: [runId], references: [id], onDelete: Cascade)
+  skillId    String
+  revisionId String
+  revision   TaughtSkillRevision @relation(fields: [revisionId, spaceId, skillId], references: [id, spaceId, skillId], onDelete: NoAction, onUpdate: NoAction)
+  /// Encrypted full revision envelope, including the original timestamp and author.
+  snapshot   Json
+  pinnedAt   DateTime @default(now())
+
+  @@unique([runId, skillId])
+  @@index([spaceId, botId])
+  @@map("run_taught_skill_revisions")
 }
 
 model AgentImport {
@@ -2635,6 +2692,17 @@ model Ticket {
   updatedAt       DateTime  @updatedAt
   completedAt       DateTime?
   comments        TicketComment[]
+  originKey       String?   @unique
+  originThreadId  String?
+  originThread    Thread?   @relation("TicketOriginThread", fields: [originThreadId], references: [id], onDelete: SetNull)
+  originMessageId String?
+  originMessage   Message?  @relation("TicketOriginMessage", fields: [originMessageId], references: [id], onDelete: SetNull)
+  originRunId     String?
+  originRun       Run?      @relation("TicketOriginRun", fields: [originRunId], references: [id], onDelete: SetNull)
+  executions      Run[]     @relation("TicketExecutions")
+  receiptVersion  Int       @default(0)
+
+  @@index([originThreadId, updatedAt])
 
   @@unique([boardId, number])
   @@index([spaceId, status])

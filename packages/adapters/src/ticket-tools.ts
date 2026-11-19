@@ -16,6 +16,8 @@ import {
   toTicketDto,
 } from "@rakazo/db";
 import type { TicketChangeNotifier } from "./ticket-changes.js";
+import { ticketReceiptsEnabled } from "./ticket-receipt-config.js";
+import { prepareTicketRun } from "./ticket-wake.js";
 
 type TicketToolDeps = {
   prisma: PrismaClient;
@@ -157,6 +159,9 @@ export async function getTicket(deps: TicketToolDeps, input: { spaceId: string; 
   return {
     ticket: toTicketDto(row, board.ticketPrefix),
     comments: comments.map(toTicketCommentDto),
+    ...(row.originKey && ticketReceiptsEnabled()
+      ? { delivery: { previousVersion: row.receiptVersion } }
+      : {}),
   };
 }
 
@@ -170,6 +175,7 @@ export async function createTicket(
     description?: string;
     priority?: string;
     ownerBotId?: string;
+    origin?: { threadId: string; messageId: string; runId: string; key: string };
   },
 ) {
   if (!deps.ticketBoardEnabled) return { error: "Board unavailable." };
@@ -181,13 +187,76 @@ export async function createTicket(
   const data = parsed.data;
   if (!(await ownBotInSpace(deps, input, data.assigneeBotId))) return { error: "Unknown bot." };
   const board = await ensureBoard(deps.prisma, input.spaceId);
-  const row = await deps.prisma.$transaction(async (tx) => {
+  const origin = ticketReceiptsEnabled() ? input.origin : undefined;
+  const result = await deps.prisma.$transaction(async (tx) => {
+    if (origin) {
+      await tx.$queryRaw`SELECT id FROM boards WHERE id = ${board.id} FOR UPDATE`;
+      const sourceRun = await tx.run.findFirst({
+        where: {
+          id: origin.runId,
+          spaceId: input.spaceId,
+          threadId: origin.threadId,
+          botId: input.botId,
+          bot: { userId: input.userId, archivedAt: null },
+          userId: input.userId,
+          sourceMessageId: origin.messageId,
+          sourceMessage: {
+            threadId: origin.threadId,
+            role: "user",
+            authorUserId: input.userId,
+          },
+          thread: {
+            externalConversationId: null,
+            OR: [
+              { botId: input.botId, bot: { userId: input.userId, archivedAt: null } },
+              { group: { archivedAt: null, members: { some: { botId: input.botId } } } },
+            ],
+          },
+        },
+        select: { ticketId: true },
+      });
+      if (!input.botId || !sourceRun)
+        return { error: "Ticket source does not match its execution." } as const;
+      const existing = await tx.ticket.findFirst({
+        where: { spaceId: input.spaceId, originKey: origin.key },
+      });
+      if (existing) {
+        if (
+          existing.originRunId !== origin.runId ||
+          existing.originMessageId !== origin.messageId ||
+          existing.createdByBotId !== input.botId ||
+          existing.createdByUserId !== input.userId
+        ) {
+          return { error: "Ticket creation key belongs to another request." } as const;
+        }
+        if (existing.assigneeBotId === input.botId) {
+          if (sourceRun.ticketId && sourceRun.ticketId !== existing.id) {
+            return { error: "This execution already belongs to another ticket." } as const;
+          }
+          await tx.run.update({ where: { id: origin.runId }, data: { ticketId: existing.id } });
+        }
+        return { row: existing, reused: true, preparedRunId: undefined };
+      }
+      if (data.assigneeBotId === input.botId && sourceRun.ticketId) {
+        return {
+          error: "This execution already belongs to a ticket. Update that ticket instead.",
+        } as const;
+      }
+    }
     const number = await allocateTicketNumber(tx, board.id);
-    return tx.ticket.create({
+    const row = await tx.ticket.create({
       data: {
         boardId: board.id,
         spaceId: input.spaceId,
         number,
+        ...(origin
+          ? {
+              originKey: origin.key,
+              originThreadId: origin.threadId,
+              originMessageId: origin.messageId,
+              originRunId: origin.runId,
+            }
+          : {}),
         title: data.title,
         description: data.description ?? null,
         priority: data.priority,
@@ -196,15 +265,34 @@ export async function createTicket(
         createdByUserId: input.userId,
       },
     });
+    if (origin && row.assigneeBotId === input.botId) {
+      await tx.run.update({ where: { id: origin.runId }, data: { ticketId: row.id } });
+    }
+    const next =
+      origin && row.assigneeBotId && row.assigneeBotId !== input.botId
+        ? await prepareTicketRun(tx, {
+            spaceId: input.spaceId,
+            ticketId: row.id,
+            botId: row.assigneeBotId,
+          })
+        : null;
+    return { row, preparedRunId: next?.id, reused: false };
   });
-  await deps.onTicketChange?.({
-    spaceId: input.spaceId,
-    boardId: board.id,
-    ticketId: row.id,
-    assigneeBotId: row.assigneeBotId,
-    wakeAssignee: row.assigneeBotId !== input.botId,
-  });
-  return { ticket: toTicketDto(row, board.ticketPrefix) };
+  if (result.error) return { error: result.error };
+  const { row, preparedRunId, reused } = result;
+  if (!reused)
+    await deps.onTicketChange?.({
+      spaceId: input.spaceId,
+      boardId: board.id,
+      ticketId: row.id,
+      assigneeBotId: row.assigneeBotId,
+      wakeAssignee: !origin && row.assigneeBotId !== input.botId,
+      preparedRunId,
+    });
+  return {
+    ticket: toTicketDto(row, board.ticketPrefix),
+    ...(origin ? { delivery: { previousVersion: row.receiptVersion } } : {}),
+  };
 }
 
 export async function updateTicket(
@@ -219,6 +307,7 @@ export async function updateTicket(
     priority?: string | null;
     status?: string;
     ownerBotId?: string;
+    runId?: string;
   },
 ) {
   if (!deps.ticketBoardEnabled) return { error: "Board unavailable." };
@@ -234,6 +323,35 @@ export async function updateTicket(
       where: { id: data.id, spaceId: input.spaceId, boardId: board.id },
     });
     if (!current) return null;
+    if (
+      input.botId &&
+      current.originKey &&
+      ticketReceiptsEnabled() &&
+      data.status &&
+      isTicketCompletedStatus(data.status) &&
+      data.status !== current.status
+    ) {
+      return {
+        error: "Use ticket_update with result to deliver this work in its original chat.",
+      } as const;
+    }
+    if (input.runId && input.botId && data.assigneeBotId === input.botId) {
+      const run = await tx.run.findFirst({
+        where: {
+          id: input.runId,
+          spaceId: input.spaceId,
+          botId: input.botId,
+          userId: input.userId,
+        },
+        select: { ticketId: true },
+      });
+      if (!run || (run.ticketId && run.ticketId !== current.id)) {
+        return {
+          error: "This execution already belongs to another ticket or is unavailable.",
+        } as const;
+      }
+      await tx.run.update({ where: { id: input.runId }, data: { ticketId: current.id } });
+    }
     const row = await tx.ticket.update({
       where: { id: current.id },
       data: {
@@ -251,18 +369,35 @@ export async function updateTicket(
           : {}),
       },
     });
+    const reassigned =
+      data.assigneeBotId !== undefined && data.assigneeBotId !== current.assigneeBotId;
+    const next =
+      current.originKey &&
+      ticketReceiptsEnabled() &&
+      reassigned &&
+      row.assigneeBotId &&
+      row.assigneeBotId !== input.botId
+        ? await prepareTicketRun(tx, {
+            spaceId: input.spaceId,
+            ticketId: row.id,
+            botId: row.assigneeBotId,
+          })
+        : null;
     return {
       row,
-      reassigned: data.assigneeBotId !== undefined && data.assigneeBotId !== current.assigneeBotId,
+      reassigned,
+      preparedRunId: next?.id,
     };
   });
   if (!result) return { error: "Ticket not found." };
+  if (result.error) return { error: result.error };
   await deps.onTicketChange?.({
     spaceId: input.spaceId,
     boardId: board.id,
     ticketId: result.row.id,
     assigneeBotId: result.row.assigneeBotId,
     wakeAssignee: result.reassigned && result.row.assigneeBotId !== input.botId,
+    preparedRunId: result.preparedRunId,
   });
   return { ticket: toTicketDto(result.row, board.ticketPrefix) };
 }

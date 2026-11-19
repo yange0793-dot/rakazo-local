@@ -57,7 +57,11 @@ import {
 } from "./artifacts.js";
 import type { ImageAdmissionRun } from "./thread-image-admission.js";
 import { assertThreadImageInput } from "./thread-image-admission.js";
-import { logFeedbackReviewError, reviewExplainedDislike } from "./thread-learning.js";
+import {
+  logFeedbackReviewError,
+  reviewExplainedDislike,
+  workReceiptTicketId,
+} from "./thread-learning.js";
 import { cancelThreadRuns, finishThreadStop, isStopMessage } from "./thread-stop.js";
 
 export type ThreadTarget =
@@ -824,6 +828,13 @@ export async function sendThreadMessage(
             trigger: "user",
             clientNonce: sendRunClientNonce(input.clientNonce, message.id),
             sourceMessageId: message.id,
+            ticketId: await workReceiptTicketId(
+              tx,
+              actor,
+              target.threadId,
+              target.botId,
+              replyToMessageId,
+            ),
           },
         });
         await tx.message.update({ where: { id: message.id }, data: { runId: run.id } });
@@ -1074,6 +1085,13 @@ export async function sendThreadMessage(
             groupTurn: turn,
             clientNonce: sendRunClientNonce(input.clientNonce, message.id, botId),
             sourceMessageId: message.id,
+            ticketId: await workReceiptTicketId(
+              tx,
+              actor,
+              target.threadId,
+              botId,
+              replyToMessageId,
+            ),
           },
         });
         runs.push(run);

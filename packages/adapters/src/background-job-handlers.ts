@@ -41,6 +41,7 @@ import { pollPurchase } from "./purchase-poll.js";
 import { reflectRun } from "./run-reflection.js";
 import { syncSemanticMemorySpace } from "./semantic-memory-sync.js";
 import { expireTaughtSkillTeaching } from "./teaching-session.js";
+import { reflectTicketImprovement } from "./ticket-improvement.js";
 
 type Tenant = { spaceId: string; userId: string };
 
@@ -271,6 +272,19 @@ export function createBackgroundJobHandlers(deps: {
     }),
     // Drafts a skill card for the person who asked, and saves lessons the review can cite.
     "harness.reflect": asOwner(run, async (payload) => {
+      if (
+        await reflectTicketImprovement(
+          {
+            prisma: deps.prisma,
+            runtime: deps.runtime,
+            artifacts: deps.artifacts,
+            events: deps.events,
+            ...(deps.executor.resolveModel ? { resolveModel: deps.executor.resolveModel } : {}),
+          },
+          payload,
+        )
+      )
+        return;
       await reflectRun(
         {
           prisma: deps.prisma,

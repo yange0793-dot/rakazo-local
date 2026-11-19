@@ -491,4 +491,30 @@ describe("user-visible messages", () => {
       userVisibleMessages(background, { backgroundRunIds: ["run-ticket"] }).map((m) => m.id),
     ).toEqual(["ask", "computer", "approval", "connect", "user"]);
   });
+
+  it("keeps the delivered work receipt while hiding its background run's chatter", () => {
+    const receipt: ThreadMessage = {
+      ...message("receipt", "run-ticket", [
+        { kind: "text", text: "Research findings" },
+        {
+          kind: "file",
+          artifactId: "receipt-file",
+          name: "result.json",
+          mimeType: "application/json",
+          size: 100,
+        },
+      ]),
+      clientNonce: "work-receipt:ticket:1:digest",
+      replyToMessageId: "request",
+    };
+    const chatter = message("progress", "run-ticket", [{ kind: "text", text: "Reading files" }]);
+    const userCopy = { ...receipt, id: "user-copy", role: "user" as const };
+    const unlinked = { ...receipt, id: "unlinked", replyToMessageId: undefined };
+    expect(
+      userVisibleMessages([chatter, receipt, userCopy, unlinked], {
+        backgroundRunIds: ["run-ticket"],
+        includeDelegatedReplyText: false,
+      }).map((entry) => entry.id),
+    ).toEqual(["receipt"]);
+  });
 });

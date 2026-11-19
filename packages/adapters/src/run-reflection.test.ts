@@ -630,12 +630,19 @@ describe("reflectRun", () => {
     expect(h.prisma.message.findMany).toHaveBeenCalledWith(
       expect.objectContaining({
         where: {
-          threadId: "thread-1",
           authorUserId: "user-1",
           role: "user",
           OR: [
-            { replyTo: { is: { threadId: "thread-1", runId: "run-1", role: "bot" } } },
-            { id: "message-ask", createdAt: { gte: RUN.completedAt }, replyToMessageId: null },
+            {
+              threadId: "thread-1",
+              replyTo: { is: { threadId: "thread-1", runId: "run-1", role: "bot" } },
+            },
+            {
+              threadId: "thread-1",
+              id: "message-ask",
+              createdAt: { gte: RUN.completedAt },
+              replyToMessageId: null,
+            },
           ],
         },
       }),

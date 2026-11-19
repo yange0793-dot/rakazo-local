@@ -161,3 +161,26 @@ export const BoardEventSchema = z.object({
   createdAt: z.string(),
 });
 export type BoardEvent = z.infer<typeof BoardEventSchema>;
+
+/** Conclusions explicitly say which observation supports them or which evidence is missing. */
+export const TicketWorkResult = z.object({
+  previousVersion: z.number().int().min(0).max(2_147_483_646),
+  summary: z.string().trim().min(1).max(1600),
+  findings: z
+    .array(
+      z.object({
+        conclusion: z.string().trim().min(1).max(1200),
+        outcome: z.enum(["pass", "issue", "unknown"]),
+        evidence: z
+          .string()
+          .trim()
+          .min(1)
+          .max(2400)
+          .describe("Observed evidence, or the missing evidence for an unknown."),
+      }),
+    )
+    .min(1)
+    .max(20),
+  artifactIds: z.array(z.string().min(1).max(200)).max(8).optional(),
+});
+export type TicketWorkResult = z.infer<typeof TicketWorkResult>;

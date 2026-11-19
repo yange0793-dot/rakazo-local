@@ -33,6 +33,7 @@ import { TOOL_ERROR_SIGNAL_MIN } from "./run-learning.js";
 import { selfEvolutionEnabled } from "./self-evolution.js";
 import { listAgentSkillRecords } from "./skill-tools.js";
 import { emitSkillDraftMessages, parsePlaybook } from "./teaching-session.js";
+import { ticketReceiptsEnabled } from "./ticket-receipt-config.js";
 
 /** The host lesson surface the review writes to; a store instance satisfies it. */
 export interface ReflectionLessonStore {
@@ -533,6 +534,7 @@ export async function reflectRun(deps: ReflectionDeps, payload: ReflectionPayloa
       completedAt: true,
       taskId: true,
       routineId: true,
+      ticketId: true,
       sourceMessageId: true,
       tainted: true,
       learningSourceChecked: true,
@@ -632,6 +634,7 @@ async function reviewAndRecord(
       completedAt: Date | null;
       taskId: string;
       routineId: string | null;
+      ticketId: string | null;
       sourceMessageId: string | null;
       tainted: boolean;
       learningSourceChecked: boolean;
@@ -692,6 +695,13 @@ async function reviewAndRecord(
     ]);
   // A free-standing message later in the conversation might be an entirely different task.
   // Read only the owner's linked replies or the explicit manual request about this run.
+  const receiptTicket =
+    ticketReceiptsEnabled() && run.ticketId
+      ? await deps.prisma.ticket.findFirst({
+          where: { id: run.ticketId, spaceId, createdByUserId: userId },
+          select: { originThreadId: true, originMessageId: true, createdByBotId: true },
+        })
+      : null;
   const [steering, denials, feedbackRows] = await Promise.all([
     listClaimedUserSteering(deps.prisma, run, MAX_STEERING_MESSAGES),
     deps.prisma.externalEffect.findMany({
@@ -702,15 +712,34 @@ async function reviewAndRecord(
     }),
     deps.prisma.message.findMany({
       where: {
-        threadId,
         authorUserId: userId,
         role: "user",
         OR: [
-          { replyTo: { is: { threadId, runId: run.id, role: "bot" } } },
+          { threadId, replyTo: { is: { threadId, runId: run.id, role: "bot" } } },
+          ...(receiptTicket?.originThreadId &&
+          receiptTicket.originMessageId &&
+          receiptTicket.createdByBotId
+            ? [
+                {
+                  threadId: receiptTicket.originThreadId,
+                  replyTo: {
+                    is: {
+                      threadId: receiptTicket.originThreadId,
+                      botId: receiptTicket.createdByBotId,
+                      replyToMessageId: receiptTicket.originMessageId,
+                      runId: run.id,
+                      role: "bot",
+                      clientNonce: { startsWith: "work-receipt:" },
+                    },
+                  },
+                },
+              ]
+            : []),
           ...(manual && payload.exceptMessageId && run.completedAt
             ? [
                 {
                   id: payload.exceptMessageId,
+                  threadId,
                   createdAt: { gte: run.completedAt },
                   replyToMessageId: null,
                 },

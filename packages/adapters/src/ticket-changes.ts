@@ -1,5 +1,7 @@
 import type { JobPublisher } from "@rakazo/adapter-kit";
+import { runContinueJob } from "@rakazo/adapter-kit";
 import type { BoardEvents, PrismaClient } from "@rakazo/db";
+import { getLogger } from "@rakazo/logging";
 import { wakeTicketAssignee } from "./ticket-wake.js";
 
 export type TicketChange = {
@@ -8,6 +10,7 @@ export type TicketChange = {
   ticketId: string;
   assigneeBotId: string | null;
   wakeAssignee: boolean;
+  preparedRunId?: string;
 };
 export type TicketChangeNotifier = (change: TicketChange) => Promise<void>;
 
@@ -25,7 +28,11 @@ export function createTicketChangeNotifier(deps: {
         ticketId: change.ticketId,
       })
       .catch(() => undefined);
-    if (change.wakeAssignee && change.assigneeBotId) {
+    if (change.preparedRunId) {
+      await deps.jobs.enqueue(runContinueJob(change.preparedRunId)).catch((error) => {
+        getLogger().warn("ticket wake deferred to reconciliation", error);
+      });
+    } else if (change.wakeAssignee && change.assigneeBotId) {
       await wakeTicketAssignee(deps, {
         spaceId: change.spaceId,
         ticketId: change.ticketId,

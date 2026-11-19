@@ -11,6 +11,7 @@ import {
   isBackgroundInputBlock,
   isBackgroundRunTrigger,
   isPeerReceiptBlocks,
+  isWorkReceiptMessage,
 } from "@rakazo/core";
 import { messageReplyPreview } from "@rakazo/core/message-quote";
 import type { Prisma, PrismaClient } from "@rakazo/db";
@@ -124,6 +125,9 @@ async function withoutPeerRunMessages<
   T extends {
     runId: string | null;
     blocks: Prisma.JsonValue;
+    role?: string;
+    clientNonce?: string | null;
+    replyToMessageId?: string | null;
   },
 >(prisma: MessageDb, rows: T[]): Promise<T[]> {
   const runIds = [...new Set(rows.flatMap((row) => (row.runId ? [row.runId] : [])))];
@@ -146,7 +150,7 @@ async function withoutPeerRunMessages<
     const blocks = row.blocks as MessageBlock[];
     if (backgroundRunIds.has(row.runId)) {
       // Ticket work stays off the transcript except existing user-input cards.
-      return blocks.some(isBackgroundInputBlock);
+      return isWorkReceiptMessage(row) || blocks.some(isBackgroundInputBlock);
     }
     if (!peerRunIds.has(row.runId)) return true;
     // Keep peer receipts (chips), ask cards, and the bot's text, chart, page or attachment reply.
@@ -200,7 +204,7 @@ export async function isBackgroundRun(
 /** Peer-run SSE events that must still reach an open thread (terminals, waits, receipts, asks, text, charts, attachments). */
 export function shouldForwardPeerThreadEvent(event: {
   type: string;
-  payload: { blocks?: unknown };
+  payload: { blocks?: unknown; role?: unknown; clientNonce?: unknown; replyToMessageId?: unknown };
 }): boolean {
   if (
     event.type === "run.completed" ||
@@ -258,7 +262,10 @@ export function shouldForwardBackgroundThreadEvent(event: {
     return false;
   }
   const blocks = event.payload.blocks;
-  return Array.isArray(blocks) && blocks.some(isBackgroundInputBlock);
+  return (
+    isWorkReceiptMessage(event.payload) ||
+    (Array.isArray(blocks) && blocks.some(isBackgroundInputBlock))
+  );
 }
 
 type MessageRow = {
@@ -318,6 +325,7 @@ function toThreadMessage(row: MessageRow, authors: Map<string, MessageAuthor>): 
     replyQuote: row.replyQuote ?? undefined,
     replyPreview,
     runId: row.runId ?? undefined,
+    ...(isWorkReceiptMessage(row) ? { clientNonce: row.clientNonce! } : {}),
     callId: callIdFromClientNonce(row.clientNonce),
     createdAt: row.createdAt.toISOString(),
   };

@@ -35,6 +35,16 @@ import {
 } from "./skill-tools.js";
 import { taskCatalogFromTool } from "./task-catalog.js";
 import {
+  getCurrentTaughtSkillRevision,
+  getTaughtSkillRevision,
+  listPinnedTaughtSkillRevisions,
+  pinTaughtSkillRevisionToRun,
+  rollbackTaughtSkillRevision,
+  saveTaughtSkillRevision,
+} from "./taught-skill-revisions.js";
+import { deliverTicketWork } from "./ticket-delivery.js";
+import { ticketReceiptsEnabled } from "./ticket-receipt-config.js";
+import {
   commentTicket,
   createTicket,
   getTicket,
@@ -168,34 +178,70 @@ export const taskTools: ToolHandlers = {
   async ticket_create(ctx, call) {
     const { deps, run, bot } = ctx;
     const { args } = call;
-    return call.finish(
-      await createTicket(deps, {
-        spaceId: run.spaceId,
-        botId: bot.id,
-        userId: run.userId,
-        title: String(args.title ?? ""),
-        description: args.description !== undefined ? String(args.description) : undefined,
-        priority: args.priority !== undefined ? String(args.priority) : undefined,
-        ownerBotId: args.ownerBotId !== undefined ? String(args.ownerBotId) : undefined,
-      }),
-    );
+    const created = await createTicket(deps, {
+      spaceId: run.spaceId,
+      botId: bot.id,
+      userId: run.userId,
+      ...(ticketReceiptsEnabled() &&
+      ctx.source.ownerAuthoredRun &&
+      !ctx.source.channelId &&
+      !ctx.thread.externalConversationId &&
+      (ctx.thread.botId === bot.id || ctx.thread.groupId) &&
+      run.sourceMessageId
+        ? {
+            origin: {
+              threadId: run.threadId,
+              messageId: run.sourceMessageId,
+              runId: run.id,
+              key: `${run.id}:${call.effectKey}`,
+            },
+          }
+        : {}),
+      title: String(args.title ?? ""),
+      description: args.description !== undefined ? String(args.description) : undefined,
+      priority: args.priority !== undefined ? String(args.priority) : undefined,
+      ownerBotId: args.ownerBotId !== undefined ? String(args.ownerBotId) : undefined,
+    });
+    if ("ticket" in created && "delivery" in created && created.ticket.assigneeBotId === bot.id) {
+      run.ticketId = created.ticket.id;
+    }
+    return call.finish(created);
   },
   async ticket_update(ctx, call) {
     const { deps, run, bot } = ctx;
     const { args } = call;
-    return call.finish(
-      await updateTicket(deps, {
-        spaceId: run.spaceId,
-        botId: bot.id,
-        userId: run.userId,
-        id: String(args.id ?? ""),
-        title: args.title !== undefined ? String(args.title) : undefined,
-        description: args.description !== undefined ? String(args.description) : undefined,
-        priority: args.priority !== undefined ? String(args.priority) : undefined,
-        status: args.status !== undefined ? String(args.status) : undefined,
-        ownerBotId: args.ownerBotId !== undefined ? String(args.ownerBotId) : undefined,
-      }),
-    );
+    if (args.result !== undefined) {
+      if (Object.keys(args).some((key) => key !== "id" && key !== "result"))
+        return call.finish({ error: "Use only id and result for a delivery." });
+      return call.finish(
+        await deliverTicketWork(deps, run, {
+          id: String(args.id ?? ""),
+          result: args.result,
+          ownerAuthored: ctx.source.ownerAuthoredRun && !ctx.source.channelId,
+          secrets: ctx.secrets,
+        }),
+      );
+    }
+    const updated = await updateTicket(deps, {
+      spaceId: run.spaceId,
+      botId: bot.id,
+      userId: run.userId,
+      runId: run.id,
+      id: String(args.id ?? ""),
+      title: args.title !== undefined ? String(args.title) : undefined,
+      description: args.description !== undefined ? String(args.description) : undefined,
+      priority: args.priority !== undefined ? String(args.priority) : undefined,
+      status: args.status !== undefined ? String(args.status) : undefined,
+      ownerBotId: args.ownerBotId !== undefined ? String(args.ownerBotId) : undefined,
+    });
+    if ("ticket" in updated && args.ownerBotId === bot.id && ticketReceiptsEnabled()) {
+      const current = await deps.prisma.run.findUniqueOrThrow({
+        where: { id: run.id },
+        select: { ticketId: true },
+      });
+      run.ticketId = current.ticketId;
+    }
+    return call.finish(updated);
   },
   async ticket_comment(ctx, call) {
     const { deps, run, bot } = ctx;
@@ -266,6 +312,58 @@ export const taskTools: ToolHandlers = {
   async skill_read(ctx, call) {
     const { deps, run } = ctx;
     const { args } = call;
+    if (args.taughtSkillId) {
+      const actor = { spaceId: run.spaceId, userId: run.userId };
+      if (args.inspect !== true) {
+        const pinned = (await listPinnedTaughtSkillRevisions(deps.prisma, actor, run.id)).find(
+          (revision) => revision.skillId === String(args.taughtSkillId),
+        );
+        if (pinned)
+          return { revision: pinned, instruction: "Continue using this run's fixed playbook." };
+      }
+      const skill = await deps.prisma.taughtSkill.findFirst({
+        where: {
+          id: String(args.taughtSkillId),
+          spaceId: run.spaceId,
+          botId: run.botId,
+          status: "saved",
+          ...(!ctx.source.ownerStartedRun ? { userId: run.userId } : {}),
+        },
+        select: { id: true },
+      });
+      if (!skill) return { error: "Saved taught skill unavailable." };
+      if (args.inspect === true) {
+        const revision = await getCurrentTaughtSkillRevision(deps.prisma, actor, skill.id);
+        const previous = revision.previousRevisionId
+          ? await getTaughtSkillRevision(deps.prisma, actor, {
+              skillId: skill.id,
+              revisionId: revision.previousRevisionId,
+            })
+          : null;
+        return { revision, previous };
+      }
+      const revision = await pinTaughtSkillRevisionToRun(deps.prisma, actor, {
+        runId: run.id,
+        skillId: skill.id,
+        context: {
+          ...(args.projectPath && ctx.bot.computer
+            ? { project: { computerId: ctx.bot.computer.id, path: String(args.projectPath) } }
+            : {}),
+          ...(args.taskFamily ? { taskFamilies: [String(args.taskFamily)] } : {}),
+        },
+      });
+      if (revision)
+        return { revision, instruction: "Follow this fixed playbook for the matching task." };
+      // Name what the skill is limited to, so one more call can load it when the task matches.
+      const { scope } = (await getCurrentTaughtSkillRevision(deps.prisma, actor, skill.id))
+        .snapshot;
+      return {
+        error:
+          "This skill is limited to the task family or project below. If this task belongs to it, call again with that taskFamily or projectPath.",
+        ...(scope.taskFamilies?.length ? { taskFamilies: scope.taskFamilies } : {}),
+        ...(scope.project ? { projectPath: scope.project.path } : {}),
+      };
+    }
     return skillReadFromTool(
       deps.prisma,
       {
@@ -301,6 +399,59 @@ export const taskTools: ToolHandlers = {
   async skill_update(ctx, call) {
     const { deps, run } = ctx;
     const { args } = call;
+    if (args.taughtSkillId) {
+      if (!ctx.source.ownerAuthoredRun || ctx.thread.groupId || ctx.thread.externalConversationId) {
+        return call.finish({
+          error: "Revert a taught skill from its owner's direct conversation.",
+        });
+      }
+      const skill = await deps.prisma.taughtSkill.findFirst({
+        where: {
+          id: String(args.taughtSkillId),
+          spaceId: run.spaceId,
+          botId: run.botId,
+          userId: run.userId,
+          status: "saved",
+        },
+        select: { id: true },
+      });
+      if (!skill || typeof args.expectedRevisionId !== "string") {
+        return call.finish({
+          error: "Read the saved skill's current revision before reverting it.",
+        });
+      }
+      if (args.improvementFamily === "file-delivery") {
+        if (!ctx.bot.computer || typeof args.projectPath !== "string" || !args.projectPath.trim()) {
+          return call.finish({
+            error: "Choose the project directory for this skill's comparison pilot.",
+          });
+        }
+        const actor = { spaceId: run.spaceId, userId: run.userId };
+        const current = await getCurrentTaughtSkillRevision(deps.prisma, actor, skill.id);
+        if (current.id !== args.expectedRevisionId) {
+          return call.finish({ error: "Skill changed. Read its current revision first." });
+        }
+        return call.finish({
+          revision: await saveTaughtSkillRevision(deps.prisma, actor, {
+            skillId: skill.id,
+            scope: {
+              project: { computerId: ctx.bot.computer.id, path: args.projectPath.trim() },
+              taskFamilies: ["file-delivery"],
+            },
+          }),
+        });
+      }
+      return call.finish(
+        await rollbackTaughtSkillRevision(
+          deps.prisma,
+          {
+            spaceId: run.spaceId,
+            userId: run.userId,
+          },
+          { skillId: skill.id, expectedCurrentRevisionId: args.expectedRevisionId },
+        ),
+      );
+    }
     return call.finish(
       await skillUpdateFromTool(
         deps.prisma,

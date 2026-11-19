@@ -331,6 +331,8 @@ function reduce(prev: LiveThreadSnapshot, event: ThreadSnapshotEvent): LiveThrea
       blocks,
       botId: event.botId ?? (typeof payload.botId === "string" ? payload.botId : undefined),
       runId: event.runId,
+      clientNonce:
+        typeof payload.clientNonce === "string" ? payload.clientNonce : known?.clientNonce,
       // An update can leave the call id out — the `end_call` marker does — so keep the one
       // the message already carries instead of dropping it out of its call.
       callId: typeof payload.callId === "string" ? payload.callId : known?.callId,

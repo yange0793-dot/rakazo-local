@@ -36,7 +36,7 @@ export function runPromotesMidTurnNarration(trigger: string): boolean {
 }
 
 export const TICKET_SILENT_REPLY_GUIDANCE =
-  "Ticket work is reported on the board, not in chat. Put updates and results in ticket_comment and keep the ticket status current with ticket_update. Use the existing ask or approval mechanism when user input is needed. Leave the final reply empty.";
+  "Read ticket_get. Keep progress in ticket_comment. If it includes delivery, use ticket_update with id and result to return the evidence to the original request. Otherwise keep results on the board. Use the existing ask or approval mechanism when user input is needed. Leave the final reply empty.";
 
 /**
  * Messages mode only where a person waits on the reply and the bot can message them; every

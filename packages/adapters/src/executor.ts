@@ -219,6 +219,10 @@ import {
   takeoverContinuePlan,
 } from "./takeover-resume.js";
 import { TASK_CATALOG_GUIDANCE } from "./task-catalog.js";
+import {
+  listPinnedTaughtSkillRevisions,
+  pinTaughtSkillRevisionToRun,
+} from "./taught-skill-revisions.js";
 import { parsePlaybook } from "./teaching-session.js";
 import {
   createEarlierFileQueue,
@@ -231,6 +235,7 @@ import {
   recentThreadFilesInstruction,
 } from "./thread-artifacts.js";
 import { loadAgentTicketContext } from "./ticket-context.js";
+import { ticketReceiptsEnabled } from "./ticket-receipt-config.js";
 import { appendToolCompletionAudit, toolCompletionOutcome } from "./tool-completion-audit.js";
 import { toolResultFingerprint } from "./tool-loop.js";
 import { restoreTurnCheckpoint } from "./turn-checkpoint.js";
@@ -950,6 +955,20 @@ export function createRunExecutor(executorDeps: ExecutorDeps) {
             : loadAgentTicketContext(deps, {
                 spaceId: run.spaceId,
                 text: task.prompt,
+                ticketId: run.ticketId,
+                ...(run.trigger === "user" &&
+                sourceMessage?.authorUserId === run.userId &&
+                !channelId &&
+                !thread.externalConversationId
+                  ? {
+                      origin: {
+                        threadId: thread.id,
+                        userId: run.userId,
+                        botId: bot.id,
+                        messageId: run.sourceMessageId,
+                      },
+                    }
+                  : {}),
               }),
           recallPromise,
           lessonRecallPromise,
@@ -1667,11 +1686,11 @@ export function createRunExecutor(executorDeps: ExecutorDeps) {
                 .map((skill) => {
                   const playbook = parsePlaybook(skill.playbook);
                   const name = skill.name || skill.goal.slice(0, 80);
-                  return `- ${name}: ${playbook.whenToUse || skill.goal}`;
+                  return `- ${name} (taughtSkillId: ${skill.id}): ${playbook.whenToUse || skill.goal}`;
                 })
                 .join(
                   "\n",
-                )}\nWhen the user asks to run a taught skill by name, follow that skill's playbook exactly. The full playbook is included in the user task when they invoke it.`
+                )}\nWhen a saved skill matches the task, load it with skill_read using taughtSkillId and follow its playbook. Use the actual project and matching task family for scoped skills.`
             : undefined;
         const agentSkillsLine = formatSkillsCatalogInstruction(runAgentSkills);
         const missingImagesInstruction = missingTurnImagesInstruction(
@@ -1689,12 +1708,41 @@ export function createRunExecutor(executorDeps: ExecutorDeps) {
             (ownerStartedRun || skill.userId === run.userId) &&
             promptInvokesSkill(taskPrompt, skill.name || skill.goal),
         );
-        const basePrompt = invokedSkill
-          ? `${formatSkillRunPrompt(
-              invokedSkill.name || invokedSkill.goal.slice(0, 80),
-              parsePlaybook(invokedSkill.playbook),
-            )}\n\n${taskPrompt}`
-          : taskPrompt;
+        let basePrompt = taskPrompt;
+        const revisionActor = { spaceId: run.spaceId, userId: run.userId };
+        const pinned =
+          !nonOwnerChatRun && (ticketReceiptsEnabled() || fence > 1)
+            ? await listPinnedTaughtSkillRevisions(deps.prisma, revisionActor, run.id)
+            : [];
+        if (!nonOwnerChatRun && (ticketReceiptsEnabled() || pinned.length > 0)) {
+          if (
+            ticketReceiptsEnabled() &&
+            invokedSkill &&
+            !pinned.some((revision) => revision.skillId === invokedSkill.id)
+          ) {
+            const selected = await pinTaughtSkillRevisionToRun(deps.prisma, revisionActor, {
+              runId: run.id,
+              skillId: invokedSkill.id,
+              context: {},
+            });
+            if (selected) pinned.push(selected);
+          }
+          if (pinned.length) {
+            basePrompt = `${pinned
+              .map((revision) =>
+                formatSkillRunPrompt(
+                  `${revision.snapshot.name} [${revision.id}]`,
+                  revision.snapshot.playbook,
+                ),
+              )
+              .join("\n\n")}\n\n${taskPrompt}`;
+          }
+        } else if (invokedSkill) {
+          basePrompt = `${formatSkillRunPrompt(
+            invokedSkill.name || invokedSkill.goal.slice(0, 80),
+            parsePlaybook(invokedSkill.playbook),
+          )}\n\n${taskPrompt}`;
+        }
         if (turnCheckpoint) {
           turnCheckpoint = restoreTurnCheckpointEffects(
             ctx,
@@ -1936,257 +1984,253 @@ export function createRunExecutor(executorDeps: ExecutorDeps) {
 
         try {
           if (checkpointLoadError) throw checkpointLoadError;
-          const runtimeEvents = deps.runtime.run(
-            {
-              botId: bot.id,
-              verbatimMcpServers,
-              threadId: thread.id,
-              runId,
-              routineId: run.routineId,
-              sourceMessageId: run.sourceMessageId,
-              onUsage: async (event) => {
-                await recordUsage(deps.prisma, event, {
-                  spaceId: run.spaceId,
-                  botId: bot.id,
-                  userId: run.userId,
-                  runId,
-                  parentRunId: runId,
-                  operationId: runId,
-                });
-              },
-              prompt,
-              ...(speakers &&
-              (run.trigger === "user" ||
-                (run.trigger === "follow_up" && sourceMessage?.role === "user"))
-                ? { promptSpeaker: personSpeaker(people, run.userId) }
-                : {}),
-              // Keep an explicit executor override, but let the runtime select
-              // cache-aware context for connections declaring a cache window.
-              contextStrategy: deps.contextStrategy,
-              instructions: userTurnInstructions({
-                botInstructions: [
-                  runIdentityInstruction(bot, run.trigger),
-                  botEmail
-                    ? botEmailInstruction(botEmail, {
-                        // Only the tools this bot has: its owner may turn any of them off.
-                        read: emailInbox && !disabledBuiltinTools.has("read_email"),
-                        send:
-                          emailInbox &&
-                          Boolean(deps.email) &&
-                          !disabledBuiltinTools.has("send_email"),
-                        delete: emailInbox && !disabledBuiltinTools.has("delete_email"),
-                      })
-                    : "",
-                ]
-                  .filter(Boolean)
-                  .join("\n"),
-                groupContext: groupReplyOptional
-                  ? [groupContext, GROUP_UNADDRESSED_REPLY_GUIDANCE].filter(Boolean).join("\n")
-                  : groupContext,
-                messagingContext,
-                redactedMemoryContext: memoryContext
-                  ? redactSecrets(memoryContext, runSecrets)
-                  : undefined,
-                redactedScratchpadContext: scratchpadContext
-                  ? redactSecrets(scratchpadContext, runSecrets)
-                  : undefined,
-                redactedTicketContext: ticketContext
-                  ? redactSecrets(ticketContext, runSecrets)
-                  : undefined,
-                hasHistoricalContext: historicalContext.length > 0 || Boolean(recalledMemory),
-                // A background helper is not offered the history tools, so it gets no guidance on them.
-                historyRetrievalEnabled:
-                  contextStrategy !== "current" &&
-                  tools.some((tool) => tool.name === "search_history"),
-                semanticMemoryEnabled: tools.some((tool) => tool.name === "save_memory"),
-                computerInstruction,
-                pageBrowserAllowed,
-                taskCatalogInstruction,
-                workspaceInstruction,
-                agentEnvironmentInstruction,
-                botDirectory,
-                pluginLine,
-                agentSkillsLine,
-                taughtSkillsLine,
-                replyGuidance: runReplyGuidance(run.trigger, replyMode),
-                // These runs get a narrow tool set, so guidance names only the tools they have.
-                disabledBuiltinTools:
-                  isStrategicInitiativeRun(run) || run.trigger === BACKGROUND_HELPER_TRIGGER
-                    ? new Set(
-                        builtinAgentTools
-                          .map((tool) => tool.name)
-                          .filter((name) => !strategicBuiltins.some((tool) => tool.name === name)),
-                      )
-                    : disabledBuiltinTools,
-                offeredFleetTools: offeredFleetTools(strategicBuiltins),
-                followUpsOffered: followUpsOffered(strategicBuiltins, ownerStartedRun),
-                backgroundHelpersAllowed: backgroundHelpersAllowed({
-                  threadBotId: thread.botId,
-                  botId: bot.id,
-                  trigger: run.trigger,
-                }),
-                userComputer,
-              })
-                .filter((instruction): instruction is string => Boolean(instruction))
-                .join("\n\n"),
-              history: runtimeHistory,
-              currentTurnImages,
-              currentRunRequiresImageInput,
-              currentTurnImageFileFallback: Boolean(
-                currentTurnImages?.length &&
-                  currentTurnFiles.length &&
-                  !turnBlocks?.some(
-                    (block) => block.kind === "image" && block.imageHandling === "confirm",
-                  ),
-              ),
-              tools,
-              // The live array: secrets learned later in the run redact too.
-              secrets: runSecrets,
-              model: mainRunModel,
-              computerModel,
-              fallbackModels: fallbackModels.map(({ provider, modelId, credentialId }) => ({
-                provider,
-                id: modelId,
-                ...(credentialId ? { connectionId: credentialId } : {}),
-              })),
-              resolveFallbackModel:
-                checkpointModelResolver || fallbackModelKeys.size
-                  ? async (provider, modelId, connectionId) => {
-                      if (checkpointModelResolver?.has(provider, modelId, connectionId))
-                        return checkpointModelResolver(provider, modelId, connectionId);
-                      const key = fallbackKey(provider, modelId, connectionId);
-                      if (!fallbackModelKeys.has(key))
-                        throw new Error("Backup model is not selected");
-                      return resolveConnectedModel(
-                        { userId: run.userId, spaceId: run.spaceId },
-                        provider,
-                        modelId,
-                        (values) => runSecrets.push(...values),
-                        true,
-                        fallbackModels.find(
-                          (candidate) =>
-                            fallbackKey(
-                              candidate.provider,
-                              candidate.modelId,
-                              candidate.credentialId,
-                            ) === key,
-                        )?.thinkingLevel ?? null,
-                        connectionId,
-                      );
-                    }
-                  : undefined,
-              onModelChange: async (provider, modelId, computerMode) => {
-                const roleModel =
-                  [mainRunModel, computerModel].some(
-                    (model) => model?.provider === provider && model.id === modelId,
-                  ) || checkpointModelResolver?.hasModel(provider, modelId);
-                if (!roleModel && !fallbackModelIds.has(fallbackKey(provider, modelId))) {
-                  throw new Error("Model is not selected");
-                }
-                // The run's model is what retries and pins rerun; computer mode is a detour from it.
-                if (!computerMode) {
-                  const updated = await deps.prisma.run.updateMany({
-                    where: {
-                      id: runId,
-                      status: "running",
-                      leaseOwner: workerId,
-                      leaseFence: fence,
-                    },
-                    data: { modelProvider: provider, modelId },
-                  });
-                  if (updated.count !== 1) {
-                    throw new Error("Run lease was lost before the backup model could be used");
+          const runtimeRequest: AgentRunRequest = {
+            botId: bot.id,
+            verbatimMcpServers,
+            threadId: thread.id,
+            runId,
+            routineId: run.routineId,
+            sourceMessageId: run.sourceMessageId,
+            onUsage: async (event) => {
+              await recordUsage(deps.prisma, event, {
+                spaceId: run.spaceId,
+                botId: bot.id,
+                userId: run.userId,
+                runId,
+                parentRunId: runId,
+                operationId: runId,
+              });
+            },
+            prompt,
+            ...(speakers &&
+            (run.trigger === "user" ||
+              (run.trigger === "follow_up" && sourceMessage?.role === "user"))
+              ? { promptSpeaker: personSpeaker(people, run.userId) }
+              : {}),
+            // Keep an explicit executor override, but let the runtime select
+            // cache-aware context for connections declaring a cache window.
+            contextStrategy: deps.contextStrategy,
+            instructions: userTurnInstructions({
+              botInstructions: [
+                runIdentityInstruction(bot, run.trigger),
+                botEmail
+                  ? botEmailInstruction(botEmail, {
+                      // Only the tools this bot has: its owner may turn any of them off.
+                      read: emailInbox && !disabledBuiltinTools.has("read_email"),
+                      send:
+                        emailInbox &&
+                        Boolean(deps.email) &&
+                        !disabledBuiltinTools.has("send_email"),
+                      delete: emailInbox && !disabledBuiltinTools.has("delete_email"),
+                    })
+                  : "",
+              ]
+                .filter(Boolean)
+                .join("\n"),
+              groupContext: groupReplyOptional
+                ? [groupContext, GROUP_UNADDRESSED_REPLY_GUIDANCE].filter(Boolean).join("\n")
+                : groupContext,
+              messagingContext,
+              redactedMemoryContext: memoryContext
+                ? redactSecrets(memoryContext, runSecrets)
+                : undefined,
+              redactedScratchpadContext: scratchpadContext
+                ? redactSecrets(scratchpadContext, runSecrets)
+                : undefined,
+              redactedTicketContext: ticketContext
+                ? redactSecrets(ticketContext, runSecrets)
+                : undefined,
+              hasHistoricalContext: historicalContext.length > 0 || Boolean(recalledMemory),
+              // A background helper is not offered the history tools, so it gets no guidance on them.
+              historyRetrievalEnabled:
+                contextStrategy !== "current" &&
+                tools.some((tool) => tool.name === "search_history"),
+              semanticMemoryEnabled: tools.some((tool) => tool.name === "save_memory"),
+              computerInstruction,
+              pageBrowserAllowed,
+              taskCatalogInstruction,
+              workspaceInstruction,
+              agentEnvironmentInstruction,
+              botDirectory,
+              pluginLine,
+              agentSkillsLine,
+              taughtSkillsLine,
+              replyGuidance: runReplyGuidance(run.trigger, replyMode),
+              // These runs get a narrow tool set, so guidance names only the tools they have.
+              disabledBuiltinTools:
+                isStrategicInitiativeRun(run) || run.trigger === BACKGROUND_HELPER_TRIGGER
+                  ? new Set(
+                      builtinAgentTools
+                        .map((tool) => tool.name)
+                        .filter((name) => !strategicBuiltins.some((tool) => tool.name === name)),
+                    )
+                  : disabledBuiltinTools,
+              offeredFleetTools: offeredFleetTools(strategicBuiltins),
+              followUpsOffered: followUpsOffered(strategicBuiltins, ownerStartedRun),
+              backgroundHelpersAllowed: backgroundHelpersAllowed({
+                threadBotId: thread.botId,
+                botId: bot.id,
+                trigger: run.trigger,
+              }),
+              userComputer,
+            })
+              .filter((instruction): instruction is string => Boolean(instruction))
+              .join("\n\n"),
+            history: runtimeHistory,
+            currentTurnImages,
+            currentRunRequiresImageInput,
+            currentTurnImageFileFallback: Boolean(
+              currentTurnImages?.length &&
+                currentTurnFiles.length &&
+                !turnBlocks?.some(
+                  (block) => block.kind === "image" && block.imageHandling === "confirm",
+                ),
+            ),
+            tools,
+            // The live array: secrets learned later in the run redact too.
+            secrets: runSecrets,
+            model: mainRunModel,
+            computerModel,
+            fallbackModels: fallbackModels.map(({ provider, modelId, credentialId }) => ({
+              provider,
+              id: modelId,
+              ...(credentialId ? { connectionId: credentialId } : {}),
+            })),
+            resolveFallbackModel:
+              checkpointModelResolver || fallbackModelKeys.size
+                ? async (provider, modelId, connectionId) => {
+                    if (checkpointModelResolver?.has(provider, modelId, connectionId))
+                      return checkpointModelResolver(provider, modelId, connectionId);
+                    const key = fallbackKey(provider, modelId, connectionId);
+                    if (!fallbackModelKeys.has(key))
+                      throw new Error("Backup model is not selected");
+                    return resolveConnectedModel(
+                      { userId: run.userId, spaceId: run.spaceId },
+                      provider,
+                      modelId,
+                      (values) => runSecrets.push(...values),
+                      true,
+                      fallbackModels.find(
+                        (candidate) =>
+                          fallbackKey(
+                            candidate.provider,
+                            candidate.modelId,
+                            candidate.credentialId,
+                          ) === key,
+                      )?.thinkingLevel ?? null,
+                      connectionId,
+                    );
                   }
-                }
-                activeModel["model.provider"] = provider;
-                activeModel["model.id"] = modelId;
-              },
-              resumeFromCheckpoint: takeoverResume?.checkpoint,
-              turnCheckpoint,
-              onCheckpoint: async (capture, executionId) => {
-                effects.pendingTurnCheckpoints.set(executionId, capture);
-              },
-              resumeToolResult: {
-                content: [{ type: "text", text: takeoverResume?.promptNote ?? taskPrompt }],
-              },
-              script,
-              allowSilentEmpty: allowSilentEmptyRun,
-              emptyResponseText,
-              executeTool: scripted
-                ? undefined
-                : async (name, args, executionId, route, observer) => {
-                    const result = await applyTool(ctx, name, args, executionId, route, observer);
-                    // Checked after a tool, before the next model call. A paused tool belongs
-                    // to the user now, so its run finishes as a pause, not a yield.
-                    if (
-                      !yieldedToWaitingUser &&
-                      !ctx.state.approval.pausePending &&
-                      (await userTurnWaiting())
-                    ) {
-                      yieldedToWaitingUser = true;
-                      ctx.runtimeAbortController.abort();
-                    }
-                    return result;
-                  },
-              resolveModel: scripted
-                ? undefined
-                : (provider, modelId) =>
-                    resolveConnectedModel(run, provider, modelId, (values) =>
-                      runSecrets.push(...values),
-                    ),
-              onToolCompleted: (completion) => {
-                if (effects.restoredPending?.executionId === completion.executionId)
-                  effects.restoredPending = undefined;
-                if (!completion.paused)
-                  effects.pendingTurnCheckpoints.delete(completion.executionId);
-                const outcome = toolCompletionOutcome(completion);
-                if (outcome) state.reply.toolOutcomes.set(completion.executionId, outcome);
-                const audited = appendToolCompletionAudit(
-                  deps,
-                  {
-                    spaceId: run.spaceId,
-                    threadId: thread.id,
-                    botId: bot.id,
-                    runId,
-                  },
-                  completion,
-                  runSecrets,
-                );
-                state.toolResults.set(
-                  completion.executionId,
-                  toolResultFingerprint(completion.result, completion.error),
-                );
-                return audited;
-              },
-              claimSteering: async (seenIds) => {
-                const claimed = await claimRunSteering(
-                  deps,
-                  {
-                    threadId: thread.id,
-                    botId: bot.id,
-                    runId,
+                : undefined,
+            onModelChange: async (provider, modelId, computerMode) => {
+              const roleModel =
+                [mainRunModel, computerModel].some(
+                  (model) => model?.provider === provider && model.id === modelId,
+                ) || checkpointModelResolver?.hasModel(provider, modelId);
+              if (!roleModel && !fallbackModelIds.has(fallbackKey(provider, modelId))) {
+                throw new Error("Model is not selected");
+              }
+              // The run's model is what retries and pins rerun; computer mode is a detour from it.
+              if (!computerMode) {
+                const updated = await deps.prisma.run.updateMany({
+                  where: {
+                    id: runId,
+                    status: "running",
                     leaseOwner: workerId,
                     leaseFence: fence,
                   },
-                  seenIds,
-                  context,
-                  pendingTurnFiles,
-                  {
-                    messageId: currentTurnMessage?.id,
-                    hasImages: Boolean(currentTurnImages?.length),
-                  },
-                );
-                ctx.state.steeringClaimed += claimed.filter(
-                  (item) => item.origin === "user",
-                ).length;
-                return claimed;
-              },
+                  data: { modelProvider: provider, modelId },
+                });
+                if (updated.count !== 1) {
+                  throw new Error("Run lease was lost before the backup model could be used");
+                }
+              }
+              activeModel["model.provider"] = provider;
+              activeModel["model.id"] = modelId;
             },
-            {
-              ...context,
-              signal: AbortSignal.any([context.signal, ctx.runtimeAbortController.signal]),
+            resumeFromCheckpoint: takeoverResume?.checkpoint,
+            turnCheckpoint,
+            onCheckpoint: async (capture, executionId) => {
+              effects.pendingTurnCheckpoints.set(executionId, capture);
             },
-          );
+            resumeToolResult: {
+              content: [{ type: "text", text: takeoverResume?.promptNote ?? taskPrompt }],
+            },
+            script,
+            allowSilentEmpty: allowSilentEmptyRun,
+            emptyResponseText,
+            executeTool: scripted
+              ? undefined
+              : async (name, args, executionId, route, observer) => {
+                  const result = await applyTool(ctx, name, args, executionId, route, observer);
+                  // Checked after a tool, before the next model call. A paused tool belongs
+                  // to the user now, so its run finishes as a pause, not a yield.
+                  if (
+                    !yieldedToWaitingUser &&
+                    !ctx.state.approval.pausePending &&
+                    (await userTurnWaiting())
+                  ) {
+                    yieldedToWaitingUser = true;
+                    ctx.runtimeAbortController.abort();
+                  }
+                  return result;
+                },
+            resolveModel: scripted
+              ? undefined
+              : (provider, modelId) =>
+                  resolveConnectedModel(run, provider, modelId, (values) =>
+                    runSecrets.push(...values),
+                  ),
+            onToolCompleted: (completion) => {
+              if (effects.restoredPending?.executionId === completion.executionId)
+                effects.restoredPending = undefined;
+              if (!completion.paused) effects.pendingTurnCheckpoints.delete(completion.executionId);
+              const outcome = toolCompletionOutcome(completion);
+              if (outcome) state.reply.toolOutcomes.set(completion.executionId, outcome);
+              const audited = appendToolCompletionAudit(
+                deps,
+                {
+                  spaceId: run.spaceId,
+                  threadId: thread.id,
+                  botId: bot.id,
+                  runId,
+                },
+                completion,
+                runSecrets,
+              );
+              state.toolResults.set(
+                completion.executionId,
+                toolResultFingerprint(completion.result, completion.error),
+              );
+              return audited;
+            },
+            claimSteering: async (seenIds) => {
+              const claimed = await claimRunSteering(
+                deps,
+                {
+                  threadId: thread.id,
+                  botId: bot.id,
+                  runId,
+                  leaseOwner: workerId,
+                  leaseFence: fence,
+                },
+                seenIds,
+                context,
+                pendingTurnFiles,
+                {
+                  messageId: currentTurnMessage?.id,
+                  hasImages: Boolean(currentTurnImages?.length),
+                },
+              );
+              ctx.state.steeringClaimed += claimed.filter((item) => item.origin === "user").length;
+              return claimed;
+            },
+          };
+          const runtimeContext = {
+            ...context,
+            signal: AbortSignal.any([context.signal, ctx.runtimeAbortController.signal]),
+          };
+          const runtimeEvents = deps.runtime.run(runtimeRequest, runtimeContext);
           if (await consumeRunEvents(ctx, runtimeEvents)) return;
           if (yieldedToWaitingUser) {
             // Queued again with no retry timer; releasing the computer starts the person's run.
@@ -2196,6 +2240,55 @@ export function createRunExecutor(executorDeps: ExecutorDeps) {
             return;
           }
           if (await interruptedByShutdown()) return;
+          if (ticketReceiptsEnabled() && run.ticketId) {
+            const work = await deps.prisma.ticket.findFirst({
+              where: {
+                id: run.ticketId,
+                spaceId: run.spaceId,
+                createdByUserId: run.userId,
+                originKey: { not: null },
+              },
+              select: { id: true, originThreadId: true, originRunId: true, assigneeBotId: true },
+            });
+            if (
+              work?.originThreadId &&
+              work.assigneeBotId === bot.id &&
+              (run.trigger === "tickets" || work.originRunId === run.id)
+            ) {
+              const delivered = () =>
+                deps.prisma.message.findFirst({
+                  where: {
+                    threadId: work.originThreadId!,
+                    runId: run.id,
+                    role: "bot",
+                    clientNonce: { startsWith: `work-receipt:${work.id}:` },
+                  },
+                  select: { id: true },
+                });
+              if (!(await delivered())) {
+                const draft = state.reply.assembled || state.reply.lastDiscardedMidTurnNarration;
+                const deliveryEvents = deps.runtime.run(
+                  {
+                    ...runtimeRequest,
+                    prompt: `The work has not been delivered to its original conversation. Read ticket_get for ticket ${work.id}, then call ticket_update with id and result. Preserve verified findings; use unknown for missing evidence. Return the result through that tool before ending. Do not start a different task.`,
+                    history: [
+                      ...runtimeHistory,
+                      ...(draft ? [{ role: "assistant" as const, content: draft }] : []),
+                    ],
+                    turnCheckpoint: undefined,
+                    resumeToolResult: undefined,
+                    resumeFromCheckpoint: undefined,
+                  },
+                  runtimeContext,
+                );
+                if (await consumeRunEvents(ctx, deliveryEvents)) return;
+                if (await interruptedByShutdown()) return;
+                if (!(await delivered())) {
+                  throw new Error("Ticket execution ended without delivering its work receipt.");
+                }
+              }
+            }
+          }
           await completeRun(ctx);
         } catch (turnError) {
           if (await interruptedByShutdown()) return;

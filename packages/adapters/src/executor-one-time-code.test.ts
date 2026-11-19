@@ -7,6 +7,13 @@ import type * as ComputerLifecycleModule from "./computer-lifecycle.js";
 import { createRunExecutor } from "./executor.js";
 import type * as RunNotificationsModule from "./run-notifications.js";
 import { EncryptedSecretStore } from "./secrets.js";
+import type * as TaughtSkillRevisionsModule from "./taught-skill-revisions.js";
+
+// These fakes hold no pinned skill revisions; the pin store is tested against a real database.
+vi.mock("./taught-skill-revisions.js", async (importOriginal) => ({
+  ...(await importOriginal<typeof TaughtSkillRevisionsModule>()),
+  listPinnedTaughtSkillRevisions: async () => [],
+}));
 
 const COMPUTER: ComputerRef = {
   id: "sandbox-1",

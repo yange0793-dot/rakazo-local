@@ -10,6 +10,13 @@ import type * as ModelRolesModule from "./model-roles.js";
 import type * as ModelSelectionModule from "./model-selection.js";
 import { findConnectedModelCredential } from "./model-selection.js";
 import type * as RunModelModule from "./run-model.js";
+import type * as TaughtSkillRevisionsModule from "./taught-skill-revisions.js";
+
+// These fakes hold no pinned skill revisions; the pin store is tested against a real database.
+vi.mock("./taught-skill-revisions.js", async (importOriginal) => ({
+  ...(await importOriginal<typeof TaughtSkillRevisionsModule>()),
+  listPinnedTaughtSkillRevisions: async () => [],
+}));
 
 vi.mock("./model-selection.js", async (importOriginal) => ({
   ...(await importOriginal<typeof ModelSelectionModule>()),

@@ -6,6 +6,7 @@ type PresentableMessage = {
   runId?: string;
   role?: string;
   replyToMessageId?: string | null;
+  clientNonce?: string | null;
   blocks: readonly MessageBlock[];
 };
 
@@ -53,6 +54,22 @@ export function isBackgroundInputBlock(block: unknown): boolean {
       block.kind === "computer" ||
       block.kind === "mcp_approval" ||
       block.kind === "app_connect")
+  );
+}
+
+export function isWorkReceiptMessage(message: {
+  role?: unknown;
+  clientNonce?: unknown;
+  replyToMessageId?: unknown;
+  blocks?: unknown;
+}): boolean {
+  return (
+    message.role === "bot" &&
+    typeof message.clientNonce === "string" &&
+    message.clientNonce.startsWith("work-receipt:") &&
+    typeof message.replyToMessageId === "string" &&
+    Array.isArray(message.blocks) &&
+    message.blocks.some((block) => block?.kind === "file")
   );
 }
 
@@ -150,7 +167,7 @@ export function foldPeerReplies<T extends PresentableMessage>(
     // show; like a scheduled routine, only what the bot does with it appears.
     if (isDeliveryMessage(message.blocks)) return false;
     if (message.runId && backgroundRunIds.has(message.runId)) {
-      return message.blocks.some(isBackgroundInputBlock);
+      return isWorkReceiptMessage(message) || message.blocks.some(isBackgroundInputBlock);
     }
     if (isPeerReceiptBlocks(message.blocks)) {
       return includePeerReceipts && !mergedInto.has(message.id);

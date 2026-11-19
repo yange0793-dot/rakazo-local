@@ -84,6 +84,9 @@ export function projectMessages(
         botId: event.botId ?? undefined,
         ...payloadAuthor(payload),
         runId: event.runId ?? undefined,
+        clientNonce: typeof payload.clientNonce === "string" ? payload.clientNonce : undefined,
+        replyToMessageId:
+          typeof payload.replyToMessageId === "string" ? payload.replyToMessageId : undefined,
         createdAt,
       });
       continue;

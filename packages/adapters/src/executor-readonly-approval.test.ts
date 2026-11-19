@@ -27,10 +27,17 @@ import {
   lazyCatalogTools,
   resolveCatalogCall,
 } from "./lazy-tool-catalog.js";
+import type * as TaughtSkillRevisionsModule from "./taught-skill-revisions.js";
 import { refusalCode } from "./tool-refusal.js";
 import type { TurnCheckpoint } from "./turn-checkpoint.js";
 import { serializeTurnCheckpoint } from "./turn-checkpoint.js";
 import type { UserDeviceGateway } from "./user-device-protocol.js";
+
+// These fakes hold no pinned skill revisions; the pin store is tested against a real database.
+vi.mock("./taught-skill-revisions.js", async (importOriginal) => ({
+  ...(await importOriginal<typeof TaughtSkillRevisionsModule>()),
+  listPinnedTaughtSkillRevisions: async () => [],
+}));
 
 vi.mock("./computer-lifecycle.js", async (importOriginal) => ({
   ...(await importOriginal<typeof ComputerLifecycleModule>()),

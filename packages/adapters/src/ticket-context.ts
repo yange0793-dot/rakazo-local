@@ -1,7 +1,8 @@
 import { parseTicketRef } from "@rakazo/contracts";
 import { escapePromptData } from "@rakazo/core";
-import type { PrismaClient } from "@rakazo/db";
+import type { Prisma, PrismaClient } from "@rakazo/db";
 import { coerceTicketStatus } from "@rakazo/db";
+import { ticketReceiptsEnabled } from "./ticket-receipt-config.js";
 import { byteLength, truncateUtf8 } from "./utf8.js";
 
 const MAX_TICKET_CONTEXT_BYTES = 4 * 1024;
@@ -73,29 +74,98 @@ export function renderTicketContext(
 
 export async function loadAgentTicketContext(
   deps: { prisma: PrismaClient; ticketBoardEnabled?: boolean },
-  input: { spaceId: string; text: string },
+  input: {
+    spaceId: string;
+    text: string;
+    ticketId?: string | null;
+    origin?: { threadId: string; userId: string; botId: string; messageId?: string | null };
+  },
   maxBytes = MAX_TICKET_CONTEXT_BYTES,
 ): Promise<string | undefined> {
-  if (!deps.ticketBoardEnabled || !TICKET_REF_HINT.test(input.text)) return undefined;
+  if (!deps.ticketBoardEnabled) return undefined;
+  const receipts = ticketReceiptsEnabled();
+  const origin = receipts ? input.origin : undefined;
+  const ticketId = receipts ? input.ticketId : undefined;
+  if (!origin && !ticketId && !TICKET_REF_HINT.test(input.text)) return undefined;
 
   const board = await deps.prisma.board.findUnique({ where: { spaceId: input.spaceId } });
   if (!board) return undefined;
 
   const refs = extractTicketRefs(input.text, board.ticketPrefix);
-  if (refs.length === 0) return undefined;
-
   const wanted = refs.flatMap((ref) => {
     const parsed = parseTicketRef(ref, board.ticketPrefix);
     return parsed ? [{ ref, number: parsed.number }] : [];
   });
-  if (wanted.length === 0) return undefined;
+  const filters: Prisma.TicketWhereInput[] = [];
+  if (ticketId) filters.push({ id: ticketId });
+  if (wanted.length) filters.push({ number: { in: wanted.map((item) => item.number) } });
+
+  let repliedTicketId: string | null | undefined;
+  let repliedRequestId: string | undefined;
+  const originFilter = origin
+    ? {
+        originThreadId: origin.threadId,
+        createdByUserId: origin.userId,
+        createdByBotId: origin.botId,
+      }
+    : undefined;
+  if (origin?.messageId) {
+    const source = await deps.prisma.message.findFirst({
+      where: {
+        id: origin.messageId,
+        threadId: origin.threadId,
+        role: "user",
+        authorUserId: origin.userId,
+      },
+      select: {
+        replyTo: {
+          select: {
+            id: true,
+            threadId: true,
+            role: true,
+            botId: true,
+            runId: true,
+            clientNonce: true,
+          },
+        },
+      },
+    });
+    const parent = source?.replyTo;
+    if (parent?.threadId === origin.threadId) {
+      if (parent.role === "user") repliedRequestId = parent.id;
+      if (
+        parent.role === "bot" &&
+        parent.botId === origin.botId &&
+        parent.runId &&
+        parent.clientNonce?.startsWith("work-receipt:")
+      ) {
+        repliedTicketId = (
+          await deps.prisma.run.findFirst({
+            where: {
+              id: parent.runId,
+              spaceId: input.spaceId,
+              userId: origin.userId,
+              ticket: { is: originFilter },
+            },
+            select: { ticketId: true },
+          })
+        )?.ticketId;
+      }
+      if (repliedTicketId) filters.push({ ...originFilter, id: repliedTicketId });
+      if (repliedRequestId) filters.push({ ...originFilter, originMessageId: repliedRequestId });
+    }
+  }
+  const recentOpen = filters.length === 0 && originFilter;
+  if (recentOpen) filters.push({ ...originFilter, status: { notIn: ["done", "closed"] } });
+  if (!filters.length) return undefined;
 
   const rows = await deps.prisma.ticket.findMany({
     where: {
       spaceId: input.spaceId,
       boardId: board.id,
-      number: { in: wanted.map((item) => item.number) },
+      ...(filters.length === 1 ? filters[0] : { OR: filters }),
     },
+    ...(recentOpen ? { orderBy: { updatedAt: "desc" as const }, take: 3 } : {}),
   });
   if (rows.length === 0) return undefined;
 
@@ -121,11 +191,23 @@ export async function loadAgentTicketContext(
   const rowByNumber = new Map(rows.map((row) => [row.number, row]));
 
   const entries: TicketContextEntry[] = [];
-  for (const item of wanted) {
-    const row = rowByNumber.get(item.number);
+  const numbers = new Set([
+    ...rows
+      .filter(
+        (row) =>
+          row.id === ticketId ||
+          row.id === repliedTicketId ||
+          (repliedRequestId !== undefined && row.originMessageId === repliedRequestId),
+      )
+      .map((row) => row.number),
+    ...wanted.map((item) => item.number),
+    ...rows.map((row) => row.number),
+  ]);
+  for (const number of numbers) {
+    const row = rowByNumber.get(number);
     if (!row) continue;
     entries.push({
-      ref: item.ref,
+      ref: `${board.ticketPrefix}-${number}`,
       title: row.title,
       status: coerceTicketStatus(row.status),
       assignee: row.assigneeBotId ? (botNameById.get(row.assigneeBotId) ?? null) : null,

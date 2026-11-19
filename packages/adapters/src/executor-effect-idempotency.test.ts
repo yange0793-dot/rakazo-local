@@ -15,6 +15,13 @@ import type * as AutoReviewModule from "./auto-review.js";
 import type * as ComputerLifecycleModule from "./computer-lifecycle.js";
 import { createRunExecutor } from "./executor.js";
 import { FakeMediaGenerationProvider } from "./media-generation-provider.js";
+import type * as TaughtSkillRevisionsModule from "./taught-skill-revisions.js";
+
+// These fakes hold no pinned skill revisions; the pin store is tested against a real database.
+vi.mock("./taught-skill-revisions.js", async (importOriginal) => ({
+  ...(await importOriginal<typeof TaughtSkillRevisionsModule>()),
+  listPinnedTaughtSkillRevisions: async () => [],
+}));
 
 vi.mock("./computer-lifecycle.js", async (importOriginal) => ({
   ...(await importOriginal<typeof ComputerLifecycleModule>()),

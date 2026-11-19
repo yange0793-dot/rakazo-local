@@ -182,6 +182,48 @@ export function contentEncryptionOf(prisma: unknown): ContentEncryption | undefi
   return typeof accessor === "function" ? accessor.call(prisma) : undefined;
 }
 
+/** Append-only skill snapshots use explicit raw SQL; they never need parent-row lookups. */
+export interface TaughtSkillSnapshotLocation {
+  table: "taught_skill_revisions" | "run_taught_skill_revisions";
+  rowId: string;
+  spaceId: string;
+  /** The skill for a revision, or the run for its fixed copy. */
+  owner: string;
+}
+
+export async function sealTaughtSkillSnapshot(
+  prisma: unknown,
+  location: TaughtSkillSnapshotLocation,
+  snapshot: unknown,
+): Promise<unknown> {
+  const encryption = contentEncryptionOf(prisma);
+  if (!encryption?.ring.encryptWrites) return snapshot;
+  const key = await encryption.ring.current(location.spaceId);
+  return sealJson(snapshot, new Set(), (text) =>
+    encryptText(key, { ...location, column: "snapshot" }, text),
+  );
+}
+
+export async function openTaughtSkillSnapshot(
+  prisma: unknown,
+  location: TaughtSkillSnapshotLocation,
+  snapshot: unknown,
+): Promise<unknown> {
+  const ids = jsonKeyIds(snapshot);
+  if (!ids.length) return snapshot;
+  const encryption = contentEncryptionOf(prisma);
+  if (!encryption) throw new ContentDecryptionError("Skill snapshots need their content key");
+  const keys = new Map(
+    await Promise.all(ids.map(async (id) => [id, await encryption.ring.byId(id)] as const)),
+  );
+  return openJson(snapshot, (text) => {
+    const key = keys.get(ciphertextKeyId(text)!)!;
+    if (key.spaceId !== location.spaceId)
+      throw new ContentDecryptionError("Skill snapshot belongs to another space");
+    return decryptText(key, { ...location, column: "snapshot" }, text);
+  });
+}
+
 /**
  * Boot check for composition roots. A malformed master key configuration throws,
  * so the process fails at startup instead of on the first message; master key
