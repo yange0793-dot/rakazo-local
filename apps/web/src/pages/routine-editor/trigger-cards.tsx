@@ -30,8 +30,8 @@ import type { ReactNode } from "react";
 import { useId } from "react";
 import { BotEmailAddressField } from "../../components/BotEmailAddressField";
 import { InfoTooltip } from "../../components/InfoTooltip";
-import { authClient } from "../../lib/auth";
 import { useCopyText } from "../../lib/copy-text";
+import { useLocalIdentity } from "../../lib/local-identity";
 import type { RoutineWatchDraft } from "../../lib/routine-draft";
 
 export function WatchTriggerCard({
@@ -260,7 +260,8 @@ export function EmailTriggerCard({
   onRemove: () => void;
 }) {
   const { t } = useLingui();
-  const ownerEmail = authClient.useSession().data?.user.email ?? "";
+  const { user } = useLocalIdentity();
+  const ownerEmail = user.email;
   const ownerDomain = ownerEmail.slice(ownerEmail.lastIndexOf("@") + 1);
 
   return (

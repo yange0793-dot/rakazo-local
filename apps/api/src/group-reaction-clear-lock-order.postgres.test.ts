@@ -67,7 +67,6 @@ describe.skipIf(!enabled)("group reaction and clear lock order (PostgreSQL)", ()
       provisionMessagingIdentity(
         prisma,
         { provider: "test", address },
-        { signupsEnabled: undefined, signupAllowlist: undefined },
       ),
     );
     provisioned = true;

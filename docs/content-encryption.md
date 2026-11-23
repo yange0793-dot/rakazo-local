@@ -219,7 +219,7 @@ process unwraps them once at startup. To wrap a value the API already has:
 
 ```bash
 docker compose -f docker-compose.images.yml exec -T api \
-  sh -c 'printenv BETTER_AUTH_SECRET | node dist/cli/wrap-env.js BETTER_AUTH_SECRET'
+  sh -c 'printenv SCREEN_PROXY_SECRET | node dist/cli/wrap-env.js SCREEN_PROXY_SECRET'
 ```
 
 For a new value, pipe it in instead of `printenv` (it is read from stdin, never

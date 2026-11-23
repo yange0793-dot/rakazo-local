@@ -59,7 +59,7 @@ app.example.com {
 }
 ```
 
-在 `.env` 中将 `BETTER_AUTH_URL`、`WEB_ORIGIN` 和 `API_URL` 都设为同一个 HTTPS 来源地址，
+在 `.env` 中将 `WEB_ORIGIN` 和 `API_URL` 都设为同一个 HTTPS 来源地址，
 并将 `RAKAZO_HOST` 设为其主机名，例如 `app.example.com`。Cookie 和跨域检查使用这些地址。
 网页服务会将 `/api` 和 `/rpc` 代理到后端，不要将 `3100` 端口暴露到公网。
 
@@ -83,7 +83,7 @@ cp .env.example .env
 
 将 `POSTGRES_PASSWORD` 和 `POSTGRES_APP_PASSWORD` 分别设为 `openssl rand -hex 16` 生成的值，
 并填入 `DATABASE_MIGRATION_URL` 和 `DATABASE_URL`。
-为 `BETTER_AUTH_SECRET`、`ENCRYPTION_KEY`、`SCREEN_PROXY_SECRET` 和 `SANDBOX_SUPERVISOR_TOKEN`
+为 `ENCRYPTION_KEY`、`SCREEN_PROXY_SECRET` 和 `SANDBOX_SUPERVISOR_TOKEN`
 分别生成至少 32 个字符的独立密钥；`ENCRYPTION_KEY` 使用 64 个十六进制字符。已有安装必须保留原密钥，否则已存储的凭据可能无法解密。
 
 ```bash

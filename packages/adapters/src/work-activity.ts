@@ -1,4 +1,5 @@
 import { createHmac } from "node:crypto";
+import { isLocalInstallSessionId } from "@rakazo/contracts";
 import {
   ACTIVE_RUN_STATUSES,
   BACKGROUND_HELPER_TRIGGER,
@@ -255,28 +256,18 @@ export class WorkActivities {
     });
   }
 
-  /** A session ended or was replaced: its cards end, or move to the session that replaced it. */
-  async endSession(userId: string, sessionId: string, nextSessionId?: string): Promise<void> {
-    if (nextSessionId) {
-      await runAsSystem("move live status cards to a replacement session", () =>
-        this.prisma.workActivityToken.updateMany({
-          where: { userId, sessionId },
-          data: { sessionId: nextSessionId },
-        }),
-      );
-      await runAsSystem("move a phone's live status card starts to a replacement session", () =>
-        this.prisma.workActivityStartToken.updateMany({
-          where: { userId, sessionId },
-          data: { sessionId: nextSessionId },
-        }),
-      );
-      return;
-    }
-    // A signed-out phone is started no more cards.
+  /** Removes the notifications registered by one local installation. */
+  async endSession(userId: string, sessionId: string): Promise<void> {
+    const cards = await runAsSystem("load one installation's live status cards", () =>
+      this.prisma.workActivityToken.findMany({
+        where: { userId, sessionId },
+        select: { tokenDigest: true, userId: true, ciphertext: true },
+      }),
+    );
+    await this.endCards(cards);
     await runAsSystem("stop starting live status cards for a session", () =>
       this.prisma.workActivityStartToken.deleteMany({ where: { userId, sessionId } }),
     );
-    this.userChanged(userId);
   }
 
   /** The account is being deleted: its cards end now, before their rows go with it. */
@@ -341,19 +332,11 @@ export class WorkActivities {
       this.prisma.workActivityStartToken.findMany({ where: { userId } }),
     );
     if (!cards.length && !phones.length) return;
-    const sessions = await runAsSystem("check the sessions behind a user's cards", () =>
-      this.prisma.session.findMany({
-        where: {
-          id: {
-            in: [...new Set([...cards, ...phones].map((card) => card.sessionId))],
-          },
-          userId,
-          expiresAt: { gt: new Date() },
-        },
-        select: { id: true },
-      }),
+    const live = new Set(
+      [...cards, ...phones]
+        .map((item) => item.sessionId)
+        .filter((sessionId) => isLocalInstallSessionId(sessionId)),
     );
-    const live = new Set(sessions.map((session) => session.id));
     const { state, since, newest } = await this.work(userId);
     const started = await this.startCards(userId, state, since, newest, at, cards, phones, live);
     // Keyed, so the stored digest reveals nothing about the chat content it stands for.

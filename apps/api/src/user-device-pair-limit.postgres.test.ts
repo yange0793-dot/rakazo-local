@@ -1,11 +1,10 @@
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { EmailEmulator, FakeSandboxProvider, USER_DEVICE_LIMIT } from "@rakazo/adapters";
+import { FakeSandboxProvider, USER_DEVICE_LIMIT } from "@rakazo/adapters";
 import { USER_DEVICE_PAIR_PATH } from "@rakazo/contracts";
 import { runAsSystem } from "@rakazo/db";
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
-import { sessionCookieHeader } from "../../../packages/testkit/src/index.js";
 import type { AppHandles } from "./app.js";
 import { createApp } from "./app.js";
 
@@ -15,9 +14,6 @@ const webOrigin = "http://127.0.0.1:5173";
 describe.skipIf(!databaseUrl)("pairing holds the per-user device limit under races", () => {
   let handles: AppHandles;
   let dataDir: string;
-  const email = new EmailEmulator();
-  const stamp = Date.now();
-  let account = 0;
 
   beforeAll(async () => {
     dataDir = await mkdtemp(join(tmpdir(), "rakazo-device-pair-limit-"));
@@ -28,11 +24,7 @@ describe.skipIf(!databaseUrl)("pairing holds the per-user device limit under rac
       sandbox: new FakeSandboxProvider(),
       agentRuntime: "scripted",
       wakeupDriver: "memory",
-      signupsEnabled: "true",
-      signupAllowlist: "",
       webOrigin,
-      authUrl: webOrigin,
-      email,
     });
   });
 
@@ -41,48 +33,23 @@ describe.skipIf(!databaseUrl)("pairing holds the per-user device limit under rac
     await rm(dataDir, { recursive: true, force: true });
   });
 
-  async function auth(path: string, body: object, cookie = "") {
-    const response = await handles.app.request(`/api/auth${path}`, {
-      method: "POST",
-      headers: {
-        "content-type": "application/json",
-        origin: webOrigin,
-        ...(cookie ? { cookie } : {}),
-      },
-      body: JSON.stringify(body),
-    });
-    expect(response.status, `${path}: ${await response.clone().text()}`).toBe(200);
-    return response;
-  }
-
-  async function newAccount() {
-    const address = `device-pair-limit-${stamp}-${++account}@example.test`;
-    const password = "test-password-123";
-    await auth("/sign-up/email", { email: address, password, name: "Owner" });
-    const signIn = async () =>
-      sessionCookieHeader(await auth("/sign-in/email", { email: address, password }));
-    return { signIn };
-  }
-
-  const pairRequest = (cookie: string, name: string) =>
+  const pairRequest = (name: string) =>
     handles.app.request(USER_DEVICE_PAIR_PATH, {
       method: "POST",
-      headers: { "content-type": "application/json", cookie },
+      headers: { "content-type": "application/json" },
       body: JSON.stringify({ name, platform: "darwin" }),
     });
 
-  async function pair(cookie: string) {
-    const response = await pairRequest(cookie, "Desktop");
+  async function pair() {
+    const response = await pairRequest("Desktop");
     expect(response.status).toBe(201);
     return (await response.json()) as { userId: string };
   }
 
   it("keeps exactly the limit when two pairings race at it", async () => {
-    const owner = await newAccount();
-    const cookie = await owner.signIn();
     let userId = "";
     for (let index = 0; index < USER_DEVICE_LIMIT - 1; index += 1)
-      userId = (await pair(cookie)).userId;
+      userId = (await pair()).userId;
 
     // Hold the account row, so both pairings count before either insert commits:
     // the insert needs a key share of that row and waits for the update lock.
@@ -93,8 +60,8 @@ describe.skipIf(!databaseUrl)("pairing holds the per-user device limit under rac
           await tx.$queryRaw`SELECT id FROM "user" WHERE id = ${userId} FOR UPDATE`;
           const [held] = await tx.$queryRaw<Array<{ pid: number }>>`SELECT pg_backend_pid() AS pid`;
           racing.push(
-            Promise.resolve(pairRequest(cookie, "Racer A")),
-            Promise.resolve(pairRequest(cookie, "Racer B")),
+            Promise.resolve(pairRequest("Racer A")),
+            Promise.resolve(pairRequest("Racer B")),
           );
           // Count only sessions queued behind this holder, directly or behind a queued
           // pairing, in this database; poll outside the transaction so every check reads

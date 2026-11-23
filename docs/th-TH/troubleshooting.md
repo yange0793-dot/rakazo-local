@@ -29,7 +29,7 @@ settings needed. Do not disable authentication or URL validation to bypass the e
 
 1. คัดลอก origin จากแถบที่อยู่ (scheme + hostname + port ไม่มี path) เช่น `https://app.example.com` หรือ `http://127.0.0.1:5173`
 2. เปิด Rakazo ที่ origin เดียวกับ `WEB_ORIGIN` — `localhost` กับ `127.0.0.1` ถือว่าคนละค่า เช่นเดียวกับ HTTP กับ HTTPS หรือพอร์ตที่ต่างกัน
-3. ถ้าตั้งผิด แก้ `WEB_ORIGIN` ให้ตรงกับที่คนใช้จริง production ตั้ง HTTPS แล้วให้ `BETTER_AUTH_URL` และ `API_URL` ตรงกัน
+3. ถ้าตั้งผิด แก้ `WEB_ORIGIN` ให้ตรงกับที่คนใช้จริง production ตั้ง HTTPS แล้วให้ `API_URL` ตรงกัน
 4. **recreate** คอนเทนเนอร์ API ด้วย Compose และ env เดิม — restart อย่างเดียวไม่อัปเดต env
 5. เปิด origin ที่เลือกแล้วเชื่อม integration ใหม่
 

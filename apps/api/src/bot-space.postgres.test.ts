@@ -24,7 +24,6 @@ describePostgres("the Space of a linked bot (PostgreSQL)", () => {
     const { spaceId } = await bootstrapUserSpace(
       system,
       { id: userId },
-      { signupsEnabled: undefined, signupAllowlist: undefined },
     );
     return { userId, spaceId, email, isDeploymentOwner: false };
   }

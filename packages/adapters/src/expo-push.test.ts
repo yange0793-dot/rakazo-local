@@ -184,7 +184,7 @@ describe("expo push", () => {
     });
   });
 
-  it("does not deliver a token whose session row is gone, and leaves it to be retargeted", async () => {
+  it("does not deliver a token whose session row is gone, until the local device registers again", async () => {
     const tokens = new MemoryPushTokenStore();
     const token = "ExponentPushToken[test]";
     await tokens.save("user-1", token, "session-1");
@@ -202,11 +202,11 @@ describe("expo push", () => {
     await expect(loadPushToken(tokens, "user-1")).resolves.toBe(token);
     await expect(push.hasPushRecipient("user-1")).resolves.toBe(false);
 
-    await tokens.endSession("user-1", "session-1", "session-2");
+    await tokens.save("user-1", token, "rakazo-local-install:phone");
     await expect(loadPushToken(tokens, "user-1")).resolves.toBe(token);
     const replaced = new ExpoPushProvider(tokens, {
       sessionExpiresAt: async (sessionId) =>
-        sessionId === "session-2" ? new Date(Date.now() + 60_000) : null,
+        sessionId === "rakazo-local-install:phone" ? new Date(Date.now() + 60_000) : null,
     });
     await expect(replaced.hasPushRecipient("user-1")).resolves.toBe(true);
   });

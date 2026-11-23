@@ -8,8 +8,8 @@ import {
   captureScreenshot,
   clickAndWaitForRpc,
   completeOnboarding,
+  openLocalWorkspace,
   rpc,
-  signup,
 } from "./helpers";
 
 const skill = (name: string, description: string) =>
@@ -102,8 +102,7 @@ test("imports an OpenClaw folder and another assistant's document as new bots", 
   page,
   context,
 }, testInfo) => {
-  const stamp = Date.now();
-  await signup(page, `agent-import-${stamp}@rakazo.test`, "password12", "Import User");
+  await openLocalWorkspace(page, "Import User");
   await completeOnboarding(page);
   await page.goto("/app");
   await page.waitForURL(/\/app\/[^/]+$/);

@@ -22,7 +22,7 @@ import { hapticImpact, hapticSuccess } from "./haptics";
 import { resumeLiveNotifications } from "./live-notifications";
 import type { MobileBot, MobileMessage, MobileSnapshot } from "./mobile-types";
 import { takePageReply } from "./pages";
-import { currentSessionGeneration, loadSessionToken } from "./session";
+import { currentSessionGeneration, loadLocalInstallSessionId } from "./session";
 import { answerThreadMessage } from "./thread-answer";
 import type { useThreadAttachments } from "./thread-attachments";
 import type { SendAttempt, useThreadFeedback } from "./thread-feedback";
@@ -246,7 +246,7 @@ export function useThreadSend({
     const generation = currentSessionGeneration();
     const apiBase = currentApiBase();
     const spaceId = selectedSpaceId();
-    void loadSessionToken()
+    void loadLocalInstallSessionId()
       .then((token) => {
         if (
           generation === currentSessionGeneration() &&

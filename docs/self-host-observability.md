@@ -123,7 +123,7 @@ the public capture token so user and event identities stay stable. Never send th
 secret to the browser or collector. Set `ANALYTICS_PROVIDER=none` to disable it.
 The public website uses its separate `PUBLIC_POSTHOG_KEY` configuration.
 
-The backend sends account creation, session creation, fixed screen names, message
+The backend sends fixed screen names, message
 counts, and run starts/outcomes. Run events include the shared trigger enum;
 analytics does not read or classify error text. User identifiers are pseudonymized
 with the server-only secret. No names,
@@ -143,12 +143,9 @@ durable audit trail, and events from before enablement are not backfilled.
 
 The API and worker append a row to `security_events` and write a `security.event` log line for:
 
-- sign-up, sign-in, sign-out, and failed sign-in or sign-up
-- session revocation, password and passkey changes, and account deletion
-- accounts the identity provider deactivated or reactivated ([SCIM](./self-host-accounts.md#directory-provisioning-scim))
 - model, MCP, connector, voice, memory, and secret credentials created, changed, or removed
 - deployment settings changes, approval decisions, and approval policy changes
-- refused private or internal destinations (`egress.refused`) and auth rate-limit hits
+- refused private or internal destinations (`egress.refused`)
 
 Each event has the user, space, client address, user agent, time, and a few identifiers. Events
 never include message content, secrets, or tokens. Rows older than `SECURITY_EVENT_RETENTION_DAYS`
@@ -176,26 +173,6 @@ names are the literal keys in each line: `message`, `security.event.type`, `clie
 `user_agent.original`, `user.id`, and the `security.event.metadata` object. Tune the thresholds to
 your traffic.
 
-Sign-up bursts from one address:
-
-```sql
-SELECT "client.ip", count(*) FROM logs
-WHERE message = 'security.event' AND "security.event.type" = 'auth.sign_up'
-GROUP BY "client.ip", bucket(1 hour) HAVING count(*) > 3
-```
-
-Password guessing, from one address and across many:
-
-```sql
-SELECT "client.ip", count(*) FROM logs
-WHERE "security.event.type" IN ('auth.sign_in.failed', 'rate_limit.hit')
-GROUP BY "client.ip", bucket(15 minutes) HAVING count(*) > 10;
-
-SELECT count(DISTINCT "client.ip") FROM logs
-WHERE "security.event.type" = 'auth.sign_in.failed'
-GROUP BY bucket(15 minutes) HAVING count(*) > 50
-```
-
 Probes of internal addresses. Any hit deserves a look:
 
 ```sql
@@ -204,24 +181,12 @@ FROM logs WHERE "security.event.type" = 'egress.refused'
 GROUP BY 1, 2, 3
 ```
 
-Scripted clients on account routes:
+Credential and settings changes:
 
 ```sql
-SELECT "client.ip", "user_agent.original", count(*) FROM logs
-WHERE "security.event.type" LIKE 'auth.%'
-  AND ("user_agent.original" IS NULL
-    OR lower("user_agent.original") SIMILAR TO '%(curl|wget|python|go-http-client|headless|okhttp|java/)%')
-GROUP BY 1, 2
-```
-
-Credential and settings changes from an address that user has not signed in from:
-
-```sql
-SELECT * FROM logs c
-WHERE (c."security.event.type" LIKE 'credential.%'
-    OR c."security.event.type" = 'deployment.settings.changed')
-  AND NOT EXISTS (SELECT 1 FROM logs s WHERE s."security.event.type" = 'auth.sign_in'
-    AND s."user.id" = c."user.id" AND s."client.ip" = c."client.ip")
+SELECT * FROM logs
+WHERE "security.event.type" LIKE 'credential.%'
+    OR "security.event.type" = 'deployment.settings.changed'
 ```
 
 ## Host checks and alerts

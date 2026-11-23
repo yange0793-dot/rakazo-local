@@ -30,12 +30,8 @@ import type { MobileSnapshot } from "./mobile-types";
 import { reportMobileError } from "./monitoring";
 import { saveServerHeaders } from "./server-headers";
 import {
-  clearSessionToken,
   currentSessionGeneration,
-  replaceSessionTokenIfCurrent,
-  restoreSessionToken,
-  rotateSessionTokenIfCurrent,
-  saveSessionToken,
+  changeLocalEndpoint,
 } from "./session";
 import type { UiLocale } from "./ui-locale";
 import { ensureVoiceConsent, setDictationAudio } from "./voice";
@@ -104,7 +100,6 @@ const expoAudioMock = vi.hoisted(() => () => ({
   setAudioModeAsync: async (mode: unknown) => audio.setAudioMode(mode),
 }));
 vi.mock("expo-audio", () => expoAudioMock());
-vi.mock("./api-auth", () => ({}));
 vi.mock("./api", () => ({
   applyMobileThreadEvent: vi.fn(),
   // The live session's context, so the production recorder's voice consent check can run.
@@ -701,7 +696,7 @@ describe("mobile call session", () => {
           botName: "Ada",
           requestContext: {
             apiBase: server,
-            headers: { authorization: "Bearer token" },
+            headers: { "x-rakazo-install-id": "rakazo-local-install:test" },
             sessionGeneration: currentSessionGeneration(),
           },
         },
@@ -2231,7 +2226,6 @@ describe("mobile call microphone after hang-up", () => {
 
 describe("mobile call on a session change", () => {
   beforeEach(async () => {
-    await saveSessionToken("fake-token-a");
     const { captureApiRequestContext, rpc } = await import("./api");
     vi.mocked(captureApiRequestContext).mockImplementation(async () => ({
       apiBase: "https://api.example.test",
@@ -2248,20 +2242,7 @@ describe("mobile call on a session change", () => {
     vi.mocked(rpc).mockReset();
   });
 
-  it.each([
-    ["sign-out", () => clearSessionToken()],
-    ["sign-in to another account", () => saveSessionToken("fake-token-b")],
-    ["server change", () => restoreSessionToken("fake-token-b")],
-    [
-      "SSO or passkey sign-in",
-      () => replaceSessionTokenIfCurrent(currentSessionGeneration(), "fake-token-b"),
-    ],
-    // Its requests are pinned to the session the server just revoked.
-    [
-      "password change",
-      () => rotateSessionTokenIfCurrent(currentSessionGeneration(), "fake-token-a", "fake-token-b"),
-    ],
-  ])("ends the call and closes its microphone and feed on %s", async (_name, change) => {
+  it("ends the call and closes its microphone and feed on a server change", async () => {
     const fake = fakes({ onDevice: true });
     startCall({ botId: "bot-1", botName: "Ada", transcribe: false }, fake.deps);
     await flush();
@@ -2269,7 +2250,7 @@ describe("mobile call on a session change", () => {
     vi.mocked(hapticImpact).mockClear();
     vi.mocked(hapticSuccess).mockClear();
 
-    const changing = change();
+    const changing = changeLocalEndpoint(() => {});
     // Before the new session is stored, so nothing of the call can reach it.
     expect(getSnapshot()).toBeNull();
     expect(fake.signals[0]?.aborted).toBe(true);
@@ -2285,7 +2266,7 @@ describe("mobile call on a session change", () => {
     const fake = fakes({ onDevice: true });
     // The caller captures the session, then awaits its voice checks while the account changes.
     const setupSession = currentSessionGeneration();
-    await saveSessionToken("fake-token-b");
+    await changeLocalEndpoint(() => {});
     const started = startCall(
       { botId: "bot-1", botName: "Ada", transcribe: false, session: setupSession },
       fake.deps,
@@ -2303,8 +2284,7 @@ describe("mobile call on a session change", () => {
     startCall({ botId: "bot-1", botName: "Ada" }, deps);
     await flush();
 
-    await clearSessionToken();
-    await saveSessionToken("fake-token-b");
+    await changeLocalEndpoint(() => {});
     // The caller finishes speaking into the old call, then hangs up.
     fake.say("hello");
     await flush();
@@ -2345,7 +2325,7 @@ describe("mobile call on a session change", () => {
     fake.say("hello");
     await flush();
 
-    await saveSessionToken("fake-token-b");
+    await changeLocalEndpoint(() => {});
     sending.resolve({ runId: "run-1" });
     await flush();
     endCall();
@@ -2370,7 +2350,7 @@ describe("mobile call on a session change", () => {
     await flush();
 
     await endCallBeforeSessionEnd();
-    await clearSessionToken();
+    await changeLocalEndpoint(() => {});
 
     expect(rpc).toHaveBeenCalledWith(
       "threads/endCall",

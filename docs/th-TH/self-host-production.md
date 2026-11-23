@@ -15,17 +15,14 @@ sudo --preserve-env=SSH_CONNECTION DEPLOY_USER=deploy bash infra/compose/harden-
 เปิด SSH console ไว้จนล็อกอิน SSH ใหม่สำเร็จหลังรีโหลด SSH
 
 1. ตั้ง DNS `A`/`AAAA` ชี้ VM เปิด TCP 80/443 (และ UDP 443 ถ้าต้องการ)
-2. clone repo สร้าง `.env` อย่างน้อย: `POSTGRES_PASSWORD`, `BETTER_AUTH_SECRET`, `ENCRYPTION_KEY`, `SCREEN_PROXY_SECRET`, `OPENROUTER_API_KEY`, key ของ `SANDBOX_PROVIDER`, `RAKAZO_HOST`, `BETTER_AUTH_URL`, `WEB_ORIGIN`, `API_URL` เหมือน HTTPS origin **อย่าเผยแพร่ Postgres**
+2. clone repo สร้าง `.env` อย่างน้อย: `POSTGRES_PASSWORD`, `ENCRYPTION_KEY`, `SCREEN_PROXY_SECRET`, `OPENROUTER_API_KEY`, key ของ `SANDBOX_PROVIDER`, `RAKAZO_HOST`, `WEB_ORIGIN`, `API_URL` เหมือน HTTPS origin **อย่าเผยแพร่ Postgres**
 3. จำกัดการสมัครขณะที่บริการยังไม่เปิดสาธารณะ:
 
 ```env
 NODE_ENV=production
 RAKAZO_HOST=app.example.com
-BETTER_AUTH_URL=https://app.example.com
 WEB_ORIGIN=https://app.example.com
 API_URL=https://app.example.com
-SIGNUPS_ENABLED=true
-SIGNUP_ALLOWLIST=owner@example.com
 SANDBOX_PROVIDER=e2b
 RAKAZO_DEPLOY_DIR=/srv/rakazo
 RAKAZO_IMAGE_TAG=local

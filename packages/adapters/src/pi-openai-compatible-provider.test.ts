@@ -1155,6 +1155,10 @@ describe("built-in public compatible host", () => {
     const transport = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
       expect(init?.redirect).toBe("error");
       expect(new Headers(init?.headers).get("authorization")).toBe("Bearer fake-key");
+      expect(new Headers(init?.headers).get("user-agent")).toBe(
+        "codex_cli_rs/0.154.0 (external, cli)",
+      );
+      expect(new Headers(init?.headers).get("originator")).toBe("codex_cli_rs");
       return String(input).endsWith("/api/balance")
         ? new Response(null)
         : Response.json({ data: [{ id: "example-model" }] });
@@ -1337,6 +1341,38 @@ const anthropicTextResponse = () =>
     headers: { "content-type": "text/event-stream" },
   });
 
+it.each([
+  ["chat-completions", "/v1/chat/completions"],
+  ["responses", "/v1/responses"],
+  ["anthropic-messages", "/v1/messages"],
+] as const)("delivers the %s client identity over HTTP and consumes the terminal event", async (apiProtocol, route) => {
+  let received: { path: string; agent?: string; client?: string | string[] } | undefined;
+  const server = createServer((request, response) => {
+    const path = new URL(request.url!, "http://localhost").pathname;
+    received = { path, agent: request.headers["user-agent"], client: request.headers[apiProtocol === "anthropic-messages" ? "x-app" : "originator"] };
+    request.resume();
+    response.writeHead(200, { "content-type": "text/event-stream" });
+    if (apiProtocol === "anthropic-messages") return response.end(anthropicSse(ANTHROPIC_TEXT_EVENTS));
+    const events = apiProtocol === "responses" ? [
+      { type: "response.created", response: { id: "resp_test", model: "fixture-model", status: "in_progress" } },
+      { type: "response.completed", response: { id: "resp_test", model: "fixture-model", status: "completed", output: [], usage: { input_tokens: 1, output_tokens: 0, total_tokens: 1 } } },
+    ] : [{ id: "chat_test", object: "chat.completion.chunk", model: "fixture-model", choices: [{ index: 0, delta: { content: "ok" }, finish_reason: "stop" }] }];
+    response.end(events.map(e => `data: ${JSON.stringify(e)}\n\n`).join("") + (apiProtocol === "chat-completions" ? "data: [DONE]\n\n" : ""));
+  });
+  await new Promise<void>(resolve => server.listen(0, "127.0.0.1", resolve));
+  try {
+    const models = registerOpenAiCompatibleRuntime(createModels(), { baseUrl: `http://127.0.0.1:${(server.address() as AddressInfo).port}/v1`, modelId: "fixture-model", apiProtocol, allowPrivate: true });
+    const provider = models.getProvider(OPENAI_COMPATIBLE_PROVIDER_ID)!;
+    const model = models.getModel(OPENAI_COMPATIBLE_PROVIDER_ID, "fixture-model")!;
+    const result = await provider.streamSimple(model, normalizeContext({messages: [{role:"user", content:"test",timestamp:1}]}), {apiKey:"fixture"}).result();
+    expect(result.stopReason, result.errorMessage).toBe("stop");
+    expect(received).toEqual({ path: route, agent: apiProtocol === "anthropic-messages" ? "claude-cli/2.1.219 (external, cli)" : "codex_cli_rs/0.154.0 (external, cli)", client: apiProtocol === "anthropic-messages" ? "cli" : "codex_cli_rs" });
+  } finally {
+    server.closeAllConnections();
+    await new Promise<void>((resolve) => server.close(() => resolve()));
+  }
+});
+
 describe("anthropic-messages wire protocol", () => {
   const input = {
     provider: OPENAI_COMPATIBLE_PROVIDER_ID,
@@ -1494,6 +1530,8 @@ describe("anthropic-messages wire protocol", () => {
     expect(seenUrl).toBe("http://127.0.0.1:8000/v1/models");
     expect(seenHeaders?.get("x-api-key")).toBe("fake-api-key");
     expect(seenHeaders?.get("anthropic-version")).toBe("2023-06-01");
+    expect(seenHeaders?.get("user-agent")).toBe("claude-cli/2.1.219 (external, cli)");
+    expect(seenHeaders?.get("x-app")).toBe("cli");
     expect(seenHeaders?.get("authorization")).toBeNull();
   });
 

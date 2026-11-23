@@ -33,7 +33,6 @@ import type {
   verifyModelServesAgents,
   WorkActivities,
 } from "@rakazo/adapters";
-import type { Auth } from "@rakazo/auth";
 import type { NavLink } from "@rakazo/contracts";
 import type { BoardEvents, PrismaClient, SemanticFactStore, ThreadEvents } from "@rakazo/db";
 import type { BillingService } from "./billing.js";
@@ -70,7 +69,7 @@ export { callMarkerClientNonce } from "./routes/threads.js";
 export interface RouterDeps {
   pushTokens: PushTokenStore;
   /** Absent when the deployment cannot update a phone's live status card. */
-  workActivities?: Pick<WorkActivities, "register" | "registerStarts">;
+  workActivities?: Pick<WorkActivities, "register" | "registerStarts" | "endSession">;
   /** Stops a call's ring on the owner's other devices once it is settled. */
   notifications?: NotificationProvider;
   analytics?: ProductAnalytics;
@@ -81,7 +80,6 @@ export interface RouterDeps {
   events: ThreadEvents;
   boardEvents: BoardEvents;
   ticketChanges: TicketChangeNotifier;
-  auth: Auth;
   jobs: JobPublisher;
   sandbox: SandboxProvider;
   memory: MemoryStore;

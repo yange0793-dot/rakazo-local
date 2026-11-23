@@ -5,7 +5,6 @@ import { Button, Input, Switch, Textarea } from "@rakazo/ui-web";
 import { useQuery } from "@tanstack/react-query";
 import { ChevronLeft, X } from "lucide-react";
 import { useEffect, useId } from "react";
-import { useIdentityConfirmation } from "../components/ConfirmIdentityDialog";
 import { useSpaceQueries } from "../lib/query";
 import type { RoutineDraftState } from "../lib/routine-draft";
 import { routineNeedsOneShotArm } from "../lib/routine-draft";
@@ -65,9 +64,7 @@ export function RoutineEditor({
 }) {
   const { t, i18n } = useLingui();
   const fieldId = useId();
-  const { withIdentityConfirmation, identityDialog } = useIdentityConfirmation();
-  // Closing the confirmation is a choice, and other failures show as the editor's error.
-  const revealWebhook = () => void withIdentityConfirmation(onRevealWebhook).catch(() => undefined);
+  const revealWebhook = () => void onRevealWebhook();
   const queries = useSpaceQueries();
   const scheduleStatus = useQuery({
     ...queries.routines.list.queryOptions({ input: { botId: editing?.botId ?? "" } }),
@@ -314,7 +311,6 @@ export function RoutineEditor({
       {editing ? (
         <RoutineRunHistory key={editing.id} routineId={editing.id} onOpenChat={onClose} />
       ) : null}
-      {identityDialog}
     </div>
   );
 }

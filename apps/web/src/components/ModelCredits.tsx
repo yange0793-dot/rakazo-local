@@ -56,8 +56,6 @@ import {
   formatBillingPrice,
 } from "../lib/billing";
 import type { RpcClient } from "../lib/rpc";
-import { useSignOut } from "../lib/sign-out";
-import { AccountMenu } from "./AccountMenu";
 import { ConfirmDialog } from "./ConfirmDialog";
 
 type CreditAmount = (typeof MODEL_CREDIT_AMOUNTS)[number];
@@ -268,7 +266,6 @@ export function CreditChoice({
   const credit = formatBillingAmount(amount, "usd", i18n.locale);
   const [pending, setPending] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const { logOut, signingOut } = useSignOut("/sign-in", setError);
   // A choice that answers after the plans were closed must not leave the app.
   const closed = useRef(false);
   useEffect(() => {
@@ -308,9 +305,6 @@ export function CreditChoice({
       data-testid="billing-paywall"
       className="mx-auto flex min-h-dvh max-w-3xl flex-col justify-center gap-8 px-6 py-12"
     >
-      {dismissible ? null : (
-        <AccountMenu disabled={pending} signingOut={signingOut} onLogOut={() => void logOut()} />
-      )}
       <h1 className="text-heading1 font-medium">
         <Trans>Choose how to use Rakazo</Trans>
       </h1>

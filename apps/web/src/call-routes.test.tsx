@@ -27,6 +27,7 @@ vi.mock("@lingui/react/macro", () => ({
 }));
 vi.mock("@rakazo/ui-web", () => ({
   BotAvatar: () => null,
+  Spinner: () => <div role="status">Loading</div>,
   cn: (...classes: unknown[]) => classes.filter(Boolean).join(" "),
   defaultBotAvatarValue: () => "",
   Button: ({ children, ...props }: { children: ReactNode }) => (
@@ -51,16 +52,7 @@ vi.mock("./lib/tts.js", () => ({
     subscribe: () => () => {},
   },
 }));
-vi.mock("./lib/auth", () => ({
-  authClient: {
-    useSession: () => ({
-      isPending: false,
-      data: { user: { id: "user-1" } },
-      error: null,
-      refetch: vi.fn(),
-    }),
-  },
-}));
+vi.mock("./lib/monitoring", () => ({ identifyMonitoringUser: vi.fn() }));
 vi.mock("./lib/bootstrap", () => ({
   getTicketBoardEnabled: () => false,
   subscribeTicketBoardEnabled: () => () => {},
@@ -74,7 +66,6 @@ vi.mock("./lib/rpc", () => {
   return {
     clearSpaceSelection: vi.fn(),
     createSpaceRpc: () => client,
-    recheckSessionOnUnauthorized: vi.fn(),
     rpc: {
       ...client,
       analytics: { screen: vi.fn(async () => ({ ok: true })) },
@@ -142,7 +133,12 @@ beforeEach(() => {
   }));
   vi.clearAllMocks();
   mocks.bots = [];
-  mocks.me.mockImplementation(async () => ({ phoneCallsEnabled: true }));
+  mocks.me.mockImplementation(async () => ({
+    userId: "user-1",
+    name: "Local",
+    email: "local@rakazo.local",
+    phoneCallsEnabled: true,
+  }));
   mocks.listBots.mockImplementation(async () => mocks.bots);
   mocks.voiceStatus.mockImplementation(async () => ({ ready: true, transcribe: false }));
   mocks.endCall.mockResolvedValue(undefined);

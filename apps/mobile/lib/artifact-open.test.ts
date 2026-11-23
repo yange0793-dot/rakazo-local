@@ -59,10 +59,9 @@ vi.mock("react-native", () => ({ Image: { getSize: state.getSize } }));
 vi.mock("expo-sharing", () => ({ isAvailableAsync: vi.fn(), shareAsync: vi.fn() }));
 vi.mock("./session", () => ({
   currentSessionGeneration: () => state.generation,
-  loadSessionToken: async () => state.token,
+  loadLocalInstallSessionId: async () => state.token,
 }));
 vi.mock("./api-server", () => ({}));
-vi.mock("./api-auth", () => ({}));
 vi.mock("./api-live", () => ({}));
 vi.mock("./api", () => ({
   rpc: state.rpc,

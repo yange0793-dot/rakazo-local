@@ -51,7 +51,7 @@ that HTTPS URL.
 
 Images Compose binds web to loopback (`127.0.0.1:5173`). Terminate TLS on the host and proxy
 there. Vite preview same-origin-proxies `/api` and `/rpc`, so do not expose `:3100`. Set
-`BETTER_AUTH_URL`, `WEB_ORIGIN`, and `API_URL` to that same HTTPS origin, and set
+`WEB_ORIGIN`, and `API_URL` to that same HTTPS origin, and set
 `RAKAZO_HOST` to its hostname (for example, `app.example.com`). Cookies and CORS follow those
 origins.
 
@@ -77,7 +77,7 @@ If the installer, Compose downloads, or image pulls are blocked, use the
 
 ## Docker Compose (single machine)
 
-1. Copy `.env.example` to `.env` and set `POSTGRES_PASSWORD` and `POSTGRES_APP_PASSWORD` (`openssl rand -hex 16` each), plus `BETTER_AUTH_SECRET`, `ENCRYPTION_KEY`, and `SCREEN_PROXY_SECRET` to independent long random strings (32+ characters; 64 hex for `ENCRYPTION_KEY`). Docker sandboxes also need a dedicated `SANDBOX_SUPERVISOR_TOKEN`. Keep existing `ENCRYPTION_KEY` values so stored credentials stay decryptable.
+1. Copy `.env.example` to `.env` and set `POSTGRES_PASSWORD` and `POSTGRES_APP_PASSWORD` (`openssl rand -hex 16` each), plus `ENCRYPTION_KEY`, and `SCREEN_PROXY_SECRET` to independent long random strings (32+ characters; 64 hex for `ENCRYPTION_KEY`). Docker sandboxes also need a dedicated `SANDBOX_SUPERVISOR_TOKEN`. Keep existing `ENCRYPTION_KEY` values so stored credentials stay decryptable.
 2. Set `OPENROUTER_API_KEY` (and `COMPOSIO_API_KEY` if you want Plugins).
 3. Build the computer image: `pnpm sandbox:build` (Compose also builds it via the `computer` service).
 4. `docker compose --env-file .env -f infra/compose/docker-compose.yml up --build`
@@ -113,8 +113,7 @@ Compose bot homes mount only their own subdirectory of the application volume us
 - [Configuration](./self-host-configuration.md): how settings reach each service, run limits, the
   database and outbound proxies.
 - [Secrets](./self-host-secrets.md): the required keys and how to keep them.
-- [Sign-in and accounts](./self-host-accounts.md): who can sign up, email, SSO, passkeys and
-  passwords.
+- [Local installation identity](./self-host-accounts.md): the local owner and installation scope.
 - [Models](./self-host-models.md): model providers, local models, approvals, media generation and
   voice.
 - [Tools and integrations](./self-host-integrations.md): web search, memory, MCP servers,

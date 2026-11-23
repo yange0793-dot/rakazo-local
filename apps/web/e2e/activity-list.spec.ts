@@ -1,6 +1,12 @@
 import type { Page } from "@playwright/test";
 import { expect, test } from "@playwright/test";
-import { captureScreenshot, completeOnboarding, createNamedBot, rpc, signup } from "./helpers";
+import {
+  captureScreenshot,
+  completeOnboarding,
+  createNamedBot,
+  openLocalWorkspace,
+  rpc,
+} from "./helpers";
 
 /** Match activity rows by their aria-label. */
 function activityRow(page: Page, botName: string) {
@@ -39,8 +45,7 @@ async function captureActivitySidebar(
 }
 
 test("sidebar Working and Recent surface active and terminal runs", async ({ page }, testInfo) => {
-  const stamp = Date.now();
-  await signup(page, `activity-${stamp}@rakazo.test`, "password12", "Activity");
+  await openLocalWorkspace(page, "Activity");
   await completeOnboarding(page);
 
   const aside = page.locator("aside").first();
@@ -192,8 +197,7 @@ test("sidebar Working and Recent surface active and terminal runs", async ({ pag
 });
 
 test("activity filters keep retry when a refresh fails", async ({ page }, testInfo) => {
-  const stamp = Date.now();
-  await signup(page, `activity-retry-${stamp}@rakazo.test`, "password12", "Activity");
+  await openLocalWorkspace(page, "Activity");
   await completeOnboarding(page);
   const now = new Date();
 
@@ -301,7 +305,7 @@ test("activity filters keep retry when a refresh fails", async ({ page }, testIn
 test("activity groups what needs you, what is working, and unread chats", async ({
   page,
 }, testInfo) => {
-  await signup(page, `activity-sections-${Date.now()}@rakazo.test`, "password12", "Sections");
+  await openLocalWorkspace(page, "Sections");
   await completeOnboarding(page);
   const writer = await createNamedBot(page, "Writer");
   await expect

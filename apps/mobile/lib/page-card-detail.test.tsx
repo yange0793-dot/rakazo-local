@@ -9,7 +9,6 @@ import { useChatOnScreen, usePageCardDetail } from "./page-card-detail";
 
 const screen = vi.hoisted(() => ({ refocus: () => {} }));
 vi.mock("./api-server", () => ({}));
-vi.mock("./api-auth", () => ({}));
 vi.mock("./api-live", () => ({}));
 vi.mock("./api", () => ({ rpc: vi.fn() }));
 vi.mock("./session", () => ({ registerSessionDiskCache: () => undefined }));

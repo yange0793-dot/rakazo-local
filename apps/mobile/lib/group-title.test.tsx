@@ -11,7 +11,6 @@ import { addToSearchInbox, setSearchInbox, useInboxGroup } from "./search-inbox"
 import { threadGroupMembers } from "./thread-snapshot";
 
 vi.mock("./api-server", () => ({}));
-vi.mock("./api-auth", () => ({}));
 vi.mock("./api-live", () => ({}));
 vi.mock("./api", () => ({ currentApiBase: () => "http://api.test" }));
 vi.mock("./session", () => ({

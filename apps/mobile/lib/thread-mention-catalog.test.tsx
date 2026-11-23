@@ -16,7 +16,6 @@ const state = vi.hoisted(() => ({
   listeners: new Set<() => void>(),
 }));
 vi.mock("./api-server", () => ({}));
-vi.mock("./api-auth", () => ({}));
 vi.mock("./api-live", () => ({}));
 vi.mock("./api", () => ({
   rpc: state.rpc,

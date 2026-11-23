@@ -12,7 +12,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { pickUp } from "./call-pickup.js";
 import { ECHO_GUARD_MS, endCall, getSnapshot, startCall, toggleMute } from "./call-session";
 import { dictation, usesServerDictation } from "./dictation.js";
-import { recheckSessionOnUnauthorized, rpc } from "./rpc.js";
+import { rpc } from "./rpc.js";
 import { speaker } from "./tts.js";
 
 // The macro compiles away in the app build; tests run the source, so tag the template as-is.
@@ -50,7 +50,6 @@ vi.mock("./tts.js", () => ({
 }));
 
 vi.mock("./rpc.js", () => ({
-  recheckSessionOnUnauthorized: vi.fn(),
   rpc: {
     threads: {
       answer: vi.fn(),
@@ -1730,7 +1729,7 @@ describe("session ends during a call", () => {
     vi.useRealTimers();
   });
 
-  it("ends the call and rechecks the session when its stream reports the session gone", async () => {
+  it("ends the call when its stream is no longer authorized", async () => {
     await answeredCall({ botId: "call-bot", botName: "Ada", transcribe: false });
     const feed = vi.mocked(runThreadSubscription).mock.calls.at(-1)![0];
     vi.mocked(rpc.threads.subscribe).mockResolvedValue(
@@ -1748,7 +1747,6 @@ describe("session ends during a call", () => {
 
     expect(getSnapshot()).toBeNull();
     expect(dictation.stop).toHaveBeenCalledWith("cancel");
-    expect(recheckSessionOnUnauthorized).toHaveBeenCalledWith(401);
     expect(endCallRpc).not.toHaveBeenCalled();
   });
 

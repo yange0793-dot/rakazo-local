@@ -2,12 +2,18 @@ import { readFileSync } from "node:fs";
 import path from "node:path";
 import { expect, test } from "@playwright/test";
 import type { Artifact, ArtifactWithContent } from "@rakazo/contracts";
-import { activeBotId, captureScreenshot, completeOnboarding, rpc, signup } from "./helpers";
+import {
+  activeBotId,
+  captureScreenshot,
+  completeOnboarding,
+  openLocalWorkspace,
+  rpc,
+} from "./helpers";
 
 test("Excel files can be attached and uploaded without losing their bytes", async ({
   page,
 }, testInfo) => {
-  await signup(page, `spreadsheet-${Date.now()}@rakazo.test`, "password12", "Sheet Reader");
+  await openLocalWorkspace(page, "Sheet Reader");
   await completeOnboarding(page);
   const composer = page.getByRole("combobox", { name: /Message/ });
   await expect(composer).toBeVisible();

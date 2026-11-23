@@ -10,7 +10,6 @@ import type { ThreadListScroll } from "./thread-list-scroll";
 import { useThreadPaging } from "./thread-paging";
 
 vi.mock("./api-server", () => ({}));
-vi.mock("./api-auth", () => ({}));
 vi.mock("./api-live", () => ({}));
 vi.mock("./api", () => ({
   rpc: vi.fn(),

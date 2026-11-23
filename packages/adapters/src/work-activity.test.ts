@@ -39,8 +39,6 @@ function fakeDatabase() {
   const events: Array<{ runId: string; type: string; seq: number; payload: unknown }> = [];
   const cards = new Map<string, Card>();
   const phones = new Map<string, Phone>();
-  /** Sessions still signed in. */
-  const sessions = new Set(["session-1", "session-2"]);
   const newestFirst = (list: Run[]) => [...list].reverse();
   const prisma = {
     run: {
@@ -91,10 +89,6 @@ function fakeDatabase() {
           )
           .sort((a, b) => b.seq - a.seq)
           .slice(0, take),
-    },
-    session: {
-      findMany: async ({ where }: { where: { id: { in: string[] } } }) =>
-        where.id.in.filter((id) => sessions.has(id)).map((id) => ({ id })),
     },
     workActivityToken: {
       upsert: async (input: {
@@ -200,7 +194,7 @@ function fakeDatabase() {
       },
     },
   } as unknown as PrismaClient;
-  return { prisma, runs, events, cards, phones, sessions };
+  return { prisma, runs, events, cards, phones };
 }
 
 function setup(reply: "sent" | "invalid" | "unavailable" = "sent", windowMs = 20) {
@@ -231,7 +225,7 @@ function setup(reply: "sent" | "invalid" | "unavailable" = "sent", windowMs = 20
 
 async function registered(reply?: "sent" | "invalid" | "unavailable", windowMs?: number) {
   const context = setup(reply, windowMs);
-  expect(await context.activities.register("user-1", "session-1", TOKEN)).toBe(true);
+  expect(await context.activities.register("user-1", "rakazo-local-install:phone", TOKEN)).toBe(true);
   await vi.waitFor(() => expect(context.send).toHaveBeenCalledTimes(1));
   return context;
 }
@@ -239,9 +233,9 @@ async function registered(reply?: "sent" | "invalid" | "unavailable", windowMs?:
 describe("live status card of the user's bots at work", () => {
   it("follows only while one of the user's bots is at work", async () => {
     const { activities, cards, runs } = setup();
-    expect(await activities.register("user-2", "session-2", TOKEN)).toBe(false);
+    expect(await activities.register("user-2", "rakazo-local-install:tablet", TOKEN)).toBe(false);
     runs[0]!.status = "completed";
-    expect(await activities.register("user-1", "session-1", TOKEN)).toBe(false);
+    expect(await activities.register("user-1", "rakazo-local-install:phone", TOKEN)).toBe(false);
     expect(cards.size).toBe(0);
   });
 
@@ -256,7 +250,7 @@ describe("live status card of the user's bots at work", () => {
       },
       { runId: "1", type: "thread.progress", seq: 2, payload: { delta: "Here", streaming: true } },
     );
-    await activities.register("user-1", "session-1", TOKEN);
+    await activities.register("user-1", "rakazo-local-install:phone", TOKEN);
     // The token is stored encrypted.
     expect([...cards.values()][0]!.ciphertext).not.toContain(TOKEN);
     await vi.waitFor(() => expect(send).toHaveBeenCalledTimes(1));
@@ -380,12 +374,9 @@ describe("live status card of the user's bots at work", () => {
     }
   });
 
-  it("ends a card once the session that registered it ends, and follows a replacement", async () => {
-    const { activities, cards, send, sessions } = await registered();
-    await activities.endSession("user-1", "session-1", "session-2");
-    expect([...cards.values()][0]!.sessionId).toBe("session-2");
-    sessions.delete("session-2");
-    await activities.endSession("user-1", "session-2");
+  it("ends a card once the device registration is removed", async () => {
+    const { activities, cards, send } = await registered();
+    await activities.endSession("user-1", "rakazo-local-install:phone");
     await vi.waitFor(() => expect(cards.size).toBe(0));
     // It leaves at once; nothing about the work reaches the signed-out phone.
     expect(send).toHaveBeenCalledTimes(2);
@@ -398,7 +389,7 @@ describe("live status card of the user's bots at work", () => {
   it("keeps a few cards per user, ending the oldest", async () => {
     const { activities, cards, send } = setup();
     for (let phone = 0; phone < 7; phone += 1)
-      await activities.register("user-1", "session-1", String(phone).repeat(64));
+      await activities.register("user-1", "rakazo-local-install:phone", String(phone).repeat(64));
     expect(cards.size).toBe(5);
     // The cards dropped are ended, not left on their phones without updates.
     for (const phone of ["0", "1"])
@@ -408,8 +399,8 @@ describe("live status card of the user's bots at work", () => {
   it("re-registers a card without sealing its token again", async () => {
     const { activities, cards } = await registered();
     const sealed = [...cards.values()][0]!.ciphertext;
-    await activities.register("user-1", "session-2", TOKEN);
-    expect([...cards.values()][0]).toMatchObject({ ciphertext: sealed, sessionId: "session-2" });
+    await activities.register("user-1", "rakazo-local-install:tablet", TOKEN);
+    expect([...cards.values()][0]).toMatchObject({ ciphertext: sealed, sessionId: "rakazo-local-install:tablet" });
   });
 
   it("keeps a found step through later streamed text without reading it again", async () => {
@@ -450,7 +441,7 @@ describe("live status card of the user's bots at work", () => {
     const { activities, cards, run } = await registered();
     run("2", { userId: "user-2" });
     await vi.waitFor(() => expect([...cards.values()][0]!.lastState).toBeTruthy());
-    await activities.register("user-2", "session-2", TOKEN);
+    await activities.register("user-2", "rakazo-local-install:tablet", TOKEN);
     expect([...cards.values()][0]).toMatchObject({ userId: "user-2", lastState: null });
   });
 
@@ -517,8 +508,8 @@ describe("live status card of the user's bots at work", () => {
   describe("started by push on a phone without one", () => {
     it("starts one card per stretch of work on each signed-in phone that has none", async () => {
       const { activities, phones, runs, run, start, send } = setup();
-      await activities.registerStarts("user-1", "session-1", START_TOKEN);
-      await activities.registerStarts("user-1", "session-2", "ef".repeat(32));
+      await activities.registerStarts("user-1", "rakazo-local-install:phone", START_TOKEN);
+      await activities.registerStarts("user-1", "rakazo-local-install:tablet", "ef".repeat(32));
       // The token is stored encrypted.
       expect([...phones.values()][0]!.ciphertext).not.toContain(START_TOKEN);
       await vi.waitFor(() => expect(start).toHaveBeenCalledTimes(2));
@@ -546,11 +537,11 @@ describe("live status card of the user's bots at work", () => {
         const { activities, cards, run, runs, start } = setup();
         runs.length = 0;
         run("1", { createdAt: new Date() });
-        await activities.registerStarts("user-1", "session-1", START_TOKEN);
+        await activities.registerStarts("user-1", "rakazo-local-install:phone", START_TOKEN);
         await vi.advanceTimersByTimeAsync(5_000);
         expect(start).not.toHaveBeenCalled();
         // The phone that sent registers its own card in the meantime.
-        expect(await activities.register("user-1", "session-1", TOKEN)).toBe(true);
+        expect(await activities.register("user-1", "rakazo-local-install:phone", TOKEN)).toBe(true);
         await vi.advanceTimersByTimeAsync(10_000);
         expect(start).not.toHaveBeenCalled();
         // Its card going, such as when the user dismisses it, starts no other for the same work.
@@ -568,7 +559,7 @@ describe("live status card of the user's bots at work", () => {
         const { activities, run, runs, start } = setup();
         runs.length = 0;
         run("1", { createdAt: new Date() });
-        await activities.registerStarts("user-1", "session-1", START_TOKEN);
+        await activities.registerStarts("user-1", "rakazo-local-install:phone", START_TOKEN);
         await vi.advanceTimersByTimeAsync(5_000);
         expect(start).not.toHaveBeenCalled();
         await vi.advanceTimersByTimeAsync(10_000);
@@ -578,19 +569,19 @@ describe("live status card of the user's bots at work", () => {
       }
     });
 
-    it("starts nothing on a signed-out phone, and forgets one Apple no longer knows", async () => {
-      const { activities, phones, sessions, start } = setup();
-      await activities.registerStarts("user-1", "session-1", START_TOKEN);
+    it("starts nothing on a removed device, and forgets one Apple no longer knows", async () => {
+      const { activities, phones, start } = setup();
+      await activities.registerStarts("user-1", "rakazo-local-install:phone", START_TOKEN);
       await vi.waitFor(() => expect(start).toHaveBeenCalledOnce());
       phones.get([...phones.keys()][0]!)!.startedAt = null;
-      sessions.delete("session-1");
+      await activities.endSession("user-1", "rakazo-local-install:phone");
       await activities.sync("user-1");
       expect(start).toHaveBeenCalledOnce();
-      await activities.endSession("user-1", "session-1");
+      await activities.endSession("user-1", "rakazo-local-install:phone");
       expect(phones.size).toBe(0);
 
       start.mockResolvedValue("invalid");
-      await activities.registerStarts("user-1", "session-2", START_TOKEN);
+      await activities.registerStarts("user-1", "rakazo-local-install:tablet", START_TOKEN);
       await vi.waitFor(() => expect(start).toHaveBeenCalledTimes(2));
       await vi.waitFor(() => expect(phones.size).toBe(0));
     });
@@ -598,7 +589,7 @@ describe("live status card of the user's bots at work", () => {
     it("counts a chat's continuation as the same stretch of work", async () => {
       const { activities, phones, run, runs, start } = setup();
       runs[0]!.createdAt = new Date(Date.now() - 180_000);
-      await activities.registerStarts("user-1", "session-1", START_TOKEN);
+      await activities.registerStarts("user-1", "rakazo-local-install:phone", START_TOKEN);
       await vi.waitFor(() => expect(start).toHaveBeenCalledOnce());
       for (const phone of phones.values()) phone.startedAt = new Date(Date.now() - 120_000);
       run("7", { threadId: "thread-1", botId: "bot-1", createdAt: new Date(Date.now() - 20_000) });
@@ -616,7 +607,7 @@ describe("live status card of the user's bots at work", () => {
         send: vi.fn().mockResolvedValue("sent"),
         start,
       });
-      await first.registerStarts("user-1", "session-1", START_TOKEN);
+      await first.registerStarts("user-1", "rakazo-local-install:phone", START_TOKEN);
       await Promise.all([first.sync("user-1"), other.sync("user-1")]);
       await vi.waitFor(() => expect(start).toHaveBeenCalled());
       expect(start).toHaveBeenCalledOnce();
@@ -624,9 +615,9 @@ describe("live status card of the user's bots at work", () => {
 
     it("keeps a phone's last start when iOS gives it a new token", async () => {
       const { activities, phones, start } = setup();
-      await activities.registerStarts("user-1", "session-1", START_TOKEN);
+      await activities.registerStarts("user-1", "rakazo-local-install:phone", START_TOKEN);
       await vi.waitFor(() => expect(start).toHaveBeenCalledOnce());
-      await activities.registerStarts("user-1", "session-1", "ef".repeat(32));
+      await activities.registerStarts("user-1", "rakazo-local-install:phone", "ef".repeat(32));
       await activities.sync("user-1");
       expect(phones.size).toBe(1);
       expect([...phones.values()][0]!.startedAt).not.toBeNull();
@@ -636,7 +627,7 @@ describe("live status card of the user's bots at work", () => {
     it("tries again a start that did not go through, without holding back the cards", async () => {
       const { activities, cards, phones, send, start } = await registered();
       start.mockRejectedValueOnce(new Error("broken"));
-      await activities.registerStarts("user-1", "session-2", START_TOKEN);
+      await activities.registerStarts("user-1", "rakazo-local-install:tablet", START_TOKEN);
       await vi.waitFor(() => expect(start).toHaveBeenCalledOnce());
       await vi.waitFor(() => expect([...phones.values()][0]!.startedAt).toBeNull());
       // The card on the other phone still follows the work.
@@ -646,12 +637,12 @@ describe("live status card of the user's bots at work", () => {
       expect(start).toHaveBeenCalledTimes(2);
     });
 
-    it("moves to a replacement session and to the account signed in last", async () => {
+    it("moves a device to the installation that last registered it", async () => {
       const { activities, phones } = setup();
-      await activities.registerStarts("user-1", "session-1", START_TOKEN);
-      await activities.endSession("user-1", "session-1", "session-2");
-      expect([...phones.values()][0]).toMatchObject({ sessionId: "session-2" });
-      await activities.registerStarts("user-2", "session-2", START_TOKEN);
+      await activities.registerStarts("user-1", "rakazo-local-install:phone", START_TOKEN);
+      await activities.endSession("user-1", "rakazo-local-install:phone");
+      expect(phones.size).toBe(0);
+      await activities.registerStarts("user-2", "rakazo-local-install:tablet", START_TOKEN);
       expect([...phones.values()]).toEqual([expect.objectContaining({ userId: "user-2" })]);
     });
   });

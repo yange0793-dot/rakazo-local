@@ -22,11 +22,11 @@ afterEach(() => {
 it("wraps the value it reads from stdin for the named variable", async () => {
   const keys = new LocalKeyProvider([{ id: "k1", key: randomBytes(32) }]);
   provider.current = keys;
-  process.argv = [argv[0]!, "wrap-env", "BETTER_AUTH_SECRET"];
+  process.argv = [argv[0]!, "wrap-env", "SCREEN_PROXY_SECRET"];
   Object.defineProperty(process, "stdin", { value: Readable.from(["fake-secret\n"]) });
   const write = vi.spyOn(process.stdout, "write").mockReturnValue(true);
   await import("./wrap-env.js");
-  const env = { BETTER_AUTH_SECRET: String(write.mock.calls[0]?.[0]).trim() };
+  const env = { SCREEN_PROXY_SECRET: String(write.mock.calls[0]?.[0]).trim() };
   await unwrapEnv(env, keys);
-  expect(env.BETTER_AUTH_SECRET).toBe("fake-secret");
+  expect(env.SCREEN_PROXY_SECRET).toBe("fake-secret");
 });

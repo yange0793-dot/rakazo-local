@@ -16,7 +16,6 @@ import {
   modelCreditsUsd,
   resolveBotAvatarSet,
 } from "@rakazo/contracts";
-import { isAdmin } from "../admins.js";
 import { effectiveSandboxProvider } from "../computer-provider-config.js";
 import type { RouterDeps } from "../router.js";
 
@@ -29,7 +28,7 @@ function hostCredentials(active: boolean, provider: string) {
 }
 
 export async function meDto(deps: RouterDeps, actor: Actor): Promise<Me> {
-  const [user, setup, admin] = await Promise.all([
+  const [user, setup] = await Promise.all([
     deps.prisma.user.findUniqueOrThrow({
       where: { id: actor.userId },
       select: {
@@ -42,7 +41,6 @@ export async function meDto(deps: RouterDeps, actor: Actor): Promise<Me> {
       },
     }),
     modelSetup(deps, actor),
-    isAdmin(deps, actor.userId),
   ]);
   // Where the deployment runs computers once an admin's choice in Settings applies.
   const sandboxProvider = effectiveSandboxProvider(setup.settings, deps.env.sandboxProvider);
@@ -56,8 +54,8 @@ export async function meDto(deps: RouterDeps, actor: Actor): Promise<Me> {
     email: user.email,
     name: user.name,
     spaceId: actor.spaceId,
-    isDeploymentOwner: false,
-    isAdmin: admin,
+    isDeploymentOwner: setup.settings?.ownerUserId === actor.userId,
+    isAdmin: setup.settings?.ownerUserId === actor.userId,
     needsModel: setup.needsModel,
     defaultProvider: canonicalPiProviderId(setup.model?.provider ?? deps.env.defaultProvider),
     defaultModel: setup.model?.modelId ?? deps.env.defaultModel,
@@ -74,9 +72,7 @@ export async function meDto(deps: RouterDeps, actor: Actor): Promise<Me> {
     // The deployment's provider: an account's own choice covers only its Team Computers.
     sandboxProvider,
     computerSettingsEnabled: Boolean(deps.env.computerSettingsEnabled),
-    mcpStdioEnabled:
-      admin &&
-      mcpStdioAvailable({
+    mcpStdioEnabled: setup.settings?.ownerUserId === actor.userId && mcpStdioAvailable({
         stdioEnabled: deps.env.mcpStdioEnabled,
         allowedCommands: deps.env.mcpStdioAllowedCommands,
       }),

@@ -251,17 +251,14 @@ interface Account {
   threads: BenchThread[];
 }
 
-/** Signs up through the auth API like the e2e helpers, then seeds one chat per thread size. */
+/** Opens the local installation, then seeds one chat per thread size. */
 async function prepareAccount(bench: Bench, sizes: number[]): Promise<Account> {
   const context = await newContext(bench);
   try {
     const page = await context.newPage();
-    const email = `benchmark-${Date.now()}@rakazo.test`;
-    const response = await page.request.post("/api/auth/sign-up/email", {
-      data: { email, password: "password12", name: "Benchmark User" },
-      headers: { origin: bench.webOrigin },
-    });
-    if (!response.ok()) throw new Error(`sign-up ${response.status()}: ${await response.text()}`);
+    const response = await page.request.get("/api/local-identity");
+    if (!response.ok()) throw new Error(`Local identity failed (${response.status()})`);
+    const user = (await response.json()) as { id: string };
     await page.goto("/onboarding");
     const skip = page.getByRole("button", { name: "Skip", exact: true });
     const composer = page.getByRole("combobox", { name: "Message Chief" });
@@ -271,9 +268,6 @@ async function prepareAccount(bench: Bench, sizes: number[]): Promise<Account> {
     // Live reply text is a per-user setting, off until the user turns it on.
     await page.evaluate((key) => localStorage.setItem(key, "on"), RESPONSE_STREAMING_STORAGE_KEY);
 
-    const user = await runAsSystem("benchmark seed", () =>
-      bench.prisma.user.findFirstOrThrow({ where: { email }, select: { id: true } }),
-    );
     const threads: BenchThread[] = [];
     for (const size of sizes) {
       const name = `Bench ${size}`;

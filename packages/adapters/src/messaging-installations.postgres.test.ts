@@ -50,7 +50,6 @@ describePostgres("messaging workspace installation (PostgreSQL)", () => {
         provisionMessagingIdentity(
           prisma,
           { provider: "install-test", address: `fake-sender-${i}` },
-          { signupsEnabled: "true", signupAllowlist: undefined },
         ),
       );
       actors.push({

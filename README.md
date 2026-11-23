@@ -157,7 +157,7 @@ cp .env.example .env
 Set `POSTGRES_PASSWORD` and `POSTGRES_APP_PASSWORD` to two values from `openssl rand -hex 16`,
 then put them in `DATABASE_MIGRATION_URL` and `DATABASE_URL`. The app connects as its own
 `rakazo_app` login, which row-level security applies to; migrations run as the owner
-([database roles](docs/self-host-configuration.md#database-roles)). Set `BETTER_AUTH_SECRET`, `ENCRYPTION_KEY`, and `SCREEN_PROXY_SECRET` to
+([database roles](docs/self-host-configuration.md#database-roles)). Set `ENCRYPTION_KEY` and `SCREEN_PROXY_SECRET` to
 independent long random values. Docker sandboxes also need a dedicated
 `SANDBOX_SUPERVISOR_TOKEN`. You can also set `OPENROUTER_API_KEY`, or connect a supported
 model provider during onboarding.
@@ -381,7 +381,6 @@ Chinese guides cover [self-hosting](./docs/zh-CN/self-host.md), [models](./docs/
 - Electron and Expo
 - Hono and oRPC
 - PostgreSQL and Prisma
-- Better Auth
 - Graphile Worker
 - Pi
 - Docker, E2B, Daytona, CreateOS, and Boat

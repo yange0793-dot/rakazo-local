@@ -331,6 +331,11 @@ export const appContract = {
   },
   health: oc.output(z.object({ ok: z.literal(true), version: z.string() })),
   me: oc.output(MeSchema),
+  profile: {
+    updateName: oc
+      .input(z.object({ name: z.string().trim().min(1).max(80) }))
+      .output(MeSchema),
+  },
   billing: {
     /** Claims an invite code first when one is sent, so the status already reflects it. */
     status: oc
@@ -469,8 +474,6 @@ export const appContract = {
     update: oc
       .input(
         z.object({
-          signupsEnabled: z.boolean().optional(),
-          signupAllowlist: z.array(z.string()).optional(),
           computerHost: z.enum(["docker", "this-mac"]).nullable().optional(),
         }),
       )

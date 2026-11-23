@@ -4,12 +4,9 @@ import {
   isVoiceAccountErrorCode,
   MCP_OAUTH_CLIENT_REQUIRED,
 } from "@rakazo/contracts";
-import type { CredentialField } from "@rakazo/core";
 import {
-  authErrorMessage,
   CALL_NOT_RINGING_ERROR,
   errorHelpUrl,
-  MAX_PASSWORD_LENGTH,
   MODEL_IMAGE_INPUT_ERROR,
   MODEL_IMAGE_INPUT_UNKNOWN,
   userErrorMessage,
@@ -49,34 +46,6 @@ export function voiceAccountErrorText(error: unknown): string | undefined {
 
 export function errorCode(error: unknown): unknown {
   return error && typeof error === "object" && "code" in error ? error.code : undefined;
-}
-
-export function credentialIssueText(field: CredentialField): string {
-  return field === "email" ? t`Enter a valid email` : t`Enter a password`;
-}
-
-/** Text for a failed Better Auth client result (`{ code, message }`). */
-export function authErrorText(error: unknown, fallback: string): string {
-  const code = error && typeof error === "object" && "code" in error ? error.code : undefined;
-  if (code === "SSO_UNAVAILABLE") return t`SSO is temporarily unavailable. Try again.`;
-  if (code === "account_not_linked") return t`Sign in to your existing account to link SSO`;
-  if (code === "ACCOUNT_DEACTIVATED") return t`This account is deactivated`;
-  if (code === "REGISTRATION_CLOSED") return t`Registration is closed`;
-  if (code === "EMAIL_NOT_ALLOWED") return t`Email is not allowed to register`;
-  if (code === "EMAIL_VERIFICATION_REQUIRED" || code === "unable_to_link_account")
-    return t`Email verification required`;
-  if (code === "REAUTHENTICATION_REQUIRED") return t`Sign in again`;
-  if (code === "PASSWORD_AUTH_DISABLED") return t`Password sign-in is turned off on this server`;
-  if (code === "PASSWORD_TOO_LONG")
-    return t`Password must be ${MAX_PASSWORD_LENGTH} characters or fewer`;
-  if (code === "EMAIL_DELETION_UNAVAILABLE") return t`Could not continue`;
-  if (code === "INVALID_OTP") return t`Invalid code`;
-  if (code === "OTP_EXPIRED" || code === "TOO_MANY_ATTEMPTS") return t`Request a new code`;
-  return authErrorMessage(error, {
-    fallback,
-    email: credentialIssueText("email"),
-    password: credentialIssueText("password"),
-  });
 }
 
 /** Keep the documented error code's help link when turning a failure into UI copy. */

@@ -2,7 +2,7 @@ import { MODEL_REQUIRED_SEND_ERROR } from "@rakazo/core";
 import { router } from "expo-router";
 import { Alert } from "react-native";
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { loadVerifiedIntegrationsScope, snapshotSessionToken } from "./session";
+import { loadVerifiedIntegrationsScope } from "./session";
 import type { SendAttempt } from "./thread-feedback";
 import {
   configureUnsentSends,
@@ -20,12 +20,10 @@ vi.mock("react-native", () => ({
 }));
 vi.mock("expo-router", () => ({ router: { push: vi.fn() } }));
 vi.mock("./api-server", () => ({}));
-vi.mock("./api-auth", () => ({}));
 vi.mock("./api-live", () => ({}));
 vi.mock("./api", () => ({
   currentApiBase: () => "https://api.example.test",
   isServerReachable: vi.fn(),
-  passwordChangeInFlight: () => false,
   selectedSpaceId: () => "space-a",
   subscribeServerReachable: () => () => {},
 }));
@@ -35,14 +33,13 @@ vi.mock("./outbox-disk", () => ({ outboxDisk: {} }));
 vi.mock("./session", () => ({
   currentReadySessionGeneration: () => session.ready,
   currentSessionGeneration: () => session.generation,
-  loadSessionToken: async () => "fake-token",
+  loadLocalInstallSessionId: async () => "fake-token",
   loadVerifiedIntegrationsScope: vi.fn(async () => ({
     apiBase: "https://api.example.test",
     userId: "user-a",
     spaceId: "space-a",
     selectionId: "space-a",
   })),
-  snapshotSessionToken: vi.fn(async () => ({ ok: true, value: "fake-token" })),
   subscribeSessionGeneration: (listener: () => void) => {
     session.listener = listener;
     return () => {};
@@ -166,50 +163,6 @@ describe("unsentSendsRestored", () => {
     vi.mocked(unsentSendsReadable).mockReturnValueOnce(false);
     await prepareUnsentSends();
     await expect(unsentSendsRestored()).resolves.toBe(false);
-  });
-
-  it("treats an unread queue as known once clearing the session made it readable", async () => {
-    session.generation = 26;
-    vi.mocked(unsentSendsReadable).mockReturnValueOnce(false);
-    await prepareUnsentSends();
-    await expect(unsentSendsRestored()).resolves.toBe(false);
-    // Sign-out cleared the queue; no new restore runs before a server switch asks again.
-    await expect(unsentSendsRestored()).resolves.toBe(true);
-  });
-
-  it("treats a failed restore as known once the session is gone", async () => {
-    session.generation = 27;
-    vi.mocked(loadVerifiedIntegrationsScope).mockRejectedValueOnce(new Error("store unreadable"));
-    await expect(prepareUnsentSends()).rejects.toThrow("store unreadable");
-    await expect(unsentSendsRestored()).resolves.toBe(false);
-    vi.mocked(snapshotSessionToken).mockResolvedValueOnce({ ok: true, value: "" });
-    await expect(unsentSendsRestored()).resolves.toBe(true);
-  });
-
-  it("follows a restore that starts while the session is read", async () => {
-    session.generation = 28;
-    vi.mocked(loadVerifiedIntegrationsScope).mockRejectedValueOnce(new Error("store unreadable"));
-    await expect(prepareUnsentSends()).rejects.toThrow("store unreadable");
-    let readSession!: (value: { ok: true; value: string }) => void;
-    vi.mocked(snapshotSessionToken).mockReturnValueOnce(
-      new Promise((resolve) => {
-        readSession = resolve;
-      }),
-    );
-    const restored = unsentSendsRestored();
-    await new Promise((resolve) => setTimeout(resolve, 0));
-    // A reachability retry restores the queue while the session is still being read.
-    await prepareUnsentSends();
-    readSession({ ok: true, value: "fake-token" });
-    await expect(restored).resolves.toBe(true);
-  });
-
-  it("treats a failed restore while signed out as an empty queue", async () => {
-    session.generation = 22;
-    vi.mocked(loadVerifiedIntegrationsScope).mockRejectedValueOnce(new Error("signed out"));
-    vi.mocked(snapshotSessionToken).mockResolvedValueOnce({ ok: true, value: "" });
-    await expect(prepareUnsentSends()).rejects.toThrow("signed out");
-    await expect(unsentSendsRestored()).resolves.toBe(true);
   });
 
   it("follows a restore that replaces the awaited one", async () => {

@@ -1,4 +1,3 @@
-import { createHash, randomBytes } from "node:crypto";
 import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
@@ -11,7 +10,8 @@ import { pageViewerCode } from "@rakazo/page-kit/compile";
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import type { BotIntroHarness } from "./discard-bot-intro.js";
 import { discardBotIntroFromCreate } from "./discard-bot-intro.js";
-import { sessionCookieHeader } from "./index.js";
+import { createTestSpace, testSpaceHeaders } from "./index.js";
+
 import { asSystem } from "./system-db.js";
 
 type App = { request: (input: string, init?: RequestInit) => Response | Promise<Response> };
@@ -31,7 +31,6 @@ describePages("pages", () => {
   let app: App;
   let stop: () => Promise<void>;
   let jobs: Awaited<ReturnType<typeof createApp>>["jobs"];
-  const stamp = Date.now();
 
   beforeAll(async () => {
     const { createApp } = await import("@rakazo/api/app");
@@ -98,9 +97,9 @@ describePages("pages", () => {
   };
 
   it("saves, edits and guards pages through the bot's save_page", async () => {
-    const cookie = await signup(app, `pages-${stamp}@rakazo.test`, "Page Owner");
-    const bot = await createBot(app, cookie, "Reporter");
-    const save = (args: unknown, botId = bot.id, as = cookie) =>
+    const scope = await testSpace(app, "Page Owner");
+    const bot = await createBot(app, scope, "Reporter");
+    const save = (args: unknown, botId = bot.id, as = scope) =>
       sendAndWait(app, as, botId, { text: `call save_page with ${JSON.stringify(args)}` });
 
     await save({ help: true });
@@ -111,7 +110,7 @@ describePages("pages", () => {
     expect((await lastResult(bot.id))?.problems).toEqual([
       expect.stringMatching(/^line 1: <Card> is not a kit component/),
     ]);
-    expect(await db().page.count({ where: { userId: (await me(app, cookie)).id } })).toBe(0);
+    expect(await db().page.count({ where: { userId: (await me(app, scope)).id } })).toBe(0);
 
     await save({ title: "Weekly KPIs", source: page("First") });
     const created = (await lastResult(bot.id)) as { pageId: string; version: number };
@@ -157,7 +156,7 @@ describePages("pages", () => {
       mention: `Mention it in your reply as [KPIs](page:${pageId})`,
     });
     // A page that saves but has a likely mistake carries the kit's warnings back to the bot.
-    const helper = await createBot(app, cookie, "Helper");
+    const helper = await createBot(app, scope, "Helper");
     const scratch = `const note = "Q&amp;A";\n${page("Scratch")}`;
     await save({ title: "Scratch [draft]", source: scratch }, helper.id);
     const scratchResult = await lastResult(helper.id);
@@ -172,7 +171,7 @@ describePages("pages", () => {
     expect(await lastResult(bot.id)).toMatchObject({ version: 3, source: page("Fourth") });
 
     // Another account cannot read or write it by id.
-    const otherCookie = await signup(app, `pages-other-${stamp}@rakazo.test`, "Other");
+    const otherCookie = await testSpace(app, "Other");
     const intruder = await createBot(app, otherCookie, "Intruder");
     await save({ pageId, source: page("Stolen") }, intruder.id, otherCookie);
     expect(await lastResult(intruder.id)).toMatchObject({ error: expect.any(String) });
@@ -193,14 +192,14 @@ describePages("pages", () => {
       [2, "Weekly KPIs"],
       [1, "Weekly KPIs"],
     ]);
-    const second = await rpc<PageDetail>(app, cookie, "pages/get", { pageId, version: 2 });
+    const second = await rpc<PageDetail>(app, scope, "pages/get", { pageId, version: 2 });
     // Read back compiled for the viewer.
     expect(second.code).toMatch(/React\.createElement\(Page, \{ title: "Second".*"43"/s);
     expect(second).toMatchObject({ version: 2, currentVersion: 3, title: "KPIs", botId: bot.id });
 
     // Each save posted a page block in the chat it was saved from, never a file.
     const blocks = async (botId: string) =>
-      (await rpc<ThreadSnapshot>(app, cookie, "threads/get", { botId })).messages.flatMap(
+      (await rpc<ThreadSnapshot>(app, scope, "threads/get", { botId })).messages.flatMap(
         (message) => message.blocks.filter((b) => b.kind === "page" || b.kind === "file"),
       );
     expect(await blocks(bot.id)).toEqual([
@@ -211,26 +210,26 @@ describePages("pages", () => {
     expect(await blocks(helper.id)).toEqual([
       { kind: "page", pageId: expect.any(String), version: 1, title: "Scratch [draft]" },
     ]);
-    expect(await rpc(app, cookie, "artifacts/listSpace", {})).toMatchObject({ items: [] });
+    expect(await rpc(app, scope, "artifacts/listSpace", {})).toMatchObject({ items: [] });
 
     // A message sent from the open page replies to its card: the bot reads the page's id and
     // version, never just its title as a quote.
     const cardMessage = (
-      await rpc<ThreadSnapshot>(app, cookie, "threads/get", { botId: bot.id })
+      await rpc<ThreadSnapshot>(app, scope, "threads/get", { botId: bot.id })
     ).messages.find((message) => message.blocks.some((block) => block.kind === "page"))!;
-    await rpc(app, cookie, "threads/send", {
+    await rpc(app, scope, "threads/send", {
       botId: bot.id,
       text: "make the numbers bigger",
       replyToMessageId: cardMessage.id,
       fromPage: true,
     });
     // A reply picked on the card in the chat quotes it as any reply does.
-    await rpc(app, cookie, "threads/send", {
+    await rpc(app, scope, "threads/send", {
       botId: bot.id,
       text: "what is this?",
       replyToMessageId: cardMessage.id,
     });
-    const replies = await rpc<ThreadSnapshot>(app, cookie, "threads/get", { botId: bot.id });
+    const replies = await rpc<ThreadSnapshot>(app, scope, "threads/get", { botId: bot.id });
     const sent = (text: string) =>
       replies.messages.find((message) =>
         message.blocks.some((block) => block.kind === "text" && block.text === text),
@@ -244,20 +243,20 @@ describePages("pages", () => {
   });
 
   it("keeps a page to the bot that made it, in any of its chats, and to its group", async () => {
-    const cookie = await signup(app, `pages-scope-${stamp}@rakazo.test`, "Scope Owner");
-    const maker = await createBot(app, cookie, "Maker");
-    const other = await createBot(app, cookie, "Other");
+    const scope = await testSpace(app, "Scope Owner");
+    const maker = await createBot(app, scope, "Maker");
+    const other = await createBot(app, scope, "Other");
     const save = (botId: string, args: unknown) =>
-      sendAndWait(app, cookie, botId, { text: `call save_page with ${JSON.stringify(args)}` });
+      sendAndWait(app, scope, botId, { text: `call save_page with ${JSON.stringify(args)}` });
     await save(maker.id, { title: "Private plan", source: page("Mine") });
     const { pageId } = (await lastResult(maker.id)) as { pageId: string };
-    const group = await rpc<{ id: string; threadId: string }>(app, cookie, "groups/create", {
+    const group = await rpc<{ id: string; threadId: string }>(app, scope, "groups/create", {
       name: "Desk",
       botIds: [maker.id, other.id],
     });
     const inGroup = async (bot: { id: string }, name: string, args: unknown) => {
       const before = await db().run.count({ where: { threadId: group.threadId, botId: bot.id } });
-      await rpc(app, cookie, "threads/send", {
+      await rpc(app, scope, "threads/send", {
         groupId: group.id,
         text: `@${name} call save_page with ${JSON.stringify(args)}`,
         mentions: [{ kind: "bot", id: bot.id }],
@@ -311,9 +310,9 @@ describePages("pages", () => {
   });
 
   it("shows a routine's new page once and refreshes it each run without a new card", async () => {
-    const cookie = await signup(app, `pages-routine-${stamp}@rakazo.test`, "Routine Owner");
-    const bot = await createBot(app, cookie, "Refresher");
-    const routine = await rpc<{ id: string }>(app, cookie, "routines/create", {
+    const scope = await testSpace(app, "Routine Owner");
+    const bot = await createBot(app, scope, "Refresher");
+    const routine = await rpc<{ id: string }>(app, scope, "routines/create", {
       botId: bot.id,
       name: "Hourly board",
       prompt: `call save_page with ${JSON.stringify({ title: "Hourly board", source: page("v1") })}`,
@@ -366,9 +365,9 @@ describePages("pages", () => {
   });
 
   it("lists, renames, pins, shares and removes pages only for their owner", async () => {
-    const cookie = await signup(app, `pages-lib-${stamp}@rakazo.test`, "Library Owner");
-    const bot = await createBot(app, cookie, "Librarian");
-    const other = await createBot(app, cookie, "Other bot");
+    const scope = await testSpace(app, "Library Owner");
+    const bot = await createBot(app, scope, "Librarian");
+    const other = await createBot(app, scope, "Other bot");
     const ids: string[] = [];
     for (const [botId, title] of [
       [bot.id, "Oldest"],
@@ -376,7 +375,7 @@ describePages("pages", () => {
       [bot.id, "Newest"],
       [other.id, "Elsewhere"],
     ] as const) {
-      await sendAndWait(app, cookie, botId, {
+      await sendAndWait(app, scope, botId, {
         text: `call save_page with ${JSON.stringify({ title, source: page(title) })}`,
       });
       ids.push((await lastResult(botId))!.pageId as string);
@@ -384,10 +383,10 @@ describePages("pages", () => {
     const [oldest, middle, newest] = ids;
     const titles = (items: PageSummary[]) => items.map((item) => item.title);
 
-    await rpc(app, cookie, "pages/pin", { pageId: oldest, pinned: true });
+    await rpc(app, scope, "pages/pin", { pageId: oldest, pinned: true });
     const first = await rpc<{ items: PageSummary[]; nextCursor: string | null }>(
       app,
-      cookie,
+      scope,
       "pages/list",
       { botId: bot.id, limit: 2 },
     );
@@ -395,17 +394,17 @@ describePages("pages", () => {
     expect(first.items[0]?.pinned).toBe(true);
     const rest = await rpc<{ items: PageSummary[]; nextCursor: string | null }>(
       app,
-      cookie,
+      scope,
       "pages/list",
       { botId: bot.id, limit: 2, cursor: first.nextCursor },
     );
     expect(rest).toMatchObject({ nextCursor: null });
     expect(titles(rest.items)).toEqual(["Middle"]);
     expect(
-      titles((await rpc<{ items: PageSummary[] }>(app, cookie, "pages/list", {})).items),
+      titles((await rpc<{ items: PageSummary[] }>(app, scope, "pages/list", {})).items),
     ).toEqual(["Oldest", "Elsewhere", "Newest", "Middle"]);
 
-    const renamed = await rpc<PageSummary>(app, cookie, "pages/rename", {
+    const renamed = await rpc<PageSummary>(app, scope, "pages/rename", {
       pageId: middle,
       title: "Q3 plan",
     });
@@ -413,7 +412,7 @@ describePages("pages", () => {
 
     // Each time the link is turned on it is a new link; turning it off kills it at once.
     const share = (visibility: "private" | "link") =>
-      rpc<{ visibility: string; shareUrl: string | null }>(app, cookie, "pages/setVisibility", {
+      rpc<{ visibility: string; shareUrl: string | null }>(app, scope, "pages/setVisibility", {
         pageId: middle,
         visibility,
       });
@@ -441,10 +440,10 @@ describePages("pages", () => {
       load.mock.calls.filter(
         ([, context]) => typeof context === "object" && context.recordId === shareSecretId,
       ).length;
-    const card = await rpc<PageDetail>(app, cookie, "pages/get", { pageId: middle });
+    const card = await rpc<PageDetail>(app, scope, "pages/get", { pageId: middle });
     expect(card).toMatchObject({ visibility: "link", shareUrl: null });
     expect(tokenReads()).toBe(0);
-    const linked = await rpc<PageDetail>(app, cookie, "pages/get", { pageId: middle, link: true });
+    const linked = await rpc<PageDetail>(app, scope, "pages/get", { pageId: middle, link: true });
     expect(linked.shareUrl).toBe(firstLink.shareUrl);
     expect(tokenReads()).toBe(1);
     load.mockRestore();
@@ -461,17 +460,17 @@ describePages("pages", () => {
     // Reads serve the code compiled when the page was saved; they never compile it again.
     await db().pageVersion.updateMany({ where: { pageId: middle }, data: { code: "/* saved */" } });
     expect(await (await read(secondLink.shareUrl!)).json()).toMatchObject({ code: "/* saved */" });
-    expect(await rpc<PageDetail>(app, cookie, "pages/get", { pageId: middle })).toMatchObject({
+    expect(await rpc<PageDetail>(app, scope, "pages/get", { pageId: middle })).toMatchObject({
       code: "/* saved */",
     });
     expect(
       await db().secret.count({
-        where: { kind: "page_share", userId: (await me(app, cookie)).id },
+        where: { kind: "page_share", userId: (await me(app, scope)).id },
       }),
     ).toBe(1);
 
     // Another account sees none of it and can change none of it.
-    const otherCookie = await signup(app, `pages-lib-other-${stamp}@rakazo.test`, "Outsider");
+    const otherCookie = await testSpace(app, "Outsider");
     expect(await rpc(app, otherCookie, "pages/list", {})).toEqual({ items: [], nextCursor: null });
     for (const [proc, body] of [
       ["pages/get", { pageId: middle }],
@@ -486,9 +485,9 @@ describePages("pages", () => {
 
     // Two tabs delete it at once: both pass the ownership read; the later one finds it gone.
     const statuses = await holdingPageRow(middle!, async (waitFor) => {
-      const first = raw(app, cookie, "pages/remove", { pageId: middle });
+      const first = raw(app, scope, "pages/remove", { pageId: middle });
       await waitFor(1);
-      const second = raw(app, cookie, "pages/remove", { pageId: middle });
+      const second = raw(app, scope, "pages/remove", { pageId: middle });
       await waitFor(2);
       return [first, second];
     });
@@ -497,23 +496,23 @@ describePages("pages", () => {
     expect(await db().pageVersion.count({ where: { pageId: middle } })).toBe(0);
     expect(
       await db().secret.count({
-        where: { kind: "page_share", userId: (await me(app, cookie)).id },
+        where: { kind: "page_share", userId: (await me(app, scope)).id },
       }),
     ).toBe(0);
     expect(newest).toBeDefined();
   });
 
   it("keeps one live link under racing share changes and deletes it with the page's group", async () => {
-    const cookie = await signup(app, `pages-race-${stamp}@rakazo.test`, "Race Owner");
-    const userId = (await me(app, cookie)).id;
-    const bot = await createBot(app, cookie, "Racer");
-    const partner = await createBot(app, cookie, "Partner");
-    await sendAndWait(app, cookie, bot.id, {
+    const scope = await testSpace(app, "Race Owner");
+    const userId = (await me(app, scope)).id;
+    const bot = await createBot(app, scope, "Racer");
+    const partner = await createBot(app, scope, "Partner");
+    await sendAndWait(app, scope, bot.id, {
       text: `call save_page with ${JSON.stringify({ title: "Race", source: page("Race") })}`,
     });
     const pageId = (await lastResult(bot.id))!.pageId as string;
     const share = (visibility: "private" | "link") =>
-      rpc<{ visibility: string; shareUrl: string | null }>(app, cookie, "pages/setVisibility", {
+      rpc<{ visibility: string; shareUrl: string | null }>(app, scope, "pages/setVisibility", {
         pageId,
         visibility,
       });
@@ -528,7 +527,7 @@ describePages("pages", () => {
     // no page points to.
     const links = await Promise.all([share("link"), share("link")]);
     expect(await secrets()).toBe(1);
-    const live = await rpc<PageDetail>(app, cookie, "pages/get", { pageId, link: true });
+    const live = await rpc<PageDetail>(app, scope, "pages/get", { pageId, link: true });
     expect(links.map((link) => link.shareUrl)).toEqual([live.shareUrl, live.shareUrl]);
     // A link and an off at once end consistent: a link has its one secret, off has none.
     await Promise.all([share("link"), share("private")]);
@@ -537,19 +536,19 @@ describePages("pages", () => {
     expect(Boolean(after?.shareSecretId)).toBe(after?.visibility === "link");
 
     // Removing while a link is being turned on leaves no sealed token behind.
-    await sendAndWait(app, cookie, bot.id, {
+    await sendAndWait(app, scope, bot.id, {
       text: `call save_page with ${JSON.stringify({ title: "Gone", source: page("Gone") })}`,
     });
     const goneId = (await lastResult(bot.id))!.pageId as string;
     const before = await secrets();
     // The link's swap waits on the held row first; the remove reads the row, then waits behind it.
     const racing = await holdingPageRow(goneId, async (waitFor) => {
-      const linking = rpc(app, cookie, "pages/setVisibility", {
+      const linking = rpc(app, scope, "pages/setVisibility", {
         pageId: goneId,
         visibility: "link",
       });
       await waitFor(1);
-      const removing = rpc(app, cookie, "pages/remove", { pageId: goneId });
+      const removing = rpc(app, scope, "pages/remove", { pageId: goneId });
       await waitFor(2);
       return [linking, removing];
     });
@@ -559,20 +558,20 @@ describePages("pages", () => {
 
     // Pages go with their group; their sealed links must go too.
     await share("link");
-    const group = await rpc<{ id: string }>(app, cookie, "groups/create", {
+    const group = await rpc<{ id: string }>(app, scope, "groups/create", {
       name: "Pair",
       botIds: [bot.id, partner.id],
     });
     await db().page.update({ where: { id: pageId }, data: { groupId: group.id } });
     expect(await secrets()).toBe(1);
-    await rpc(app, cookie, "groups/remove", { groupId: group.id });
+    await rpc(app, scope, "groups/remove", { groupId: group.id });
     expect(await db().page.count({ where: { id: pageId } })).toBe(0);
     expect(await secrets()).toBe(0);
   });
 
   it("hands cleanup the link a swap commits while its pages' links are being deleted", async () => {
-    const cookie = await signup(app, `pages-swap-delete-${stamp}@rakazo.test`, "Swap Owner");
-    const owner = await rpc<{ userId: string; spaceId: string }>(app, cookie, "me");
+    const scope = await testSpace(app, "Swap Owner");
+    const owner = await rpc<{ userId: string; spaceId: string }>(app, scope, "me");
     const sealed = (ciphertext: string) =>
       db().secret.create({
         data: { userId: owner.userId, spaceId: owner.spaceId, kind: "page_share", ciphertext },
@@ -625,18 +624,18 @@ describePages("pages", () => {
   });
 
   it("deletes a deleted bot's own pages and their links, and leaves its group's pages", async () => {
-    const cookie = await signup(app, `pages-bot-gone-${stamp}@rakazo.test`, "Bot Owner");
-    const userId = (await me(app, cookie)).id;
-    const bot = await createBot(app, cookie, "Leaving");
-    const partner = await createBot(app, cookie, "Staying");
+    const scope = await testSpace(app, "Bot Owner");
+    const userId = (await me(app, scope)).id;
+    const bot = await createBot(app, scope, "Leaving");
+    const partner = await createBot(app, scope, "Staying");
     // Three members, so the group outlives one of them.
-    const third = await createBot(app, cookie, "Also staying");
+    const third = await createBot(app, scope, "Also staying");
     const saved = async (title: string) => {
-      await sendAndWait(app, cookie, bot.id, {
+      await sendAndWait(app, scope, bot.id, {
         text: `call save_page with ${JSON.stringify({ title, source: page(title) })}`,
       });
       const pageId = (await lastResult(bot.id))!.pageId as string;
-      const link = await rpc<{ shareUrl: string }>(app, cookie, "pages/setVisibility", {
+      const link = await rpc<{ shareUrl: string }>(app, scope, "pages/setVisibility", {
         pageId,
         visibility: "link",
       });
@@ -644,7 +643,7 @@ describePages("pages", () => {
     };
     const own = await saved("Own");
     const shared = await saved("Shared");
-    const group = await rpc<{ id: string }>(app, cookie, "groups/create", {
+    const group = await rpc<{ id: string }>(app, scope, "groups/create", {
       name: "Kept",
       botIds: [bot.id, partner.id, third.id],
     });
@@ -653,7 +652,7 @@ describePages("pages", () => {
       app.request(`${SHARED_PAGE_PATH_PREFIX}${new URL(url).pathname.slice(-43)}`);
     expect((await read(own.shareUrl)).status).toBe(200);
 
-    await rpc(app, cookie, "bots/remove", { botId: bot.id, deleteMemories: true });
+    await rpc(app, scope, "bots/remove", { botId: bot.id, deleteMemories: true });
     expect((await read(own.shareUrl)).status).toBe(404);
     expect(await db().page.count({ where: { id: own.pageId } })).toBe(0);
     expect(await db().page.count({ where: { id: shared.pageId, groupId: group.id } })).toBe(1);
@@ -662,17 +661,17 @@ describePages("pages", () => {
   });
 
   it("shows a page a bot saved while answering another bot in that bot's history", async () => {
-    const cookie = await signup(app, `pages-peer-${stamp}@rakazo.test`, "Peer Owner");
-    const asker = await createBot(app, cookie, "Asker");
-    const builder = await createBot(app, cookie, "Builder");
+    const scope = await testSpace(app, "Peer Owner");
+    const asker = await createBot(app, scope, "Asker");
+    const builder = await createBot(app, scope, "Builder");
     const args = { title: "Peer report", source: page("Peer report") };
-    await sendAndWait(app, cookie, asker.id, {
+    await sendAndWait(app, scope, asker.id, {
       text: `message the bot named Builder saying call save_page with ${JSON.stringify(args)}`,
     });
     const start = Date.now();
     let blocks: unknown[] = [];
     while (Date.now() - start < 20_000) {
-      const snap = await rpc<ThreadSnapshot>(app, cookie, "threads/get", { botId: builder.id });
+      const snap = await rpc<ThreadSnapshot>(app, scope, "threads/get", { botId: builder.id });
       blocks = snap.messages.flatMap((message) => message.blocks.filter((b) => b.kind === "page"));
       if (blocks.length) break;
       await new Promise((resolve) => setTimeout(resolve, 100));
@@ -682,205 +681,16 @@ describePages("pages", () => {
     ]);
   });
 
-  it("ends a member's shared pages with their account, and any link whose sealed token is gone", async () => {
-    const ownerCookie = await signup(app, `pages-host-${stamp}@rakazo.test`, "Space Host");
-    const host = await rpc<{ userId: string; spaceId: string }>(app, ownerCookie, "me");
-    const space = await db().space.findUniqueOrThrow({
-      where: { id: host.spaceId },
-      select: { organizationId: true },
-    });
-    const leaverCookie = await signup(app, `pages-leaver-${stamp}@rakazo.test`, "Leaver");
-    const leaver = await rpc<{ userId: string }>(app, leaverCookie, "me");
-    // The leaver joins the host's Space and shares a page there.
-    await db().member.create({
-      data: {
-        id: `pages-member-${stamp}`,
-        organizationId: space.organizationId,
-        userId: leaver.userId,
-        role: "member",
-        createdAt: new Date(),
-      },
-    });
-    const sharedBy = async (userId: string, title: string) => {
-      const token = randomBytes(32).toString("base64url");
-      const secret = await db().secret.create({
-        data: { userId, spaceId: host.spaceId, kind: "page_share", ciphertext: "sealed" },
-      });
-      const created = await db().page.create({
-        data: {
-          spaceId: host.spaceId,
-          userId,
-          title,
-          visibility: "link",
-          shareTokenHash: createHash("sha256").update(token).digest("hex"),
-          shareSecretId: secret.id,
-          versions: {
-            create: { version: 1, title, source: page(title), code: pageViewerCode(page(title)) },
-          },
-        },
-      });
-      return { token, pageId: created.id, secretId: secret.id };
-    };
-    const read = (token: string) => app.request(`${SHARED_PAGE_PATH_PREFIX}${token}`);
-    const leavers = await sharedBy(leaver.userId, "Leaver's page");
-    const hosts = await sharedBy(host.userId, "Host's page");
-    expect((await read(leavers.token)).status).toBe(200);
-
-    const deleted = await app.request("/api/auth/delete-user", {
-      method: "POST",
-      headers: {
-        "content-type": "application/json",
-        cookie: leaverCookie,
-        origin: "http://127.0.0.1:5173",
-      },
-      body: JSON.stringify({ password: "test-password-123" }),
-    });
-    expect(deleted.status).toBe(200);
-    expect((await read(leavers.token)).status).toBe(404);
-    expect(await db().page.count({ where: { userId: leaver.userId } })).toBe(0);
-    expect(await db().pageVersion.count({ where: { pageId: leavers.pageId } })).toBe(0);
-
-    // A link whose sealed token went some other way dies with it.
-    expect((await read(hosts.token)).status).toBe(200);
-    await db().secret.delete({ where: { id: hosts.secretId } });
-    expect((await read(hosts.token)).status).toBe(404);
-  });
-
-  it("keeps a page from a co-member of its Space and from its owner's other Space", async () => {
-    const ownerCookie = await signup(app, `pages-cospace-${stamp}@rakazo.test`, "Space Owner");
-    const owner = await rpc<{ userId: string; spaceId: string }>(app, ownerCookie, "me");
-    const space = await db().space.findUniqueOrThrow({
-      where: { id: owner.spaceId },
-      select: { organizationId: true },
-    });
-    const { id: pageId } = await db().page.create({
-      data: {
-        spaceId: owner.spaceId,
-        userId: owner.userId,
-        title: "Owner's plan",
-        versions: {
-          create: {
-            version: 1,
-            title: "Owner's plan",
-            source: page("Plan"),
-            code: pageViewerCode(page("Plan")),
-          },
-        },
-      },
-    });
-    const memberCookie = await signup(app, `pages-cospace-member-${stamp}@rakazo.test`, "Member");
-    const member = await rpc<{ userId: string }>(app, memberCookie, "me");
-    await db().member.deleteMany({ where: { userId: member.userId } });
-    await db().member.create({
-      data: {
-        id: `pages-cospace-org-${stamp}`,
-        organizationId: space.organizationId,
-        userId: member.userId,
-        role: "member",
-        createdAt: new Date(),
-      },
-    });
-    // Joining the organization adds the member to its Space.
-    expect(
-      await db().spaceMember.count({ where: { spaceId: owner.spaceId, userId: member.userId } }),
-    ).toBe(1);
-    const other = await rpc<{ id: string }>(app, ownerCookie, "spaces/create", { name: "Other" });
-    const attempts = [
-      ["pages/get", { pageId }],
-      ["pages/rename", { pageId, title: "Taken" }],
-      ["pages/setVisibility", { pageId, visibility: "link" }],
-      ["pages/pin", { pageId, pinned: true }],
-      ["pages/remove", { pageId }],
-    ] as const;
-    for (const [cookie, spaceId] of [
-      [memberCookie, owner.spaceId],
-      [ownerCookie, other.id],
-    ] as const) {
-      expect(await rpc(app, cookie, "pages/list", {}, spaceId)).toEqual({
-        items: [],
-        nextCursor: null,
-      });
-      for (const [proc, body] of attempts) {
-        expect((await raw(app, cookie, proc, body, spaceId)).status).toBe(404);
-      }
-    }
-    expect(await db().page.findUniqueOrThrow({ where: { id: pageId } })).toMatchObject({
-      title: "Owner's plan",
-      visibility: "private",
-      pinnedAt: null,
-    });
-  });
-
-  it("forgets every member's page links when the owner deletes their shared space", async () => {
-    const ownerCookie = await signup(app, `pages-space-owner-${stamp}@rakazo.test`, "Owner");
-    const shared = await rpc<{ id: string }>(app, ownerCookie, "spaces/create", { name: "Crew" });
-    const { organizationId } = await db().space.findUniqueOrThrow({
-      where: { id: shared.id },
-      select: { organizationId: true },
-    });
-    const memberCookie = await signup(app, `pages-space-member-${stamp}@rakazo.test`, "Member");
-    const member = await rpc<{ userId: string }>(app, memberCookie, "me");
-    await db().member.create({
-      data: {
-        id: `pages-space-org-${stamp}`,
-        organizationId,
-        userId: member.userId,
-        role: "member",
-        createdAt: new Date(),
-      },
-    });
-    if (!(await db().spaceMember.count({ where: { spaceId: shared.id, userId: member.userId } })))
-      await db().spaceMember.create({
-        data: {
-          id: `pages-space-member-${stamp}`,
-          spaceId: shared.id,
-          organizationId,
-          userId: member.userId,
-          role: "member",
-          createdAt: new Date(),
-        },
-      });
-    const secret = await db().secret.create({
-      data: {
-        userId: member.userId,
-        spaceId: shared.id,
-        kind: "page_share",
-        ciphertext: "sealed-member-link",
-      },
-    });
-    await db().page.create({
-      data: {
-        spaceId: shared.id,
-        userId: member.userId,
-        title: "Member's plan",
-        visibility: "link",
-        shareTokenHash: `member-hash-${stamp}`,
-        shareSecretId: secret.id,
-        versions: {
-          create: { version: 1, title: "Plan", source: page("P"), code: pageViewerCode(page("P")) },
-        },
-      },
-    });
-    const forget = vi.spyOn(EncryptedSecretStore.prototype, "delete");
-    try {
-      await rpc(app, ownerCookie, "spaces/remove", { spaceId: shared.id }, shared.id);
-      expect(forget.mock.calls.map(([ref]) => ref)).toContain("sealed-member-link");
-    } finally {
-      forget.mockRestore();
-    }
-    expect(await db().secret.count({ where: { id: secret.id } })).toBe(0);
-  });
-
   it("lets only one of two saves built on the same version through", async () => {
-    const cookie = await signup(app, `pages-save-race-${stamp}@rakazo.test`, "Save Racer");
-    const first = await createBot(app, cookie, "First");
-    const second = await createBot(app, cookie, "Second");
-    await sendAndWait(app, cookie, first.id, {
+    const scope = await testSpace(app, "Save Racer");
+    const first = await createBot(app, scope, "First");
+    const second = await createBot(app, scope, "Second");
+    await sendAndWait(app, scope, first.id, {
       text: `call save_page with ${JSON.stringify({ title: "Race", source: page("One") })}`,
     });
     const pageId = (await lastResult(first.id))!.pageId as string;
     // A page of both bots' group: its maker saves from its own chat, the other in the group.
-    const group = await rpc<{ id: string; threadId: string }>(app, cookie, "groups/create", {
+    const group = await rpc<{ id: string; threadId: string }>(app, scope, "groups/create", {
       name: "Racers",
       botIds: [first.id, second.id],
     });
@@ -890,8 +700,8 @@ describePages("pages", () => {
     // Hold the page row until both saves have read version 1 and wait to write.
     await holdingPageRow(pageId, async (waitFor) => {
       await Promise.all([
-        rpc(app, cookie, "threads/send", { botId: first.id, text: saveText("Two") }),
-        rpc(app, cookie, "threads/send", {
+        rpc(app, scope, "threads/send", { botId: first.id, text: saveText("Two") }),
+        rpc(app, scope, "threads/send", {
           groupId: group.id,
           text: `@Second ${saveText("Three")}`,
           mentions: [{ kind: "bot", id: second.id }],
@@ -899,7 +709,7 @@ describePages("pages", () => {
       ]);
       await waitFor(2);
     });
-    await sendAndWait(app, cookie, first.id, { text: "hello" });
+    await sendAndWait(app, scope, first.id, { text: "hello" });
     await expect
       .poll(
         () =>
@@ -927,19 +737,15 @@ describePages("pages", () => {
   });
 
   it("keeps a page editable after importing an export that a save raced", async () => {
-    const cookie = await signup(app, `pages-export-race-${stamp}@rakazo.test`, "Export Racer");
-    const bot = await createBot(app, cookie, "Builder");
-    await sendAndWait(app, cookie, bot.id, {
+    const scope = await testSpace(app, "Export Racer");
+    // Export this space first so its version query is the one blocked by the table lock.
+    await db().space.update({ where: { id: scope }, data: { createdAt: new Date(0) } });
+    const bot = await createBot(app, scope, "Builder");
+    await sendAndWait(app, scope, bot.id, {
       text: `call save_page with ${JSON.stringify({ title: "Plan", source: page("One") })}`,
     });
     const pageId = (await lastResult(bot.id))!.pageId as string;
-    const confirmed = await app.request("/api/auth/confirm-identity", {
-      method: "POST",
-      headers: { "content-type": "application/json", cookie, origin: "http://127.0.0.1:5173" },
-      body: JSON.stringify({ password: "test-password-123" }),
-    });
-    expect(confirmed.status).toBe(200);
-    const { token } = await rpc<{ token: string }>(app, cookie, "export/accountToken");
+    const { token } = await rpc<{ token: string }>(app, scope, "export/accountToken");
     // The export has read the page at version 1 and waits on its versions while a save commits.
     const { archive } = await holdingPageRow(pageId, async (waitFor, tx) => {
       await tx.$executeRaw`LOCK TABLE page_versions IN ACCESS EXCLUSIVE MODE`;
@@ -955,16 +761,22 @@ describePages("pages", () => {
     });
     const imported = await app.request("/api/account/import", {
       method: "POST",
-      headers: { cookie, origin: "http://127.0.0.1:5173", "content-type": "application/zip" },
+      headers: {
+        ...testSpaceHeaders(scope),
+        origin: "http://127.0.0.1:5173",
+        "content-type": "application/zip",
+      },
       body: await archive,
     });
     expect(imported.status).toBe(200);
-    const [space] = ((await imported.json()) as { spaces: { id: string }[] }).spaces;
+    const { spaces } = (await imported.json()) as { spaces: { id: string; name: string }[] };
+    const space = spaces.find((entry) => entry.name === "Export Racer");
     const copy = await db().page.findFirstOrThrow({ where: { spaceId: space!.id } });
+    expect(copy.currentVersion).toBe(1);
     const builder = await db().bot.findFirstOrThrow({ where: { spaceId: space!.id } });
     await sendAndWait(
       app,
-      cookie,
+      scope,
       builder.id,
       { text: `call save_page with ${JSON.stringify({ pageId: copy.id, source: page("Three") })}` },
       space!.id,
@@ -973,23 +785,23 @@ describePages("pages", () => {
   });
 
   it("keeps a rename that lands while a bot's untitled save is in flight", async () => {
-    const cookie = await signup(app, `pages-rename-race-${stamp}@rakazo.test`, "Rename Racer");
-    const bot = await createBot(app, cookie, "Builder");
-    await sendAndWait(app, cookie, bot.id, {
+    const scope = await testSpace(app, "Rename Racer");
+    const bot = await createBot(app, scope, "Builder");
+    await sendAndWait(app, scope, bot.id, {
       text: `call save_page with ${JSON.stringify({ title: "Q3 plan", source: page("One") })}`,
     });
     const pageId = (await lastResult(bot.id))!.pageId as string;
     const edits = [{ find: 'title="One"', replace: 'title="Two"' }];
     // The save has read the page and waits to write; the user's rename commits first.
     await holdingPageRow(pageId, async (waitFor, tx) => {
-      await rpc(app, cookie, "threads/send", {
+      await rpc(app, scope, "threads/send", {
         botId: bot.id,
         text: `call save_page with ${JSON.stringify({ pageId, edits })}`,
       });
       await waitFor(1);
       await tx.page.update({ where: { id: pageId }, data: { title: "Budget" } });
     });
-    await sendAndWait(app, cookie, bot.id, { text: "hello" });
+    await sendAndWait(app, scope, bot.id, { text: "hello" });
     expect(await lastResult(bot.id)).toMatchObject({ version: 2, title: "Budget" });
     const stored = await db().page.findUniqueOrThrow({
       where: { id: pageId },
@@ -1000,8 +812,8 @@ describePages("pages", () => {
   });
 
   it("pages through pinned then unpinned pages one at a time with no gap or repeat, and finds titles", async () => {
-    const cookie = await signup(app, `pages-walk-${stamp}@rakazo.test`, "Walker");
-    const owner = await rpc<{ userId: string; spaceId: string }>(app, cookie, "me");
+    const scope = await testSpace(app, "Walker");
+    const owner = await rpc<{ userId: string; spaceId: string }>(app, scope, "me");
     const at = (minute: number) => new Date(Date.UTC(2026, 9, 1, 12, minute));
     const made = async (title: string, updatedAt: Date, pinnedAt: Date | null) =>
       (
@@ -1032,7 +844,7 @@ describePages("pages", () => {
     do {
       const step: { items: { id: string }[]; nextCursor: string | null } = await rpc(
         app,
-        cookie,
+        scope,
         "pages/list",
         { limit: 1, ...(cursor ? { cursor } : {}) },
       );
@@ -1041,7 +853,7 @@ describePages("pages", () => {
     } while (cursor && walked.length < 20);
     expect(walked).toEqual(order);
 
-    const found = await rpc<{ items: { title: string }[] }>(app, cookie, "pages/list", {
+    const found = await rpc<{ items: { title: string }[] }>(app, scope, "pages/list", {
       query: "zETA",
     });
     expect(found.items.map((item) => item.title)).toEqual(["Zeta oldest"]);
@@ -1069,8 +881,8 @@ describePages("pages", () => {
   });
 });
 
-async function createBot(app: App, cookie: string, name: string) {
-  return rpc<{ id: string }>(app, cookie, "bots/create", {
+async function createBot(app: App, scope: string, name: string) {
+  return rpc<{ id: string }>(app, scope, "bots/create", {
     name,
     title: name,
     description: "tests pages",
@@ -1079,43 +891,37 @@ async function createBot(app: App, cookie: string, name: string) {
   });
 }
 
-async function me(app: App, cookie: string) {
-  const response = await app.request("/api/auth/get-session", { headers: { cookie } });
-  return ((await response.json()) as { user: { id: string } }).user;
+async function me(app: App, scope: string) {
+  const response = await app.request("/api/local-identity", { headers: testSpaceHeaders(scope) });
+  return (await response.json()) as { id: string };
 }
 
-async function signup(app: App, email: string, name: string) {
-  const response = await app.request("/api/auth/sign-up/email", {
-    method: "POST",
-    headers: { "content-type": "application/json", origin: "http://127.0.0.1:5173" },
-    body: JSON.stringify({ email, password: "test-password-123", name }),
-  });
-  expect(response.status).toBeLessThan(400);
-  return sessionCookieHeader(response);
+async function testSpace(app: App, name = "Test") {
+  return createTestSpace(app, name);
 }
 
 async function rpc<T>(
   app: App,
-  cookie: string,
+  scope: string,
   proc: string,
   body: unknown = {},
   spaceId?: string,
 ): Promise<T> {
-  const res = await raw(app, cookie, proc, body, spaceId);
+  const res = await raw(app, scope, proc, body, spaceId);
   const text = await res.text();
   const parsed = JSON.parse(text) as { json?: T; error?: { message?: string } };
   if (res.status >= 400 || parsed.error) {
     throw new Error(`${proc} ${res.status}: ${parsed.error?.message ?? text}`);
   }
-  return discardBotIntroFromCreate(harness, cookie, proc, parsed.json as T);
+  return discardBotIntroFromCreate(harness, scope, proc, parsed.json as T);
 }
 
-async function raw(app: App, cookie: string, proc: string, body: unknown, spaceId?: string) {
+async function raw(app: App, scope: string, proc: string, body: unknown, spaceId?: string) {
   return app.request(`/rpc/${proc}`, {
     method: "POST",
     headers: {
       "content-type": "application/json",
-      cookie,
+      ...testSpaceHeaders(scope),
       origin: "http://127.0.0.1:5173",
       ...(spaceId ? { "x-rakazo-space-id": spaceId } : {}),
     },
@@ -1125,15 +931,15 @@ async function raw(app: App, cookie: string, proc: string, body: unknown, spaceI
 
 async function sendAndWait(
   app: App,
-  cookie: string,
+  scope: string,
   botId: string,
   input: { text: string },
   spaceId?: string,
 ) {
-  await rpc(app, cookie, "threads/send", { botId, ...input }, spaceId);
+  await rpc(app, scope, "threads/send", { botId, ...input }, spaceId);
   const start = Date.now();
   while (Date.now() - start < 20_000) {
-    const snap = await rpc<ThreadSnapshot>(app, cookie, "threads/get", { botId }, spaceId);
+    const snap = await rpc<ThreadSnapshot>(app, scope, "threads/get", { botId }, spaceId);
     if (!snap.run || ["completed", "failed", "cancelled"].includes(snap.run.status)) return;
     await new Promise((resolve) => setTimeout(resolve, 100));
   }

@@ -4,6 +4,7 @@ import path from "node:path";
 import type { RunsListOutput, ThreadSnapshot } from "@rakazo/contracts";
 import { isTerminal } from "@rakazo/core";
 import { computerNetworkNameFor } from "@rakazo/sandbox-supervisor/computer-spec";
+import { testSpaceHeaders } from "../index.js";
 
 const composeFile = path.resolve("infra/compose/docker-compose.topology.yml");
 const keep = process.argv.includes("--keep");
@@ -27,7 +28,7 @@ async function main() {
       env,
       capture,
     );
-  let cookie: string | undefined;
+  let scope: string | undefined;
   let botId: string | undefined;
 
   try {
@@ -47,8 +48,8 @@ async function main() {
     await waitForComposeHealth(compose, "web", 60_000);
 
     compose(["stop", "worker"]);
-    cookie = await signup(baseUrl);
-    const bot = await rpc<{ id: string }>(baseUrl, cookie, "bots/create", {
+    scope = await testSpace(baseUrl);
+    const bot = await rpc<{ id: string }>(baseUrl, scope, "bots/create", {
       name: "Topology",
       title: "Topology smoke bot",
       description: "Exercises the production-shaped test topology",
@@ -56,11 +57,11 @@ async function main() {
       notifyOnFinish: false,
     });
     botId = bot.id;
-    const sent = await rpc<{ runId: string }>(baseUrl, cookie, "threads/send", {
+    const sent = await rpc<{ runId: string }>(baseUrl, scope, "threads/send", {
       botId: bot.id,
       text: "write a file in your home called notes/result.txt that says topology-recovery-ok",
     });
-    const queued = await rpc<ThreadSnapshot>(baseUrl, cookie, "threads/get", { botId: bot.id });
+    const queued = await rpc<ThreadSnapshot>(baseUrl, scope, "threads/get", { botId: bot.id });
     if (queued.run?.id !== sent.runId || queued.run.status !== "queued") {
       throw new Error(
         `run was not left queued while worker was stopped: ${JSON.stringify(queued.run)}`,
@@ -68,18 +69,18 @@ async function main() {
     }
 
     compose(["start", "worker"]);
-    const completed = await waitForRun(baseUrl, cookie, bot.id, sent.runId, 90_000);
+    const completed = await waitForRun(baseUrl, scope, bot.id, sent.runId, 90_000);
     if (completed.runId !== sent.runId || completed.status !== "completed") {
       throw new Error(`worker did not complete queued run: ${JSON.stringify(completed)}`);
     }
-    const file = await rpc<{ content: string }>(baseUrl, cookie, "computer/readFile", {
+    const file = await rpc<{ content: string }>(baseUrl, scope, "computer/readFile", {
       botId: bot.id,
       path: "notes/result.txt",
     });
     if (file.content !== "topology-recovery-ok\n") {
       throw new Error(`unexpected sandbox file content: ${JSON.stringify(file.content)}`);
     }
-    const computer = await rpc<{ state: string }>(baseUrl, cookie, "computer/status", {
+    const computer = await rpc<{ state: string }>(baseUrl, scope, "computer/status", {
       botId: bot.id,
     });
     if (computer.state !== "running") {
@@ -87,12 +88,12 @@ async function main() {
     }
     // File-only runs leave desktops unopened. Request the actual screen before
     // checking the supervisor/web peers that the screen connection attaches.
-    const screen = await rpc<{ url: string | null }>(baseUrl, cookie, "computer/screenUrl", {
+    const screen = await rpc<{ url: string | null }>(baseUrl, scope, "computer/screenUrl", {
       botId: bot.id,
     });
     if (!screen.url) throw new Error("Docker computer did not expose a screen");
     assertComputerNetworkIsolation(compose, project);
-    await rpc(baseUrl, cookie, "bots/remove", { botId: bot.id });
+    await rpc(baseUrl, scope, "bots/remove", { botId: bot.id });
     botId = undefined;
 
     console.log(
@@ -128,8 +129,8 @@ async function main() {
         `Topology kept running. Clean up with: docker compose -p ${project} -f ${composeFile} down -v`,
       );
     } else {
-      if (cookie && botId) {
-        await rpc(baseUrl, cookie, "bots/remove", { botId }).catch(() => undefined);
+      if (scope && botId) {
+        await rpc(baseUrl, scope, "bots/remove", { botId }).catch(() => undefined);
       }
       removeManagedComputers(compose, project);
       try {
@@ -141,29 +142,20 @@ async function main() {
   }
 }
 
-async function signup(baseUrl: string) {
-  const response = await fetch(`${baseUrl}/api/auth/sign-up/email`, {
+async function testSpace(baseUrl: string) {
+  const response = await fetch(`${baseUrl}/rpc/me`, {
     method: "POST",
-    headers: { "content-type": "application/json", origin: baseUrl },
-    body: JSON.stringify({
-      email: `topology-${Date.now()}@rakazo.test`,
-      password: "password12",
-      name: "Topology",
-    }),
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ json: {} }),
   });
-  if (!response.ok) throw new Error(`signup failed ${response.status}: ${await response.text()}`);
-  const cookies = response.headers.getSetCookie?.() ?? [];
-  const cookie = cookies.length
-    ? cookies.map((value) => value.split(";")[0]).join("; ")
-    : response.headers.get("set-cookie")?.split(";")[0];
-  if (!cookie) throw new Error("signup response did not include a session cookie");
-  return cookie;
+  if (!response.ok) throw new Error(`Local identity failed (${response.status})`);
+  return ((await response.json()) as { json: { spaceId: string } }).json.spaceId;
 }
 
-async function rpc<T>(baseUrl: string, cookie: string, procedure: string, input: unknown = {}) {
+async function rpc<T>(baseUrl: string, scope: string, procedure: string, input: unknown = {}) {
   const response = await fetch(`${baseUrl}/rpc/${procedure}`, {
     method: "POST",
-    headers: { "content-type": "application/json", cookie, origin: baseUrl },
+    headers: { "content-type": "application/json", ...testSpaceHeaders(scope), origin: baseUrl },
     body: JSON.stringify({ json: input }),
   });
   const text = await response.text();
@@ -176,7 +168,7 @@ async function rpc<T>(baseUrl: string, cookie: string, procedure: string, input:
 
 async function waitForRun(
   baseUrl: string,
-  cookie: string,
+  scope: string,
   botId: string,
   runId: string,
   timeoutMs: number,
@@ -185,7 +177,7 @@ async function waitForRun(
   while (Date.now() - started < timeoutMs) {
     // Thread snapshots intentionally omit completed runs. Inspect persisted run
     // history so a reply from another run cannot stand in for this completion.
-    const recent = await rpc<RunsListOutput>(baseUrl, cookie, "runs/list", { filter: "recent" });
+    const recent = await rpc<RunsListOutput>(baseUrl, scope, "runs/list", { filter: "recent" });
     const run = recent.runs.find((run) => run.runId === runId && run.botId === botId);
     if (run && isTerminal(run.status)) return run;
     await delay(300);

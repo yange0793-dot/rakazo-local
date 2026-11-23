@@ -3,7 +3,6 @@ import { archivedChatCounts, loadAllArchivedChats, loadArchivedChats } from "./a
 
 const rpc = vi.hoisted(() => vi.fn());
 vi.mock("./api-server", () => ({}));
-vi.mock("./api-auth", () => ({}));
 vi.mock("./api-live", () => ({}));
 vi.mock("./api", () => ({
   rpc,

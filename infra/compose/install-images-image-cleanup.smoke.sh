@@ -52,7 +52,7 @@ for a in "$@"; do
         exit 0
       fi
       cat >/dev/null || true
-      printf '%s\n' POSTGRES_PASSWORD=x POSTGRES_APP_PASSWORD=x BETTER_AUTH_SECRET=x \
+      printf '%s\n' POSTGRES_PASSWORD=x POSTGRES_APP_PASSWORD=x \
         ENCRYPTION_KEY=x SCREEN_PROXY_SECRET=x SANDBOX_SUPERVISOR_TOKEN=x
       exit 0
       ;;

@@ -589,9 +589,6 @@ export class NativeStackController extends StackLifecycle {
       ...appEnv,
       API_HOST: "127.0.0.1",
       API_PORT: String(ports.api),
-      AUTH_PASSWORD_ENABLED: stackEnv.get("AUTH_PASSWORD_ENABLED") || "true",
-      AUTH_BREACHED_PASSWORD_CHECK_ENABLED:
-        stackEnv.get("AUTH_BREACHED_PASSWORD_CHECK_ENABLED") || "false",
     });
     // Busy runs allocate fast; a larger young generation cuts the worker's garbage collection.
     const worker = node("worker", ["--max-semi-space-size=64", entry("worker")], appEnv);
@@ -980,7 +977,6 @@ export class NativeStackController extends StackLifecycle {
       CONTENT_ENCRYPTION: "off",
       // Only this computer can reach the stack, so its own model and tool servers are fair game.
       MCP_ALLOW_PRIVATE_ENDPOINT: "true",
-      BETTER_AUTH_URL: this.currentWebUrl,
       WEB_ORIGIN: this.currentWebUrl,
       API_URL: this.currentWebUrl,
       ...fixed,

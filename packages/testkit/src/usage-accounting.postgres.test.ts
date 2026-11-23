@@ -1,4 +1,3 @@
-import { randomUUID } from "node:crypto";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
@@ -8,7 +7,8 @@ import { describe, expect, it } from "vitest";
 import { runAutoReviewJudge } from "../../adapters/src/auto-review.js";
 import { compactHistory } from "../../adapters/src/history-compaction.js";
 import { discardBotIntroRun } from "./discard-bot-intro.js";
-import { sessionCookieHeader } from "./index.js";
+import { createTestSpace, testSpaceHeaders } from "./index.js";
+
 import { startModelEmulator } from "./model-emulator.js";
 import { asSystem } from "./system-db.js";
 
@@ -47,6 +47,7 @@ describe.skipIf(!enabled)("persisted Pi usage accounting", () => {
         },
         { expect: () => {}, response: { type: "text", text: "Fixture inspected." }, usage },
         { expect: () => {}, response: { type: "text", text: "Done." }, usage },
+        { expect: () => {}, response: { type: "text", text: "Helper result received." }, usage },
         // The cut reply is continued once; the continuation is cut too, which fails the run.
         { expect: () => {}, response: { type: "disconnect", text: "Partial result." }, usage },
         { expect: () => {}, response: { type: "disconnect", text: " More." }, usage },
@@ -89,34 +90,23 @@ describe.skipIf(!enabled)("persisted Pi usage accounting", () => {
       const handles = await createApp({
         databaseUrl: process.env.DATABASE_URL!,
         realtimeDatabaseUrl: process.env.DATABASE_URL!,
-        authUrl: origin,
+
         webOrigin: origin,
         dataDir,
         sandboxProvider: "fake",
         agentRuntime: "pi",
         contextStrategy: "current",
         wakeupDriver: "memory",
-        signupsEnabled: "true",
         composio: new ComposioConnector({ client: new FakeComposioClient() }),
         encryptionKey: "usage-fixture-encryption-key",
       });
       stop = handles.stop;
       const db = asSystem(handles.prisma);
-      const signup = await handles.app.request("/api/auth/sign-up/email", {
-        method: "POST",
-        headers: { "content-type": "application/json", origin },
-        body: JSON.stringify({
-          email: `usage-${randomUUID()}@rakazo.test`,
-          password: "password12",
-          name: "Usage fixture",
-        }),
-      });
-      expect(signup.status).toBeLessThan(400);
-      const cookie = sessionCookieHeader(signup);
+      const scope = await createTestSpace(handles.app, "Usage fixture");
       const rpc = async <T>(procedure: string, input: unknown = {}): Promise<T> => {
         const response = await handles.app.request(`/rpc/${procedure}`, {
           method: "POST",
-          headers: { "content-type": "application/json", cookie, origin },
+          headers: { "content-type": "application/json", ...testSpaceHeaders(scope), origin },
           body: JSON.stringify({ json: input }),
         });
         const body = (await response.json()) as { json: T; error?: { message: string } };
@@ -142,7 +132,7 @@ describe.skipIf(!enabled)("persisted Pi usage accounting", () => {
         instructions: "Complete the synthetic task.",
         notifyOnFinish: false,
       });
-      await discardBotIntroRun(handles, cookie, bot.id);
+      await discardBotIntroRun(handles, scope, bot.id);
       await rpc("bots/update", {
         botId: bot.id,
         modelProvider: model.model.provider,
@@ -177,6 +167,15 @@ describe.skipIf(!enabled)("persisted Pi usage accounting", () => {
           interval: 100,
         })
         .toBe("completed");
+      await expect
+        .poll(
+          async () =>
+            db.run.count({
+              where: { botId: bot.id, trigger: "helper_result", status: "completed" },
+            }),
+          { timeout: 15000, interval: 100 },
+        )
+        .toBe(1);
       const failed = await rpc<{ runId: string }>("threads/send", {
         botId: bot.id,
         text: "Inspect the failure fixture.",
@@ -247,8 +246,8 @@ describe.skipIf(!enabled)("persisted Pi usage accounting", () => {
         where: { botId: bot.id },
         orderBy: { createdAt: "asc" },
       });
-      expect(rows).toHaveLength(8);
-      expect(new Set(rows.map((row) => row.callId)).size).toBe(8);
+      expect(rows).toHaveLength(9);
+      expect(new Set(rows.map((row) => row.callId)).size).toBe(9);
       const delivered = rows[0]!;
       const replayEvent = {
         type: "usage" as const,
@@ -269,7 +268,7 @@ describe.skipIf(!enabled)("persisted Pi usage accounting", () => {
           }),
         ),
       );
-      expect(await db.usageRecord.count({ where: { botId: bot.id } })).toBe(8);
+      expect(await db.usageRecord.count({ where: { botId: bot.id } })).toBe(9);
       type Summary = {
         totalTokens: number | null;
         modelCalls: number;
@@ -283,15 +282,15 @@ describe.skipIf(!enabled)("persisted Pi usage accounting", () => {
         }[];
       };
       const summary = await rpc<Summary>("usage/summary");
-      expect(summary).toMatchObject({ totalTokens: 1040, modelCalls: 8, runs: 3 });
-      expect(summary.costUsd).toBeCloseTo(0.00096);
+      expect(summary).toMatchObject({ totalTokens: 1170, modelCalls: 9, runs: 5 });
+      expect(summary.costUsd).toBeCloseTo(0.00108);
       expect(summary.models).toHaveLength(1);
       expect(summary.models[0]).toMatchObject({
         model: delivered.model,
-        modelCalls: 8,
-        totalTokens: 1040,
+        modelCalls: 9,
+        totalTokens: 1170,
       });
-      expect(summary.models[0]?.costUsd).toBeCloseTo(0.00096);
+      expect(summary.models[0]?.costUsd).toBeCloseTo(0.00108);
       // A call without a price makes its model's cost and the overall cost unknown, not zero.
       const unpriced = await db.usageRecord.create({
         data: {
@@ -305,14 +304,14 @@ describe.skipIf(!enabled)("persisted Pi usage accounting", () => {
         },
       });
       const mixed = await rpc<Summary>("usage/summary");
-      expect(mixed).toMatchObject({ totalTokens: 1042, modelCalls: 9, runs: 3, costUsd: null });
+      expect(mixed).toMatchObject({ totalTokens: 1172, modelCalls: 10, runs: 5, costUsd: null });
       expect(
         mixed.models.map(({ model, modelCalls, totalTokens }) => [model, modelCalls, totalTokens]),
       ).toEqual([
-        [delivered.model, 8, 1040],
+        [delivered.model, 9, 1170],
         ["unpriced-model", 1, 2],
       ]);
-      expect(mixed.models[0]?.costUsd).toBeCloseTo(0.00096);
+      expect(mixed.models[0]?.costUsd).toBeCloseTo(0.00108);
       expect(mixed.models[1]?.costUsd).toBeNull();
       await db.usageRecord.delete({ where: { id: unpriced.id } });
       for (const row of rows)
@@ -326,18 +325,20 @@ describe.skipIf(!enabled)("persisted Pi usage accounting", () => {
           costUsd: 0.00012,
           costSource: "provider-reported",
         });
-      expect(rows.filter((row) => row.operationKind === "answer")).toHaveLength(5);
-      expect(rows.find((row) => row.operationKind === "subagent")).toMatchObject({
-        parentRunId: first.runId,
-        runId: first.runId,
-        agentId: expect.any(String),
+      expect(rows.filter((row) => row.operationKind === "answer")).toHaveLength(7);
+      const helper = await db.run.findFirstOrThrow({
+        where: { botId: bot.id, trigger: "helper" },
+      });
+      expect(rows.find((row) => row.runId === helper.id)).toMatchObject({
+        parentRunId: helper.id,
+        operationKind: "answer",
       });
       expect(rows.find((row) => row.operationKind === "compaction")).toMatchObject({
         runId: null,
         parentRunId: null,
       });
       await rpc("threads/clear", { botId: bot.id });
-      expect(await db.usageRecord.count({ where: { botId: bot.id } })).toBe(8);
+      expect(await db.usageRecord.count({ where: { botId: bot.id } })).toBe(9);
       const deletedWhilePending = await rpc<{ runId: string }>("threads/send", {
         botId: bot.id,
         text: "Inspect the deletion fixture.",
@@ -353,7 +354,7 @@ describe.skipIf(!enabled)("persisted Pi usage accounting", () => {
         .toBe(1);
       model.assertComplete();
       const retained = await db.usageRecord.findMany({ where: { botId: bot.id } });
-      expect(retained).toHaveLength(9);
+      expect(retained).toHaveLength(10);
       expect(retained.find((row) => row.parentRunId === deletedWhilePending.runId)).toMatchObject({
         inputTokens: 60,
         cacheReadTokens: 40,
@@ -361,7 +362,8 @@ describe.skipIf(!enabled)("persisted Pi usage accounting", () => {
         costUsd: 0.00012,
         runId: deletedWhilePending.runId,
       });
-      expect(retained.filter((row) => row.parentRunId === first.runId)).toHaveLength(4);
+      expect(retained.filter((row) => row.parentRunId === first.runId)).toHaveLength(3);
+      expect(retained.filter((row) => row.parentRunId === helper.id)).toHaveLength(1);
       expect(retained.every((row) => row.runId === row.parentRunId)).toBe(true);
     } finally {
       await stop?.();

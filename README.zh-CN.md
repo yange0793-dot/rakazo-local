@@ -154,7 +154,7 @@ cp .env.example .env
 
 将 `POSTGRES_PASSWORD` 和 `POSTGRES_APP_PASSWORD` 分别设置为由 `openssl rand -hex 16` 生成的两个值，再把它们填入 `DATABASE_MIGRATION_URL` 和 `DATABASE_URL`。
 应用以自己的 `rakazo_app` 登录身份连接数据库，并受行级安全策略约束；迁移则以所有者身份运行（参见 [数据库角色](docs/self-host-configuration.md#database-roles)）。
-为 `BETTER_AUTH_SECRET`、`ENCRYPTION_KEY` 和 `SCREEN_PROXY_SECRET` 分别设置独立的长随机值。
+为 `ENCRYPTION_KEY` 和 `SCREEN_PROXY_SECRET` 分别设置独立的长随机值。
 Docker 沙箱还需要专用的 `SANDBOX_SUPERVISOR_TOKEN`。
 你也可以设置 `OPENROUTER_API_KEY`，或在首次设置时连接支持的模型提供商。
 
@@ -351,7 +351,6 @@ Muse、Dots、Instinct 和 Claude Duet 是托管式助手；OpenClaw 和 Hermes 
 - Electron 和 Expo
 - Hono 和 oRPC
 - PostgreSQL 和 Prisma
-- Better Auth
 - Graphile Worker
 - Pi
 - Docker、E2B、Daytona、CreateOS 和 Boat

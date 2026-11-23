@@ -17,7 +17,6 @@ import {
   FolderOpen,
   Gauge,
   Link2,
-  LogOut,
   Plug,
   ScrollText,
   Settings,
@@ -54,9 +53,6 @@ type Props = {
   usageDetails?: ReactNode;
   onUsage?: () => void;
   onInvite?: () => void;
-  onLogOut: () => void;
-  signingOut: boolean;
-  logOutError: string | null;
   organizations?: Organization[];
   activeOrganizationId?: string | null;
   onSwitchOrganization?: (organization: Organization) => void;
@@ -87,9 +83,6 @@ export function SidebarFooter({
   usageDetails,
   onUsage,
   onInvite,
-  onLogOut,
-  signingOut,
-  logOutError,
   organizations = [],
   activeOrganizationId,
   onSwitchOrganization,
@@ -301,21 +294,6 @@ export function SidebarFooter({
               <BookOpen className="text-muted-foreground" strokeWidth={1.75} />
               <Trans>Docs</Trans>
             </a>
-            <div className="my-1 border-t border-border" />
-            <Button
-              variant="ghost"
-              className="h-9 w-full justify-start gap-2.5 font-normal"
-              disabled={signingOut}
-              onClick={onLogOut}
-            >
-              <LogOut className="text-muted-foreground" strokeWidth={1.75} />
-              <Trans>Log out</Trans>
-            </Button>
-            {logOutError ? (
-              <p role="alert" className="px-2.5 pt-1 pb-2 text-body-sm text-destructive">
-                {logOutError}
-              </p>
-            ) : null}
           </PopoverContent>
         ) : null}
       </Popover>

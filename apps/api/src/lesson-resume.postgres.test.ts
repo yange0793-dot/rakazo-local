@@ -43,10 +43,6 @@ pg("learning after an approval (PostgreSQL)", () => {
         provisionMessagingIdentity(
           prisma,
           { provider: "email", address },
-          {
-            signupsEnabled: undefined,
-            signupAllowlist: undefined,
-          },
         ),
       );
       const { spaceId, userId, botId, threadId } = identity;

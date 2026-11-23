@@ -1,11 +1,9 @@
 import { Trans, useLingui } from "@lingui/react/macro";
-import type { AccountSecurity, BotAvatarSet, UsageSummary } from "@rakazo/contracts";
+import type { BotAvatarSet, UsageSummary } from "@rakazo/contracts";
 import {
   APP_LOCALE_LABELS,
   accountDisplay,
   displayName,
-  MAX_PASSWORD_LENGTH,
-  MIN_PASSWORD_LENGTH,
 } from "@rakazo/core";
 import {
   Button,
@@ -31,9 +29,7 @@ import {
 } from "@rakazo/ui-web/components/ui/table";
 import type { RefObject } from "react";
 import { useId, useRef, useState } from "react";
-import { AccountAccess, LinkSsoRow } from "../components/AccountAccess";
 import { AccountDataSettings } from "../components/AccountDataSettings";
-import { SuccessPop } from "../components/ai/primitives";
 import { ComputerDeviceSettings } from "../components/ComputerDeviceSettings";
 import { ComputerProviderSettings } from "../components/ComputerProviderSettings";
 import {
@@ -41,16 +37,13 @@ import {
   computersAreUnavailable,
 } from "../components/ComputersUnavailableHint";
 import { DesktopUpdateSection } from "../components/DesktopUpdates";
-import { PasskeySettings } from "../components/PasskeySettings";
 import { SettingsGroup, SettingsRow } from "../components/SettingsRows";
 import { TrustedLinkSitesSettings } from "../components/TrustedLinkSitesSettings";
-import { authClient } from "../lib/auth";
 import type { BotsSidebarDensity } from "../lib/bots-sidebar-density-pref";
 import { botsSidebarDensityPreference } from "../lib/bots-sidebar-density-pref";
 import { composerEnterToSendPreference } from "../lib/composer-enter-to-send-pref";
 import { getActiveUiLocale, setUiLocale } from "../lib/i18n";
 import { localTimezone, sameTimeZone, timezoneOptions } from "../lib/local-timezone";
-import { usePasskeysSupported } from "../lib/passkeys";
 import { remoteImagesPreference } from "../lib/remote-images-preference";
 import { responseStreamingPreference } from "../lib/response-streaming";
 import { toolActivityPreference } from "../lib/tool-activity-preference";
@@ -58,7 +51,7 @@ import type { AppearancePreference } from "../lib/ui-appearance";
 import { getUiAppearancePreference, setUiAppearance } from "../lib/ui-appearance";
 import type { UiLocale } from "../lib/ui-locale";
 import { UI_LOCALES } from "../lib/ui-locale";
-import { authErrorText } from "../lib/user-error";
+import { rpc } from "../lib/rpc";
 
 export type SettingsGeneralProps = {
   email?: string | null;
@@ -109,11 +102,7 @@ export function GeneralSettingsPanels({
     setNamePending(true);
     setNameError(null);
     try {
-      const result = await authClient.updateUser({ name: nextName });
-      if (result.error) {
-        setNameError(authErrorText(result.error, t`Could not update name`));
-        return;
-      }
+      await rpc.profile.updateName({ name: nextName });
       setEditingName(false);
       void Promise.resolve()
         .then(() => onNameSaved?.())
@@ -125,7 +114,6 @@ export function GeneralSettingsPanels({
     }
   }
 
-  const [accountSecurity, setAccountSecurity] = useState<AccountSecurity | null>(null);
   const [locale, setLocale] = useState<UiLocale>(() => getActiveUiLocale());
   const localeRequestRef = useRef(0);
   const [appearance, setAppearance] = useState<AppearancePreference>(() =>
@@ -144,11 +132,6 @@ export function GeneralSettingsPanels({
   const loadRemoteImages = remoteImagesPreference.use();
   const loadRemoteImagesId = useId();
   const timezoneId = useId();
-  const showPassword = Boolean(
-    accountSecurity?.hasPassword && accountSecurity.passwordChangeEnabled !== false,
-  );
-  const passkeysSupported = usePasskeysSupported();
-  const canLinkSso = Boolean(accountSecurity?.sso && !accountSecurity.ssoLinked);
   const [timezonePending, setTimezonePending] = useState(false);
   const [timezoneError, setTimezoneError] = useState<string | null>(null);
   const deviceTimezone = localTimezone();
@@ -471,17 +454,8 @@ export function GeneralSettingsPanels({
       <TrustedLinkSitesSettings />
       <ComputerDeviceSettings />
 
-      {showPassword || passkeysSupported || canLinkSso ? (
-        <SettingsGroup title={<Trans>Security</Trans>}>
-          {showPassword ? <ChangePasswordRow email={email} /> : null}
-          {canLinkSso ? <LinkSsoRow /> : null}
-          <PasskeySettings />
-        </SettingsGroup>
-      ) : null}
-
       <SettingsGroup title={<Trans>Data</Trans>} data-testid="account-data">
         <AccountDataSettings onImported={onAccountImported} onImportAgent={onImportAgent} />
-        <AccountAccess onSecurity={setAccountSecurity} />
       </SettingsGroup>
     </div>
   );
@@ -620,171 +594,6 @@ export function UpdatesSettingsPanel() {
     <div className="space-y-5">
       <DesktopUpdateSection />
     </div>
-  );
-}
-
-function ChangePasswordRow({ email }: { email?: string | null }) {
-  const { t } = useLingui();
-  const [open, setOpen] = useState(false);
-  const [currentPassword, setCurrentPassword] = useState("");
-  const [newPassword, setNewPassword] = useState("");
-  const [confirmation, setConfirmation] = useState("");
-  const [pending, setPending] = useState(false);
-  const [saved, setSaved] = useState(false);
-  const [error, setError] = useState<string | null>(null);
-
-  async function changePassword() {
-    if (pending) return;
-    if (newPassword !== confirmation) {
-      setError(t`Passwords do not match`);
-      return;
-    }
-    setPending(true);
-    setSaved(false);
-    setError(null);
-    try {
-      const result = await authClient.changePassword({
-        currentPassword,
-        newPassword,
-        revokeOtherSessions: true,
-      });
-      if (result.error) {
-        setError(authErrorText(result.error, t`Could not change password`));
-        return;
-      }
-      setCurrentPassword("");
-      setNewPassword("");
-      setConfirmation("");
-      setOpen(false);
-      setSaved(true);
-    } catch {
-      setError(t`Could not reach the server`);
-    } finally {
-      setPending(false);
-    }
-  }
-
-  function close() {
-    setOpen(false);
-    setCurrentPassword("");
-    setNewPassword("");
-    setConfirmation("");
-    setError(null);
-  }
-
-  return (
-    <SettingsRow
-      label={<Trans>Password</Trans>}
-      control={
-        open ? null : (
-          <>
-            {saved ? <SuccessPop label={t`Password updated`} /> : null}
-            <Button
-              variant="secondary"
-              size="sm"
-              onClick={() => {
-                setSaved(false);
-                setOpen(true);
-              }}
-            >
-              <Trans>Change password</Trans>
-            </Button>
-          </>
-        )
-      }
-    >
-      {open ? (
-        <form
-          className="mt-3"
-          onSubmit={(event) => {
-            event.preventDefault();
-            void changePassword();
-          }}
-          onKeyDown={(event) => {
-            if (event.key === "Escape" && !pending) {
-              event.stopPropagation();
-              close();
-            }
-          }}
-        >
-          <div className="grid gap-3">
-            <input
-              type="text"
-              name="username"
-              autoComplete="username"
-              value={email ?? ""}
-              readOnly
-              tabIndex={-1}
-              aria-hidden="true"
-              className="sr-only"
-            />
-            <SettingsPasswordInput
-              label={t`Current password`}
-              autoComplete="current-password"
-              autoFocus
-              value={currentPassword}
-              onChange={setCurrentPassword}
-            />
-            <SettingsPasswordInput
-              label={t`New password`}
-              autoComplete="new-password"
-              value={newPassword}
-              onChange={setNewPassword}
-            />
-            <SettingsPasswordInput
-              label={t`Confirm password`}
-              autoComplete="new-password"
-              value={confirmation}
-              onChange={setConfirmation}
-            />
-          </div>
-          {error ? (
-            <p role="alert" className="mt-3 text-body-sm text-destructive">
-              {error}
-            </p>
-          ) : null}
-          <div className="mt-4 flex items-center gap-3">
-            <Button type="submit" disabled={pending || !currentPassword || !newPassword}>
-              {pending ? <Trans>Changing…</Trans> : <Trans>Save</Trans>}
-            </Button>
-            <Button type="button" variant="ghost" disabled={pending} onClick={close}>
-              <Trans>Cancel</Trans>
-            </Button>
-          </div>
-        </form>
-      ) : null}
-    </SettingsRow>
-  );
-}
-
-function SettingsPasswordInput({
-  label,
-  autoComplete,
-  autoFocus,
-  value,
-  onChange,
-}: {
-  label: string;
-  autoComplete: "current-password" | "new-password";
-  autoFocus?: boolean;
-  value: string;
-  onChange: (value: string) => void;
-}) {
-  const id = useId();
-  return (
-    <Field>
-      <FieldLabel htmlFor={id}>{label}</FieldLabel>
-      <Input
-        id={id}
-        type="password"
-        autoComplete={autoComplete}
-        autoFocus={autoFocus}
-        minLength={autoComplete === "new-password" ? MIN_PASSWORD_LENGTH : undefined}
-        maxLength={MAX_PASSWORD_LENGTH}
-        value={value}
-        onChange={(event) => onChange(event.target.value)}
-      />
-    </Field>
   );
 }
 

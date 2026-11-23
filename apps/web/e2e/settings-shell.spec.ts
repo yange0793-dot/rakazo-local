@@ -1,9 +1,13 @@
 import { expect, test } from "@playwright/test";
-import { captureScreenshot, completeOnboarding, openUserSettings, signup } from "./helpers";
+import {
+  captureScreenshot,
+  completeOnboarding,
+  openLocalWorkspace,
+  openUserSettings,
+} from "./helpers";
 
 test("changing language updates settings overflow without resizing", async ({ page }, testInfo) => {
-  const stamp = Date.now();
-  await signup(page, `settings-language-${stamp}@rakazo.test`, "password12", "Settings");
+  await openLocalWorkspace(page, "Settings");
   await completeOnboarding(page);
   const settings = await openUserSettings(page);
   // Below the desktop breakpoint, where the section list scrolls sideways.
@@ -32,8 +36,7 @@ test("changing language updates settings overflow without resizing", async ({ pa
 test("narrow settings reveals the active section and offers scroll controls", async ({
   page,
 }, testInfo) => {
-  const stamp = Date.now();
-  await signup(page, `settings-narrow-${stamp}@rakazo.test`, "password12", "Settings");
+  await openLocalWorkspace(page, "Settings");
   await completeOnboarding(page);
   const settings = await openUserSettings(page, "organization");
   const nav = settings.getByTestId("settings-nav");
@@ -71,7 +74,7 @@ test("narrow settings reveals the active section and offers scroll controls", as
     await expect.poll(() => nav.evaluate((node) => node.scrollLeft)).toBeGreaterThan(0);
     const header = settings.getByTestId("settings-header");
     const before = await header.boundingBox();
-    await settings.getByTestId("delete-account").scrollIntoViewIfNeeded();
+    await settings.getByTestId("account-data").scrollIntoViewIfNeeded();
     await expect
       .poll(() => settings.getByTestId("settings-scroll").evaluate((node) => node.scrollTop))
       .toBeGreaterThan(0);
@@ -94,14 +97,14 @@ test("settings shell is two-pane and deep-links Models Memory Voice Usage", asyn
 }, testInfo) => {
   const stamp = Date.now();
   const userName = `Settings shell ${stamp}`;
-  await signup(page, `settings-shell-${stamp}@rakazo.test`, "password12", userName);
+  await openLocalWorkspace(page, userName);
   await completeOnboarding(page);
 
   await page.getByTestId("user-menu-trigger").click();
   const menu = page.locator('[data-slot="popover-content"]');
   await expect(menu.getByRole("button", { name: "Settings", exact: true })).toBeVisible();
   await expect(menu.getByRole("button", { name: "Usage", exact: true })).toHaveCount(0);
-  await expect(menu.getByRole("button", { name: "Log out", exact: true })).toBeVisible();
+  await expect(menu.getByRole("button", { name: "Log out", exact: true })).toHaveCount(0);
   await captureScreenshot(page, testInfo, "settings-account-menu-lean");
   await page.keyboard.press("Escape");
 
@@ -141,10 +144,10 @@ test("settings shell is two-pane and deep-links Models Memory Voice Usage", asyn
   await expect
     .poll(() => page.evaluate(() => window.localStorage.getItem("rakazo.responseStreaming")))
     .toBe("on");
-  const deleteAccount = settings.getByTestId("delete-account");
-  await deleteAccount.scrollIntoViewIfNeeded();
-  await expect(deleteAccount).toBeVisible();
-  await captureScreenshot(page, testInfo, "settings-general-delete-account");
+  const accountData = settings.getByTestId("account-data");
+  await accountData.scrollIntoViewIfNeeded();
+  await expect(accountData).toBeVisible();
+  await captureScreenshot(page, testInfo, "settings-general-data");
 
   await settings.getByTestId("settings-nav-models").click();
   await expect(settings).toHaveAttribute("data-settings-section", "models");
@@ -185,8 +188,7 @@ test("settings shell is two-pane and deep-links Models Memory Voice Usage", asyn
 
 test("Honcho memory settings empty and filled", async ({ page }, testInfo) => {
   // These screenshots never submit credentials or contact Honcho.
-  const stamp = Date.now();
-  await signup(page, `memory-honcho-${stamp}@rakazo.test`, "password12", "Memory settings");
+  await openLocalWorkspace(page, "Memory settings");
   await completeOnboarding(page);
   const settings = await openUserSettings(page, "memory");
   const memory = settings.getByTestId("memory-settings");

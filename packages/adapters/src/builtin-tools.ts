@@ -437,7 +437,7 @@ export const builtinAgentTools: ConnectorTool[] = [
   {
     name: "read_file",
     description:
-      "Read a UTF-8 text file from this bot's home. On a Team Computer, relative paths use the bot folder and shared/... accesses shared work. Open visual or binary files with open_path instead. Large files come back in line ranges; follow nextOffset to read on.",
+      "Read a UTF-8 text file from this bot's home. On a Team Computer, relative paths use the bot folder and shared/... accesses shared work. Open visual or binary files with open_path instead. Large files come back in line ranges; follow nextOffset to read on. sizeBytes and sha256 describe the full raw file, including when paginated; sha256 is null if secret redaction changed the decoded content.",
     inputSchema: {
       type: "object",
       properties: {
@@ -1199,7 +1199,7 @@ export const builtinAgentTools: ConnectorTool[] = [
   },
   // Semantic-memory tools: exposed by selectMemoryTools() only when a
   // Space memory provider is configured (`remember` stays), and
-  // forget_memory only when that provider can forget.
+  // forget_memory only when that provider supports revisioned fact management.
   {
     name: "save_memory",
     description:
@@ -1251,11 +1251,17 @@ export const builtinAgentTools: ConnectorTool[] = [
   {
     name: "forget_memory",
     description:
-      "Forget a durable semantic memory by id (from recall citations). Providers without forget support return an error.",
+      "Forget a durable semantic memory by id and revision from a recall citation. The operation fails if the fact changed since recall.",
     inputSchema: {
       type: "object",
       properties: {
         id: { type: "string", description: "Memory id from a prior recall citation." },
+        expected_revision: {
+          type: "integer",
+          minimum: 1,
+          description:
+            "Revision from the same recall citation; required to prevent stale deletion.",
+        },
         entity: {
           type: "string",
           description:
@@ -1263,7 +1269,8 @@ export const builtinAgentTools: ConnectorTool[] = [
         },
         reason: { type: "string", description: "Optional reason recorded with the forget." },
       },
-      required: ["id"],
+      required: ["id", "expected_revision"],
+      additionalProperties: false,
     },
   },
   {

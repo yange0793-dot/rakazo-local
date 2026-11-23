@@ -11,14 +11,14 @@ import {
   captureScreenshot,
   completeOnboarding,
   openIntegrationsAdd,
+  openLocalWorkspace,
   rpc,
-  signup,
 } from "./helpers";
 
 test("Integrations installs a plugin, completes real broker OAuth against a fake provider, and removes its children", async ({
   page,
 }, testInfo) => {
-  await signup(page, `marketplace-${Date.now()}@rakazo.test`, "password12", "Marketplace Test");
+  await openLocalWorkspace(page, "Marketplace Test");
   await completeOnboarding(page);
   const botId = activeBotId(page);
   let cancel = true;
@@ -132,7 +132,7 @@ test("Integrations installs a plugin, completes real broker OAuth against a fake
 test("shows directly registered MCP servers in Integrations without catalog connections", async ({
   page,
 }, testInfo) => {
-  await signup(page, `direct-mcp-list-${Date.now()}@rakazo.test`, "password12", "Direct MCP List");
+  await openLocalWorkspace(page, "Direct MCP List");
   await completeOnboarding(page);
   await page.goto("/app");
   await page.waitForURL(/\/app\/[^/]+$/);

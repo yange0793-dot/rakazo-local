@@ -4,7 +4,6 @@ import { rpc } from "./api";
 import {
   currentReadySessionGeneration,
   currentSessionGeneration,
-  snapshotSessionToken,
   subscribeSessionGeneration,
 } from "./session";
 
@@ -31,7 +30,7 @@ const activities = native?.startWorkActivity ? native : null;
 
 /**
  * Keeps the card in step for the app's lifetime: hands its token to the server, re-checks it on
- * launch and whenever the app opens, and ends it on sign-out. Also hands over the phone's token
+ * launch, whenever the app opens, and after changing servers. Also hands over the phone's token
  * for starting cards, so work begun from another device shows here too.
  */
 export function startWorkActivities(): () => void {
@@ -59,17 +58,11 @@ export function startWorkActivities(): () => void {
   const opens = AppState.addEventListener("change", (state) => {
     if (state === "active") refresh();
   });
-  // Signed out: the card shows the last account's bots. Only a finished change counts; one still
-  // landing, or a keychain read that failed, says nothing about the account.
+  // Refresh only after the new server's installation identity is ready.
   const sessions = subscribeSessionGeneration(() => {
     const generation = currentSessionGeneration();
     if (currentReadySessionGeneration() !== generation) return;
-    void snapshotSessionToken().then((session) => {
-      if (generation !== currentSessionGeneration()) return;
-      if (session.ok && !session.value) return card.endWorkActivity();
-      // Signed in: the new session follows the card and starts this phone's next ones.
-      if (session.ok) refresh();
-    });
+    refresh();
   });
   refresh();
   return () => {

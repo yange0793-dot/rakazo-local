@@ -383,7 +383,7 @@ private struct RakazoSession {
 
   // The keys lib/session.ts, lib/server-config.ts and lib/api.ts keep in expo-secure-store.
   static func load() throws -> RakazoSession {
-    guard let token = secureStoreItem("rakazo.session_token"), !token.isEmpty else {
+    guard let token = secureStoreItem("rakazo.local-install-id"), !token.isEmpty else {
       throw MessageBotError.signedOut
     }
     let fallback = Bundle.main.object(forInfoDictionaryKey: "RakazoDefaultApiBase") as? String
@@ -409,17 +409,16 @@ private struct RakazoSession {
 
   /// Verify the account using this exact server and bearer before using a saved shortcut.
   func currentUserId() async throws -> String {
-    guard let url = URL(string: "\(apiBase)/api/auth/get-session") else {
+    guard let url = URL(string: "\(apiBase)/api/local-identity") else {
       throw MessageBotError.signedOut
     }
     var request = URLRequest(url: url, timeoutInterval: 5)
     for (name, value) in headers { request.setValue(value, forHTTPHeaderField: name) }
     request.setValue("rakazo://", forHTTPHeaderField: "origin")
-    request.setValue("Bearer \(token)", forHTTPHeaderField: "authorization")
+    request.setValue(token, forHTTPHeaderField: "x-rakazo-install-id")
     let (data, response) = try await Self.transport.data(for: request)
     try checkResponse(response)
-    // An expired bearer can answer 200 with no user; that is a sign-in prompt, not a retry.
-    guard let userId = try? JSONDecoder().decode(SessionIdentity.self, from: data).user.id,
+    guard let userId = try? JSONDecoder().decode(SessionIdentity.self, from: data).id,
       !userId.isEmpty
     else { throw MessageBotError.signedOut }
     return userId
@@ -503,7 +502,7 @@ private struct RakazoSession {
     for (name, value) in headers { request.setValue(value, forHTTPHeaderField: name) }
     request.setValue("application/json", forHTTPHeaderField: "content-type")
     request.setValue("rakazo://", forHTTPHeaderField: "origin")
-    request.setValue("Bearer \(token)", forHTTPHeaderField: "authorization")
+    request.setValue(token, forHTTPHeaderField: "x-rakazo-install-id")
     if let spaceId { request.setValue(spaceId, forHTTPHeaderField: "x-rakazo-space-id") }
     request.httpBody = try JSONSerialization.data(withJSONObject: ["json": input])
     return request
@@ -561,7 +560,7 @@ private enum MessageBotError: Error, CustomLocalizedStringResourceConvertible {
 
   var localizedStringResource: LocalizedStringResource {
     switch self {
-    case .signedOut: "Sign in to Rakazo first."
+    case .signedOut: "Open Rakazo and check the server connection."
     case .noBot: "Open a chat in Rakazo first."
     case .needsYou: "It needs you in Rakazo."
     case .consentRequired: "Review AI data sharing in Account settings before continuing."
@@ -571,10 +570,7 @@ private enum MessageBotError: Error, CustomLocalizedStringResourceConvertible {
   }
 }
 
-private struct SessionIdentity: Decodable {
-  struct User: Decodable { let id: String }
-  let user: User
-}
+private struct SessionIdentity: Decodable { let id: String }
 
 private struct SavedHeaders: Decodable {
   let apiBase: String

@@ -1,6 +1,5 @@
 import { useLingui } from "@lingui/react/macro";
 import type { Bot, Routine, ThinkingLevel, ThreadSnapshot } from "@rakazo/contracts";
-import { isIdentityConfirmationRequired } from "@rakazo/contracts";
 import { cronFromPreset, isOneShotRoutineCrons, zonedDateTime } from "@rakazo/core";
 import type { ComponentProps, Dispatch, RefObject, SetStateAction } from "react";
 import { useCallback, useEffect, useRef, useState } from "react";
@@ -207,8 +206,6 @@ export function useRoutineEditor({
             if (stale()) return;
             showWebhookSecret(targetBotId, secret);
           } catch (error) {
-            // The editor asks the person to confirm it's them and tries again.
-            if (isIdentityConfirmationRequired(error)) throw error;
             if (stale()) return;
             setRoutineError(
               errorCode(error) === "FORBIDDEN"

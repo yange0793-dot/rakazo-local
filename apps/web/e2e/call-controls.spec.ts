@@ -1,9 +1,8 @@
 import { expect, test } from "@playwright/test";
-import { captureScreenshot, completeOnboarding, rpc, signup } from "./helpers";
+import { captureScreenshot, completeOnboarding, openLocalWorkspace, rpc } from "./helpers";
 
 test("an ongoing call stays in reach on a page outside the shell", async ({ page }, testInfo) => {
-  const stamp = Date.now();
-  await signup(page, `call-controls-${stamp}@rakazo.test`, "password12", "Call Controls");
+  await openLocalWorkspace(page, "Call Controls");
   await completeOnboarding(page);
   await rpc(page, "voice/connect", { provider: "scripted", apiKey: "fake-call-voice-key" });
   await page.goto("/app");
@@ -38,7 +37,7 @@ test("an ongoing call stays in reach on a page outside the shell", async ({ page
 
 test("an active call keeps a chat read-aloud from starting", async ({ page }, testInfo) => {
   const stamp = Date.now();
-  await signup(page, `read-aloud-call-${stamp}@rakazo.test`, "password12", "Read Aloud Call");
+  await openLocalWorkspace(page, "Read Aloud Call");
   await completeOnboarding(page);
 
   // A scripted reply gives the read-aloud control a message to act on.

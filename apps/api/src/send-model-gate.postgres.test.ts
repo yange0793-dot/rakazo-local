@@ -42,7 +42,6 @@ describe.skipIf(!enabled)("send model gate with a bot's own model (PostgreSQL)",
       provisionMessagingIdentity(
         prisma,
         { provider: "test", address: `model-gate-${randomUUID()}` },
-        { signupsEnabled: undefined, signupAllowlist: undefined },
       ),
     );
     botId = identity.botId;

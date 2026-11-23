@@ -44,7 +44,7 @@ it happens before the external service's sign-in flow starts.
    at that address instead. `localhost` and `127.0.0.1` differ for this check, as do
    HTTP and HTTPS or different ports.
 3. If the configuration is wrong, set `WEB_ORIGIN` to the address people actually use.
-   For a public deployment, use its HTTPS origin and align `BETTER_AUTH_URL` and `API_URL`
+   For a public deployment, use its HTTPS origin and align `API_URL`
    as described in the [self-hosting guide](./self-host.md). For local source development,
    `API_URL` can still name the separate API listener.
 4. Restart the API with the updated environment. With Docker Compose, recreate the API

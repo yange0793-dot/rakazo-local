@@ -55,7 +55,6 @@ async function ticketFixture() {
     provisionMessagingIdentity(
       prisma,
       { provider: "email", address },
-      { signupsEnabled: undefined, signupAllowlist: undefined },
     ),
   );
   const actor = {
@@ -208,7 +207,6 @@ pg("chat ticket work delivery", () => {
         provisionMessagingIdentity(
           prisma,
           { provider: "email", address },
-          { signupsEnabled: undefined, signupAllowlist: undefined },
         ),
       );
       const actor = {

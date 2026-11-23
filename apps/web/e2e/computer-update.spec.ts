@@ -5,14 +5,14 @@ import {
   captureScreenshot,
   completeOnboarding,
   openBotPanelTab,
-  signup,
+  openLocalWorkspace,
 } from "./helpers";
 
 test("computer maintenance shows durable background progress and failure recovery", async ({
   page,
 }, testInfo) => {
   await page.addInitScript(() => localStorage.setItem("rakazo.uiAppearance", "dark"));
-  await signup(page, `computer-update-${Date.now()}@rakazo.test`, "password12", "Computer Update");
+  await openLocalWorkspace(page, "Computer Update");
   await completeOnboarding(page);
   const botId = activeBotId(page);
   let updates: ComputerUpdate[] = [];

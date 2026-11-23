@@ -4,16 +4,15 @@ import {
   completeOnboarding,
   createBotFromPicker,
   openBotPanelTab,
+  openLocalWorkspace,
   openNewBot,
   rpc,
-  signup,
 } from "./helpers";
 
 test("bot creation, editing, and deletion persist", async ({ page }, testInfo) => {
-  const stamp = Date.now();
   // Installed before the shell starts its roster poll, so the focus check below can hold it.
   await page.clock.install();
-  await signup(page, `bot-crud-${stamp}@rakazo.test`, "password12", "Bot CRUD");
+  await openLocalWorkspace(page, "Bot CRUD");
   await completeOnboarding(page);
   await page.goto("/app");
   await page.waitForURL(/\/app\/[^/]+$/);

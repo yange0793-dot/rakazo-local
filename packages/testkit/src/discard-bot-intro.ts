@@ -2,6 +2,7 @@ import { runJobKey } from "@rakazo/adapter-kit";
 import type { RunStatus } from "@rakazo/contracts";
 import { isActive } from "@rakazo/core";
 import type { PrismaClient } from "@rakazo/db";
+import { testSpaceHeaders } from "./index.js";
 import { asSystem } from "./system-db.js";
 
 type App = { request: (input: string, init?: RequestInit) => Response | Promise<Response> };
@@ -23,7 +24,7 @@ const POLL_MS = 20;
  */
 export async function discardBotIntroRun(
   harness: BotIntroHarness,
-  cookie: string,
+  scope: string,
   botId: string,
   timeoutMs = 15_000,
 ): Promise<void> {
@@ -36,7 +37,7 @@ export async function discardBotIntroRun(
   let quietSince = 0;
   while (Date.now() < deadline) {
     // Create can target a space other than the session default. Stop must use that space.
-    await rpc(harness.app, cookie, "threads/stop", { botId }, bot?.spaceId);
+    await rpc(harness.app, scope, "threads/stop", { botId }, bot?.spaceId);
     const runs = await prisma.run.findMany({
       where: { botId },
       select: { id: true, status: true },
@@ -65,7 +66,7 @@ export async function discardBotIntroRun(
 
 export async function discardBotIntroFromCreate<T>(
   harness: BotIntroHarness | undefined,
-  cookie: string,
+  scope: string,
   procedure: string,
   result: T,
 ): Promise<T> {
@@ -73,13 +74,13 @@ export async function discardBotIntroFromCreate<T>(
     return result;
   const botId = (result as { id?: unknown }).id;
   if (typeof botId !== "string") return result;
-  await discardBotIntroRun(harness, cookie, botId);
+  await discardBotIntroRun(harness, scope, botId);
   return result;
 }
 
 async function rpc(
   app: App,
-  cookie: string,
+  scope: string,
   procedure: string,
   body: unknown,
   spaceId?: string,
@@ -88,7 +89,7 @@ async function rpc(
     method: "POST",
     headers: {
       "content-type": "application/json",
-      cookie,
+      ...testSpaceHeaders(scope),
       origin: "http://127.0.0.1:5173",
       ...(spaceId ? { "x-rakazo-space-id": spaceId } : {}),
     },

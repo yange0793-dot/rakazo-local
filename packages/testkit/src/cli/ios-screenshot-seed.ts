@@ -4,7 +4,7 @@ import { encodeCardSecret, encodeContactSecret, encodeLoginSecret } from "@rakaz
 import { allocateTicketNumber, createDb, createThreadMessage, ensureBoard } from "@rakazo/db";
 import { pageViewerCode } from "@rakazo/page-kit/compile";
 import { PNG } from "pngjs";
-import { sessionCookieHeader } from "../index.js";
+import { createTestSpace, testSpaceHeaders } from "../index.js";
 
 const MARKER = "marigold checklist";
 const READY = "The fixture workspace is ready.";
@@ -80,17 +80,11 @@ export type CompleteCheckout = (customerId: string) => void;
 export async function seedIosScreenshotFixture(input: {
   apiUrl: string;
   databaseUrl: string;
-  email: string;
-  emptyEmail: string;
-  freeEmail: string;
-  password: string;
   /** Present when the API bills: the main user then pays for Pro, the empty one is on a trial. */
   completeCheckout: CompleteCheckout;
 }): Promise<IosScreenshotFixture> {
-  const populated = await ensureUser(input.apiUrl, input.email, input.password, "Screenshot User");
-  const empty = await ensureUser(input.apiUrl, input.emptyEmail, input.password, "Empty User");
-  // Signs in without a plan or a survey answer, to show what a new account meets first.
-  await ensureUser(input.apiUrl, input.freeEmail, input.password, "Free User");
+  const populated = await ensureWorkspace(input.apiUrl, input.databaseUrl, "Screenshot User");
+  const empty = await ensureWorkspace(input.apiUrl, input.databaseUrl, "Empty User");
   for (const bot of await rpc<BotRow[]>(input.apiUrl, empty.headers, "bots/list")) {
     await rpc(input.apiUrl, empty.headers, "bots/remove", { botId: bot.id, deleteMemories: false });
   }
@@ -894,54 +888,19 @@ async function ensureText(
   });
 }
 
-async function ensureUser(apiUrl: string, email: string, password: string, name: string) {
-  const signup = await postAuth(apiUrl, "sign-up", { email, password, name });
-  const session = signup.ok ? signup : await postAuth(apiUrl, "sign-in", { email, password });
-  if (!session.ok || !session.token) {
-    throw new Error(
-      `Could not sign in fixture user (${session.status})${session.message ? `: ${session.message}` : ""}`,
-    );
-  }
+async function ensureWorkspace(apiUrl: string, databaseUrl: string, name: string) {
+  const spaceId = await createTestSpace(
+    {
+      request: (path, init) => fetch(`${apiUrl}${path}`, init),
+    },
+    name,
+    databaseUrl,
+  );
   return {
     headers: {
-      authorization: `Bearer ${session.token}`,
-      cookie: session.cookie,
+      ...testSpaceHeaders(spaceId),
       origin: "rakazo://",
     },
-  };
-}
-
-async function postAuth(
-  apiUrl: string,
-  action: "sign-in" | "sign-up",
-  body: { email: string; password: string; name?: string },
-) {
-  const response = await fetch(`${apiUrl}/api/auth/${action}/email`, {
-    method: "POST",
-    headers: { "content-type": "application/json", origin: "rakazo://" },
-    body: JSON.stringify(body),
-  });
-  const text = await response.text();
-  let parsed: unknown;
-  try {
-    parsed = JSON.parse(text);
-  } catch {
-    parsed = undefined;
-  }
-  const message =
-    parsed &&
-    typeof parsed === "object" &&
-    "message" in parsed &&
-    typeof parsed.message === "string"
-      ? parsed.message
-      : undefined;
-  return {
-    ok: response.ok,
-    status: response.status,
-    message,
-    // The signed bearer; the server refuses the raw session token.
-    token: response.headers.get("set-auth-token") ?? "",
-    cookie: sessionCookieHeader(response),
   };
 }
 

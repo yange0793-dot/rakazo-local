@@ -39,7 +39,6 @@ describe.skipIf(!enabled)("message authors (PostgreSQL)", () => {
       provisionMessagingIdentity(
         prisma,
         { provider: "test", address: `message-author-${randomUUID()}` },
-        { signupsEnabled: undefined, signupAllowlist: undefined },
       ),
     );
     actor = { spaceId: identity.spaceId, userId: identity.userId } as Actor;

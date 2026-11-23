@@ -70,7 +70,7 @@ describe("recordAuditEvent", () => {
 
   it("records a user's caller and gives an account-wide event to each of their organizations", async () => {
     await withSecurityRequest({ ip: "203.0.113.5", userAgent: "Mozilla/5.0" }, () =>
-      recordAuditEvent({ action: "auth.sign_in", actor: { type: "user", id: "user-1" } }),
+      recordAuditEvent({ action: "device.paired", actor: { type: "user", id: "user-1" } }),
     );
     expect(store.rows.map((row) => row.organizationId)).toEqual(["org-1", "org-2"]);
     expect(store.rows[0]).toMatchObject({
@@ -145,7 +145,7 @@ describe("security events in the audit log", () => {
   });
 
   it("leaves deployment-wide signals out", async () => {
-    await recordSecurityEvent({ type: "auth.sign_in.failed", ip: "203.0.113.5" });
+    await recordSecurityEvent({ type: "egress.refused", ip: "203.0.113.5" });
     await recordSecurityEvent({ type: "rate_limit.hit", userId: "user-1", ip: "203.0.113.5" });
     await recordSecurityEvent({ type: "deployment.settings.changed", userId: "user-1" });
     expect(store.rows).toEqual([]);

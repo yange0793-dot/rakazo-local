@@ -115,7 +115,6 @@ function portEnv({ web, api, supervisor }) {
   return {
     WEB_PORT: String(web),
     WEB_ORIGIN: webUrl,
-    BETTER_AUTH_URL: webUrl,
     API_PORT: String(api),
     API_URL: apiUrl,
     API_PROXY_TARGET: apiUrl,
@@ -467,7 +466,6 @@ if (/^(1|true)$/i.test(setting("RAKAZO_DEV_TAILNET") ?? "")) {
   process.on("exit", () => tailnet.stop());
   // Sign-in cookies and links follow this origin, so use the tailnet URL on this machine too.
   env.WEB_ORIGIN = tailnet.origin;
-  env.BETTER_AUTH_URL = tailnet.origin;
   env.RAKAZO_ALLOWED_HOSTS = [setting("RAKAZO_ALLOWED_HOSTS"), tailnet.host]
     .filter(Boolean)
     .join(",");

@@ -27,7 +27,6 @@ describePostgres("routine timer coalescing (PostgreSQL)", () => {
       provisionMessagingIdentity(
         db.prisma,
         { provider: "email", address },
-        { signupsEnabled: undefined, signupAllowlist: undefined },
       ),
     );
     const { userId, spaceId, botId, threadId } = provisioned;

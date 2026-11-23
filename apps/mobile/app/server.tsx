@@ -48,7 +48,7 @@ export default function ServerScreen() {
     if (!active.current) return;
     active.current = false;
     if (router.canGoBack()) router.back();
-    else router.replace("/sign-in");
+    else router.replace("/");
   }
 
   const parsedDraft = normalizeApiBase(draft);
@@ -76,7 +76,7 @@ export default function ServerScreen() {
       }
       // Asked once the switch can happen. Only a different server clears the device; the same
       // address saves without a switch.
-      if (probed.url !== current && !(await confirmUnsentSendLoss("server-switch"))) return;
+      if (probed.url !== current && !(await confirmUnsentSendLoss())) return;
       if (!active.current) return;
       const saved = await saveApiBase(probed.url, headers);
       if (!saved.ok) {
@@ -95,7 +95,7 @@ export default function ServerScreen() {
     // Held across the confirmation, like save, so the two cannot run a switch in parallel.
     saving.current = true;
     try {
-      if (usesCustomApiBase(current) && !(await confirmUnsentSendLoss("server-switch"))) return;
+      if (usesCustomApiBase(current) && !(await confirmUnsentSendLoss())) return;
       setPending(true);
       setError(null);
       const saved = await resetApiBase();

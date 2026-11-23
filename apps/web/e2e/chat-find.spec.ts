@@ -1,5 +1,5 @@
 import { expect, test } from "@playwright/test";
-import { captureScreenshot, completeOnboarding, signup } from "./helpers";
+import { captureScreenshot, completeOnboarding, openLocalWorkspace } from "./helpers";
 
 test("the desktop app finds text in the open chat", async ({ page }, testInfo) => {
   // Browsers keep Cmd/Ctrl+F for their own find, so the bar belongs to the desktop app.
@@ -17,7 +17,7 @@ test("the desktop app finds text in the open chat", async ({ page }, testInfo) =
       },
     });
   });
-  await signup(page, `find-${Date.now()}@rakazo.test`, "password12", "Find Chat");
+  await openLocalWorkspace(page, "Find Chat");
   await completeOnboarding(page);
   await page.goto("/app");
   await page.waitForURL(/\/app\/[^/]+$/);

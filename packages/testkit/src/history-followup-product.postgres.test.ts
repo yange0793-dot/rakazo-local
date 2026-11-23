@@ -123,14 +123,13 @@ describe.skipIf(!enabled)("persisted source-verified history followups", () => {
               createApp({
                 databaseUrl: process.env.DATABASE_URL!,
                 realtimeDatabaseUrl: process.env.DATABASE_URL!,
-                authUrl: "http://127.0.0.1:5173",
+
                 webOrigin: "http://127.0.0.1:5173",
                 dataDir,
                 sandboxProvider: "fake",
                 agentRuntime: "pi",
                 contextStrategy: strategy,
                 wakeupDriver: "memory",
-                signupsEnabled: "true",
                 composio,
                 encryptionKey: "synthetic-history-followup-encryption-key",
               }),

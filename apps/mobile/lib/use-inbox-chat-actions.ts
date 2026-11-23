@@ -16,7 +16,7 @@ import { afterChatNotifyChange, dismissThreadNotifications } from "./live-notifi
 import type { MobileBot, MobileBotSection, MobileGroup, MobileSpace } from "./mobile-types";
 import { removeFromSearchInbox } from "./search-inbox";
 import { promptSectionName } from "./section-name-prompt";
-import { currentSessionGeneration, loadSessionToken } from "./session";
+import { currentSessionGeneration, loadLocalInstallSessionId } from "./session";
 import { errorText } from "./user-error";
 
 /** Sends a request about a chat to that chat's space without switching to it. */
@@ -72,7 +72,7 @@ export function useInboxChatActions({
       if (kind === "bot" && update.notifyOnFinish !== undefined) {
         await afterChatNotifyChange(
           currentApiBase(),
-          await loadSessionToken(),
+          await loadLocalInstallSessionId(),
           selectedSpaceId() ?? "",
           {
             botId: chat.id,

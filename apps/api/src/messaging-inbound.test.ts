@@ -10,8 +10,6 @@ import {
 import type { MessagingReceipts } from "./messaging-receipts.js";
 import { inboundDeliveryClientNonce, messagingWakeIdempotencyKey } from "./webhook-inbound.js";
 
-const signupPolicy = { signupsEnabled: undefined, signupAllowlist: undefined };
-
 function createDeps(
   overrides: {
     identity?: Record<string, unknown> | null;
@@ -346,7 +344,6 @@ function createDeps(
     jobs: { enqueue },
     provision,
     openSignup: true,
-    signupPolicy,
     acknowledge,
     storeAttachment: overrides.storeAttachment,
     transcribe: overrides.transcribe,
@@ -976,7 +973,6 @@ describe("createMessagingInboundHandler DM routing", () => {
         dmThreadId: "sendblue:dm-1",
         displayName: null,
       },
-      signupPolicy,
     );
     expect(deps.sendUserMessage).toHaveBeenCalledWith(
       expect.objectContaining({

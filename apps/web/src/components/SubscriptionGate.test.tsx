@@ -40,10 +40,7 @@ async function renderGate(billing: boolean, initialEntries = ["/"]) {
     vi.fn(async () =>
       Response.json({
         billing,
-        passwordAuth: true,
-        sso: null,
-        passwordReset: false,
-        resetUrl: null,
+        crispWebsiteId: null,
       }),
     ),
   );

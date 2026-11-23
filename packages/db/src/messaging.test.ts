@@ -26,7 +26,6 @@ describe("provisionMessagingIdentity", () => {
     const result = await provisionMessagingIdentity(
       prisma as unknown as PrismaClient,
       { provider: "sendblue", address: "+15551234567" },
-      { signupsEnabled: undefined, signupAllowlist: undefined },
     );
 
     expect(result).toEqual({
@@ -51,7 +50,6 @@ describe("provisionMessagingIdentity", () => {
         provisionMessagingIdentity(
           prisma as unknown as PrismaClient,
           { provider: "sendblue", address: bad },
-          { signupsEnabled: undefined, signupAllowlist: undefined },
         ),
       ).rejects.toThrow(/Invalid messaging address/);
     }
@@ -81,7 +79,6 @@ describe("provisionMessagingIdentity", () => {
       provisionMessagingIdentity(
         prisma as unknown as PrismaClient,
         { provider: "sendblue", address: "+15551234567" },
-        { signupsEnabled: undefined, signupAllowlist: undefined },
       ),
     ).rejects.toThrow(/thread/i);
   });
@@ -124,7 +121,6 @@ describe("provisionMessagingIdentity create race", () => {
     const result = await provisionMessagingIdentity(
       prisma as unknown as PrismaClient,
       { provider: "sendblue", address: "+15551234567" },
-      { signupsEnabled: undefined, signupAllowlist: undefined },
     );
 
     expect(result).toEqual({
@@ -217,7 +213,6 @@ describe("messaging identity isolation", () => {
       provisionMessagingIdentity(
         prisma as unknown as PrismaClient,
         { provider, address },
-        { signupsEnabled: "true", signupAllowlist: "" },
       );
     return { prisma, users, provision };
   }

@@ -9,7 +9,7 @@ import { mobileTokens } from "../../lib/appearance";
 import { getActiveUiLocale, setUiLocale, useUiLocale } from "../../lib/i18n";
 import { resumeLiveNotifications } from "../../lib/live-notifications";
 import { native, useThemedStyles } from "../../lib/native";
-import { loadSessionToken } from "../../lib/session";
+import { loadLocalInstallSessionId } from "../../lib/session";
 import { useSideInsets } from "../../lib/side-insets";
 import type { UiLocale } from "../../lib/ui-locale";
 import { UI_LOCALES } from "../../lib/ui-locale";
@@ -36,7 +36,7 @@ export default function Language() {
         // not read as a failed language change: the choice is already applied.
         await resumeLiveNotifications(
           currentApiBase(),
-          await loadSessionToken(),
+          await loadLocalInstallSessionId(),
           selectedSpaceId() ?? "",
         ).catch(() => undefined);
       })

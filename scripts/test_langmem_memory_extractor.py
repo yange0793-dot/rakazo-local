@@ -305,7 +305,7 @@ class LangMemExtractorTest(unittest.TestCase):
                     {
                         "id": "f2",
                         "revision": 7,
-                        "content": "已被遗忘的旧地址",
+                        "content": "[forgotten]",
                         "status": "forgotten",
                     }
                 ],
@@ -315,7 +315,8 @@ class LangMemExtractorTest(unittest.TestCase):
         prompt = "\n".join(
             str(item.get("content", "")) for item in child.requests[0]["messages"]
         )
-        self.assertIn("已被遗忘的旧地址", prompt)
+        self.assertIn("[forgotten]", prompt)
+        self.assertNotIn("已被遗忘的旧地址", prompt)
         self.assertIn("retirementEvidence", prompt)
         self.assertNotIn('"status": "active"', prompt)
 

@@ -13,7 +13,8 @@ import { createThreadEvents } from "@rakazo/db";
 import type { HostedApp } from "../apps/mcp-host.js";
 import { hostOverMcp } from "../apps/mcp-host.js";
 import { discardBotIntroRun } from "../discard-bot-intro.js";
-import { sessionCookieHeader } from "../index.js";
+import { createTestSpace, testSpaceHeaders } from "../index.js";
+
 import { asSystem } from "../system-db.js";
 import type { EvalCase, Evidence, SettingsSnapshot } from "./cases.js";
 import { EMPTY_SETTINGS, wakesRoutines } from "./cases.js";
@@ -52,7 +53,7 @@ export type EvalApp = {
 };
 export type EvalActor = {
   botId: string;
-  cookie: string;
+  scope: string;
   userId: string;
   spaceId: string;
 };
@@ -108,7 +109,7 @@ export async function runTrial(
   let handles: EvalApp | undefined;
   // The harness observes product state outside any request or job.
   let db: EvalApp["prisma"] | undefined;
-  let cookie = "";
+  let scope = "";
   let botId = "";
   let peer: { id: string; name: string } | undefined;
   // A group case talks to the subject inside a group thread; every other case uses its direct chat.
@@ -191,21 +192,11 @@ export async function runTrial(
     const trial = handles;
     const { app } = trial;
     const setupActor = async () => {
-      const signup = await app.request("/api/auth/sign-up/email", {
-        method: "POST",
-        headers: { "content-type": "application/json", origin: "http://127.0.0.1:5173" },
-        body: JSON.stringify({
-          email: `eval-${randomUUID()}@example.test`,
-          password: "synthetic-eval-password-12",
-          name: "Eval User",
-        }),
-      });
-      if (!signup.ok) throw new EvalFailure("harness", `Fixture signup failed (${signup.status})`);
-      cookie = sessionCookieHeader(signup);
-      await rpc(app, cookie, "models/connect", options.connection);
+      scope = await createTestSpace(app, "Eval User");
+      await rpc(app, scope, "models/connect", options.connection);
       // Added the way a person adds a remote MCP server: an endpoint and a bearer token.
       for (const [index, service] of apps.entries())
-        await rpc(app, cookie, "mcp/servers/create", {
+        await rpc(app, scope, "mcp/servers/create", {
           transport: "streamable_http",
           slug: service.kind,
           name: service.displayName,
@@ -213,12 +204,12 @@ export async function runTrial(
           secret: hostedApps[index]!.token,
         });
       for (const provider of scenario.connections ?? ["GMAIL", "CRM", "GITHUB"])
-        await rpc(app, cookie, "connections/begin", {
+        await rpc(app, scope, "connections/begin", {
           connectorId: "composio",
           provider,
           displayName: provider,
         });
-      const bot = await rpc<{ id: string }>(app, cookie, "bots/create", {
+      const bot = await rpc<{ id: string }>(app, scope, "bots/create", {
         name: "Assistant",
         title: "",
         description: scenario.group?.roles?.Assistant ?? "",
@@ -231,9 +222,9 @@ export async function runTrial(
         select: { userId: true, spaceId: true },
       });
       // Register before discard so a timeout still reaches cleanupActors.
-      actors.push({ botId, cookie, ...persistedBot });
-      await discardBotIntroRun(trial, cookie, botId);
-      await rpc(app, cookie, "bots/update", {
+      actors.push({ botId, scope, ...persistedBot });
+      await discardBotIntroRun(trial, scope, botId);
+      await rpc(app, scope, "bots/update", {
         botId,
         modelProvider: options.connection.provider,
         modelId: options.connection.modelId,
@@ -245,7 +236,7 @@ export async function runTrial(
       if (scenario.botMemory) {
         const documents = await rpc<Array<{ id: string; path: string }>>(
           app,
-          cookie,
+          scope,
           "memory/list",
           {
             botId,
@@ -254,13 +245,13 @@ export async function runTrial(
         );
         const index = documents.find((document) => document.path === "MEMORY.md");
         if (!index) throw new EvalFailure("harness", "New bot has no MEMORY.md to seed");
-        await rpc(app, cookie, "memory/update", {
+        await rpc(app, scope, "memory/update", {
           documentId: index.id,
           content: scenario.botMemory,
         });
       }
       if (scenario.peer) {
-        const created = await rpc<{ id: string }>(app, cookie, "bots/create", {
+        const created = await rpc<{ id: string }>(app, scope, "bots/create", {
           name: scenario.peer.name,
           title: "",
           description: scenario.peer.description,
@@ -268,8 +259,8 @@ export async function runTrial(
           notifyOnFinish: false,
           ...(scenario.peer.ownComputer ? { computerMode: "dedicated" } : {}),
         });
-        await discardBotIntroRun(trial, cookie, created.id);
-        await rpc(app, cookie, "bots/update", {
+        await discardBotIntroRun(trial, scope, created.id);
+        await rpc(app, scope, "bots/update", {
           botId: created.id,
           modelProvider: options.connection.provider,
           modelId: options.connection.modelId,
@@ -282,23 +273,23 @@ export async function runTrial(
         const { roles } = scenario.group;
         const memberIds = new Map<string, string>();
         for (const name of scenario.group.members) {
-          const member = await rpc<{ id: string }>(app, cookie, "bots/create", {
+          const member = await rpc<{ id: string }>(app, scope, "bots/create", {
             name,
             title: "",
             description: roles?.[name] ?? "",
             instructions: scenario.group.instructions?.[name] ?? "",
             notifyOnFinish: false,
           });
-          await discardBotIntroRun(trial, cookie, member.id);
+          await discardBotIntroRun(trial, scope, member.id);
           if (roles)
-            await rpc(app, cookie, "bots/update", {
+            await rpc(app, scope, "bots/update", {
               botId: member.id,
               modelProvider: options.connection.provider,
               modelId: options.connection.modelId,
             });
           memberIds.set(name, member.id);
         }
-        const created = await rpc<{ id: string; threadId: string }>(app, cookie, "groups/create", {
+        const created = await rpc<{ id: string; threadId: string }>(app, scope, "groups/create", {
           name: "Launch desk",
           botIds: [botId, ...memberIds.values()],
         });
@@ -308,7 +299,7 @@ export async function runTrial(
       messagingAddress = `U-eval-${randomUUID()}`;
       messaging.resetWitnesses();
       // Ask mode asks before any change, so the write stops at its approval card.
-      if (scenario.approvalTool) await rpc(app, cookie, "autoReview/set", { mode: "ask" });
+      if (scenario.approvalTool) await rpc(app, scope, "autoReview/set", { mode: "ask" });
     };
     await setupActor();
     if (scenario.computerFiles?.length) {
@@ -318,21 +309,21 @@ export async function runTrial(
           (file) => (file.owner === "peer" ? peer?.id : botId) === owner,
         );
         if (!owner || !files.length) continue;
-        await rpc(app, cookie, "computer/boot", { botId: owner });
-        await rpc(app, cookie, "computer/takeover", { botId: owner });
+        await rpc(app, scope, "computer/boot", { botId: owner });
+        await rpc(app, scope, "computer/takeover", { botId: owner });
         for (const file of files)
-          await rpc(app, cookie, "computer/uploadFile", {
+          await rpc(app, scope, "computer/uploadFile", {
             botId: owner,
             path: file.path,
             contentBase64: Buffer.from(file.content).toString("base64"),
           });
-        await rpc(app, cookie, "computer/release", { botId: owner });
+        await rpc(app, scope, "computer/release", { botId: owner });
       }
       if (scenario.computerFiles.some((file) => file.owner === "peer") && !peer)
         throw new EvalFailure("harness", "Peer computer files need the case's peer bot");
     }
     if (scenario.routine) {
-      await rpc(app, cookie, "routines/create", {
+      await rpc(app, scope, "routines/create", {
         botId,
         name: "Release watch",
         prompt: scenario.routine.prompt,
@@ -362,7 +353,7 @@ export async function runTrial(
         if (!m.file) continue;
         const artifact = await rpc<{ id: string; name: string; mimeType: string; size: number }>(
           app,
-          cookie,
+          scope,
           "artifacts/create",
           {
             botId,
@@ -487,15 +478,15 @@ export async function runTrial(
     }
     if (scenario.taughtSkill) {
       // Human-authored fixture setup via the same API as the teaching UI; no model work is prefilled.
-      await rpc(app, cookie, "computer/boot", { botId });
-      await rpc(app, cookie, "computer/takeover", { botId });
-      const skill = await rpc<{ id: string }>(app, cookie, "skills/start", {
+      await rpc(app, scope, "computer/boot", { botId });
+      await rpc(app, scope, "computer/takeover", { botId });
+      const skill = await rpc<{ id: string }>(app, scope, "skills/start", {
         botId,
         goal: "Dispatch label",
       });
-      await rpc(app, cookie, "computer/input", { botId, kind: "key", payload: { key: "x" } });
-      await rpc(app, cookie, "skills/stop", { skillId: skill.id });
-      await rpc(app, cookie, "skills/updateDraft", {
+      await rpc(app, scope, "computer/input", { botId, kind: "key", payload: { key: "x" } });
+      await rpc(app, scope, "skills/stop", { skillId: skill.id });
+      await rpc(app, scope, "skills/updateDraft", {
         skillId: skill.id,
         name: "Dispatch label",
         playbook: {
@@ -511,7 +502,7 @@ export async function runTrial(
           failureHandling: "Report a missing input; do not invent it.",
         },
       });
-      await rpc(app, cookie, "skills/save", { skillId: skill.id, name: "Dispatch label" });
+      await rpc(app, scope, "skills/save", { skillId: skill.id, name: "Dispatch label" });
     }
     phase = "product";
     let lastText = "";
@@ -554,7 +545,7 @@ export async function runTrial(
       if (Date.now() >= deadline) throw new EvalFailure("incomplete", "Trial time budget exceeded");
       if (stepIndex === scenario.steps.length - 1) settingsBefore = await settingsSnapshot();
       if ("newWorkspace" in step) {
-        priorMemory = (await rpc<Array<{ content: string }>>(app, cookie, "memory/list", { botId }))
+        priorMemory = (await rpc<Array<{ content: string }>>(app, scope, "memory/list", { botId }))
           .map((m) => m.content)
           .join("\n");
         await setupActor();
@@ -562,19 +553,19 @@ export async function runTrial(
       }
       if ("clear" in step) {
         await Promise.all([captureTools(), captureUsage()]);
-        await rpc(app, cookie, "threads/clear", { botId });
+        await rpc(app, scope, "threads/clear", { botId });
         clearedToolCount = seenTools.size - (await countCurrentTools());
         continue;
       }
       if (scenario.routine || "wakeRoutine" in step)
-        await rpc(app, cookie, "threads/markRead", { botId });
+        await rpc(app, scope, "threads/markRead", { botId });
       const notificationOffset = notifications.sent.length;
       let runId: string;
       let scheduled: RoutineEvidence["scheduled"];
       if ("ask" in step) {
         const sent = await rpc<{ runId: string }>(
           app,
-          cookie,
+          scope,
           "threads/send",
           group
             ? {
@@ -612,7 +603,7 @@ export async function runTrial(
         );
       } else if ("slack" in step) {
         if (!messagingLinked) {
-          const link = await rpc<{ code: string }>(app, cookie, "messaging/link/start", { botId });
+          const link = await rpc<{ code: string }>(app, scope, "messaging/link/start", { botId });
           await messaging.emitInbound({
             isDirect: true,
             from: messagingAddress,
@@ -800,7 +791,7 @@ export async function runTrial(
           runId?: string | null;
           blocks: ClarificationBlock[];
         }>;
-      }>(app, cookie, "threads/get", group ? { groupId: group.id } : { botId });
+      }>(app, scope, "threads/get", group ? { groupId: group.id } : { botId });
       approvalPending =
         terminal.status === "waiting_input" &&
         snap.messages.some((m) =>
@@ -894,7 +885,7 @@ export async function runTrial(
             botId?: string | null;
             blocks: ClarificationBlock[];
           }>;
-        }>(app, cookie, "threads/get", { groupId: group.id });
+        }>(app, scope, "threads/get", { groupId: group.id });
         const names = new Map([...group.memberIds].map(([name, id]) => [id, name]));
         names.set(botId, "Assistant");
         memberReplies = Object.fromEntries([...names.values()].map((name) => [name, ""]));
@@ -967,7 +958,7 @@ export async function runTrial(
     for (const path of scenario.files ?? []) {
       try {
         files[path] = (
-          await rpc<{ content: string }>(handles.app, cookie, "computer/readFile", { botId, path })
+          await rpc<{ content: string }>(handles.app, scope, "computer/readFile", { botId, path })
         ).content;
       } catch {
         files[path] = null;
@@ -975,7 +966,7 @@ export async function runTrial(
     }
     const seededAttachments: NonNullable<Evidence["seededAttachments"]> = {};
     for (const [name, path] of Object.entries(seededPaths)) {
-      const content = await rpc<{ content: string }>(handles.app, cookie, "computer/readFile", {
+      const content = await rpc<{ content: string }>(handles.app, scope, "computer/readFile", {
         botId,
         path,
       }).then(
@@ -984,7 +975,7 @@ export async function runTrial(
       );
       seededAttachments[name] = { path, content };
     }
-    const memories = await rpc<Array<{ content: string }>>(handles.app, cookie, "memory/list", {
+    const memories = await rpc<Array<{ content: string }>>(handles.app, scope, "memory/list", {
       botId,
     });
     const routines = await prisma.routine.findMany({
@@ -1139,7 +1130,7 @@ export async function runTrial(
         // group. Stop it before draining, so a failed trial does not pay for the member's
         // remaining work while the drain waits for it; when the trial ended cleanly every
         // member is already terminal and the stop changes nothing.
-        if (group) await rpc(handles.app, cookie, "threads/stop", { groupId: group.id });
+        if (group) await rpc(handles.app, scope, "threads/stop", { groupId: group.id });
       } catch {
         result.cleanupFailed = true;
       }
@@ -1262,10 +1253,14 @@ export async function runTrial(
   return result;
 }
 
-async function rpc<T>(app: App, cookie: string, proc: string, body: unknown = {}): Promise<T> {
+async function rpc<T>(app: App, scope: string, proc: string, body: unknown = {}): Promise<T> {
   const res = await app.request(`/rpc/${proc}`, {
     method: "POST",
-    headers: { "content-type": "application/json", cookie, origin: "http://127.0.0.1:5173" },
+    headers: {
+      "content-type": "application/json",
+      ...testSpaceHeaders(scope),
+      origin: "http://127.0.0.1:5173",
+    },
     body: JSON.stringify({ json: body }),
     signal: AbortSignal.timeout(15_000),
   });
@@ -1412,7 +1407,7 @@ async function findScopeBots(
 
 function cookieForBot(bot: { userId: string; spaceId: string }, actors: readonly EvalActor[]) {
   return actors.find((actor) => actor.userId === bot.userId && actor.spaceId === bot.spaceId)
-    ?.cookie;
+    ?.scope;
 }
 
 /** Disable scheduled work and stop every run in each isolated actor scope. */

@@ -689,7 +689,7 @@ describe("managed semantic fact authority", () => {
     expect(f.db.semanticFact.update).not.toHaveBeenCalled();
   });
 
-  it("forgets the body and every revision while keeping the tombstone and source keys", async () => {
+  it("forgets the body, provenance and every revision while keeping the tombstone and source keys", async () => {
     const f = fixture();
     const saved = await f.store.save(
       {
@@ -700,6 +700,15 @@ describe("managed semantic fact authority", () => {
       },
       ctx,
     );
+    f.rows[0]!.provenance = JSON.stringify({
+      kind: "run",
+      runId: "run-private",
+      threadId: "thread-private",
+      messageId: "message-private",
+      quote: "private source quote",
+      category: "preference",
+      observedAt: time.toISOString(),
+    });
     const sourceKeys = [...f.sources.keys()];
     const forgotten = await f.store.forget(
       { id: saved.id, botId: "bot-a", scope: "isolated", expectedRevision: 1 },
@@ -711,6 +720,12 @@ describe("managed semantic fact authority", () => {
       revision: 2,
       content: "[forgotten]",
     });
+    expect(JSON.parse(f.rows[0]!.provenance)).toMatchObject({ kind: "run" });
+    expect(f.rows[0]!.provenance).not.toContain("run-private");
+    expect(f.rows[0]!.provenance).not.toContain("thread-private");
+    expect(f.rows[0]!.provenance).not.toContain("message-private");
+    expect(f.rows[0]!.provenance).not.toContain("private source quote");
+    expect(f.rows[0]!.provenance).not.toContain("preference");
     expect(f.revisions.map((row) => [row.revision, row.status, row.content])).toEqual([
       [2, "forgotten", "[forgotten]"],
     ]);
@@ -744,6 +759,71 @@ describe("managed semantic fact authority", () => {
     await expect(f.store.forget({ ...request, expectedRevision: 9 }, ctx)).rejects.toThrow(
       MEMORY_REVISION_CONFLICT_ERROR,
     );
+  });
+
+  it("scrubs legacy forgotten provenance and revisions on an idempotent retry", async () => {
+    const f = fixture();
+    const saved = await f.store.save(
+      {
+        botId: "bot-a",
+        scope: "isolated",
+        content: "A private fact.",
+        source: { kind: "durable" },
+      },
+      ctx,
+    );
+    const request = {
+      id: saved.id,
+      botId: "bot-a",
+      scope: "isolated" as const,
+      expectedRevision: 1,
+    };
+    await f.store.forget(request, ctx);
+    f.rows[0]!.provenance = JSON.stringify({
+      kind: "user",
+      quote: "legacy private quote",
+      messageId: "legacy-message",
+      category: "preference",
+      observedAt: time.toISOString(),
+    });
+    f.revisions.push({
+      factId: saved.id,
+      revision: 1,
+      content: "A private fact.",
+      provenance: "legacy private quote",
+    });
+
+    await expect(f.store.forget(request, ctx)).resolves.toEqual({
+      id: saved.id,
+      expired: true,
+      reason: null,
+    });
+    expect(f.rows[0]).toMatchObject({
+      status: "forgotten",
+      revision: 2,
+      content: "[forgotten]",
+    });
+    expect(f.rows[0]!.provenance).not.toContain("legacy private quote");
+    expect(f.rows[0]!.provenance).not.toContain("legacy-message");
+    expect(f.rows[0]!.provenance).not.toContain("preference");
+    expect(f.revisions).toEqual([
+      expect.objectContaining({
+        factId: saved.id,
+        revision: 2,
+        content: "[forgotten]",
+        status: "forgotten",
+      }),
+    ]);
+  });
+
+  it("requires an expected revision even when the caller has a run id", async () => {
+    const f = fixture();
+    await expect(
+      f.store.forget(
+        { id: "fact-a", botId: "bot-a", scope: "isolated" },
+        { ...ctx, runId: "run-a" },
+      ),
+    ).rejects.toThrow("Forgetting a managed fact requires its expected revision.");
   });
 
   it("lets a correction restore content an earlier revision or a forgotten fact used", async () => {

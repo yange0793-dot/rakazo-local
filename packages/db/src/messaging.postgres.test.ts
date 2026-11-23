@@ -19,7 +19,6 @@ describePostgres("provisionMessagingIdentity (PostgreSQL)", () => {
       provisionMessagingIdentity(
         prisma,
         { provider, address: from },
-        { signupsEnabled: undefined, signupAllowlist: undefined },
       ),
     );
 

@@ -42,7 +42,6 @@ describePostgres("bot fleetManagement (PostgreSQL)", () => {
       provisionMessagingIdentity(
         prisma,
         { provider, address },
-        { signupsEnabled: undefined, signupAllowlist: undefined },
       ),
     );
   });

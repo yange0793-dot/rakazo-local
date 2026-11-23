@@ -10,7 +10,6 @@ const billing = vi.hoisted(() => ({
   selectFunding: vi.fn(),
   purchaseCredits: vi.fn(),
 }));
-const accountMenuDisabled: Array<boolean> = vi.hoisted(() => []);
 
 vi.mock("../lib/rpc", () => ({
   rpc: { billing },
@@ -18,12 +17,6 @@ vi.mock("../lib/rpc", () => ({
   createSpaceRpc: () => ({ billing }),
   selectedSpaceId: () => null,
   clearSpaceSelection: () => undefined,
-}));
-vi.mock("./AccountMenu", () => ({
-  AccountMenu: ({ disabled }: { disabled?: boolean }) => {
-    accountMenuDisabled.push(Boolean(disabled));
-    return <div data-testid="account-menu" />;
-  },
 }));
 vi.mock("@lingui/react/macro", () => {
   const t = (strings: TemplateStringsArray, ...values: unknown[]) =>
@@ -118,7 +111,6 @@ beforeEach(() => {
 afterEach(() => {
   vi.unstubAllGlobals();
   vi.clearAllMocks();
-  accountMenuDisabled.length = 0;
   (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = false;
 });
 
@@ -152,7 +144,6 @@ it.each([
     expect(buttonByLabel(container, label).disabled).toBe(false);
     expect(buttonByLabel(container, "Subscribe to credits").disabled).toBe(false);
     expect(buttonByLabel(container, "Subscribe with your own AI").disabled).toBe(false);
-    expect(accountMenuDisabled.at(-1)).toBe(false);
     act(() => root.unmount());
     container.remove();
   },

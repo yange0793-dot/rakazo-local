@@ -25,7 +25,6 @@ export function analyticsScreen(pathname: string): AnalyticsScreen | undefined {
       "/language",
       "/archived-bots",
       "/ai-data-sharing",
-      "/change-password",
       "/account",
       "/models",
       "/bot-settings",

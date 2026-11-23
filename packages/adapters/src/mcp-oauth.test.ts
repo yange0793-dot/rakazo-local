@@ -2025,7 +2025,7 @@ describe("MCP OAuth", () => {
   });
 
   it.each([
-    ["http://localhost:3100/api/auth/get-session", /HTTPS/],
+    ["http://localhost:3100/api/local-identity", /HTTPS/],
     ["http://127.0.0.1:3100/mcp", /HTTPS/],
     ["https://localhost:3100/mcp", /private/],
   ])("refuses loopback %s for a user who is not the deployment owner", async (endpoint, reason) => {

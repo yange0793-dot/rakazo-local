@@ -1,9 +1,8 @@
 import { expect, test } from "@playwright/test";
-import { captureScreenshot, completeOnboarding, signup } from "./helpers";
+import { captureScreenshot, completeOnboarding, openLocalWorkspace } from "./helpers";
 
 test("asks before using an app on the user's computer", async ({ page }, testInfo) => {
-  const stamp = Date.now();
-  await signup(page, `user-screen-${stamp}@rakazo.test`, "password12", "User Screen");
+  await openLocalWorkspace(page, "User Screen");
   await completeOnboarding(page);
 
   const composer = page.getByPlaceholder(/Message/);

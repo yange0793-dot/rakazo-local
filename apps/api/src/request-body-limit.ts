@@ -1,8 +1,7 @@
 import { ATTACHMENT_MAX_BYTES, attachmentSizeLabel } from "@rakazo/contracts";
-import type { Context, Hono, MiddlewareHandler } from "hono";
+import type { Context, MiddlewareHandler } from "hono";
 import { cancelBody } from "./http-body.js";
 
-export const MAX_AUTH_REQUEST_BYTES = 64 * 1024;
 export const MAX_RPC_REQUEST_BYTES = 16 * 1024 * 1024;
 
 /** Bound JSON entry points before their framework parsers buffer the request. */
@@ -67,32 +66,8 @@ export function rpcRequestMaxBytes(maxUploadSizeBytes = ATTACHMENT_MAX_BYTES): n
   return Math.max(MAX_RPC_REQUEST_BYTES, Math.ceil(maxUploadSizeBytes / 3) * 4 + 1024 * 1024);
 }
 
-/** Install limits only on framework-parsed JSON surfaces with known payload contracts. */
-export function mountApiRequestBodyLimits(app: Hono): void {
-  app.use("/api/auth/*", requestBodyLimit(MAX_AUTH_REQUEST_BYTES));
-}
-
-/**
- * Signed out, only the bodiless `health` procedure is callable, so the body
- * is discarded unread and oRPC answers as it would anyway: 401, or health.
- */
 export function rpcBodyLimit(maxUploadSizeBytes = ATTACHMENT_MAX_BYTES) {
-  const signedInLimit = rpcRequestMaxBytes(maxUploadSizeBytes);
+  const limit = rpcRequestMaxBytes(maxUploadSizeBytes);
   const message = `Request body is too large. Upload limit: ${attachmentSizeLabel(maxUploadSizeBytes)} per file.`;
-  return async (c: Context, signedIn: boolean) => {
-    if (signedIn) return limitRequestBody(c, signedInLimit, message);
-    const request = c.req.raw;
-    if (request.body) {
-      cancelBody(request.body);
-      const headers = new Headers(request.headers);
-      headers.delete("content-length");
-      headers.delete("transfer-encoding");
-      c.req.raw = new Request(request.url, {
-        method: request.method,
-        headers,
-        signal: request.signal,
-      });
-    }
-    return undefined;
-  };
+  return (c: Context) => limitRequestBody(c, limit, message);
 }

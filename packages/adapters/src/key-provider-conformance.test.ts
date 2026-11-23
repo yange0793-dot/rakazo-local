@@ -190,10 +190,10 @@ describe("AWS KMS key provider", () => {
 
 describe("wrapped environment values under AWS KMS", () => {
   it("binds the variable name into the KMS encryption context", async () => {
-    const env = { BETTER_AUTH_SECRET: await wrapEnvValue(aws(), "BETTER_AUTH_SECRET", "fake") };
-    expect(kms.state.contexts.at(-1)).toMatchObject({ "rakazo:space": "env:BETTER_AUTH_SECRET" });
+    const env = { SCREEN_PROXY_SECRET: await wrapEnvValue(aws(), "SCREEN_PROXY_SECRET", "fake") };
+    expect(kms.state.contexts.at(-1)).toMatchObject({ "rakazo:space": "env:SCREEN_PROXY_SECRET" });
     await unwrapEnv(env, aws());
-    expect(env.BETTER_AUTH_SECRET).toBe("fake");
+    expect(env.SCREEN_PROXY_SECRET).toBe("fake");
   });
 });
 

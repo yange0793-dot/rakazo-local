@@ -3,9 +3,9 @@ import { existsSync } from "node:fs";
 import { BlockList, isIP } from "node:net";
 import { networkInterfaces } from "node:os";
 import { getConnInfo } from "@hono/node-server/conninfo";
-import { CLIENT_IP_HEADER } from "@rakazo/auth";
 import { withSecurityRequest } from "@rakazo/db";
 import type { Context, MiddlewareHandler } from "hono";
+
 
 export interface ClientIpConfig {
   /** Reverse proxies allowed to report the client address: IPs, CIDR ranges, or hostnames. */
@@ -169,13 +169,4 @@ function socketPeer(c: Context): string | undefined {
     // In-process requests (tests, app.request) have no socket.
     return undefined;
   }
-}
-
-/** The request Better Auth sees: its one IP header carries the resolved address and nothing else. */
-export function withClientIp(request: Request, ip: string | undefined): Request {
-  if (!ip && !request.headers.has(CLIENT_IP_HEADER)) return request;
-  const headers = new Headers(request.headers);
-  headers.delete(CLIENT_IP_HEADER);
-  if (ip) headers.set(CLIENT_IP_HEADER, ip);
-  return new Request(request, { headers });
 }

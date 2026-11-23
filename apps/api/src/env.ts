@@ -15,21 +15,23 @@ import {
   secretStoreOptionsFromEnv,
   telegramBotsFromEnv,
 } from "@rakazo/adapters";
-import type { OidcConfig } from "@rakazo/auth";
 import type { MinimumClientBuilds, NavLink } from "@rakazo/contracts";
-import { isPrivateNetworkHost, parseMinimumClientBuilds, parseNavLinks } from "@rakazo/contracts";
+import {
+  isLocalhostOrLoopbackIp,
+  parseMinimumClientBuilds,
+  parseNavLinks,
+} from "@rakazo/contracts";
 import { parseCrispWebsiteId } from "@rakazo/contracts/content-security-policy";
 import {
   attachmentCountFromEnv,
   phoneCallSettings,
-  resolveAuthSecret,
   resolveContentEncryption,
   resolveEncryptionKey,
   resolveScreenProxySecret,
   resolveSupervisorToken,
   uploadSizeFromEnv,
 } from "@rakazo/core";
-import { getLogger, monitoringPseudonymSecret } from "@rakazo/logging";
+import { monitoringPseudonymSecret } from "@rakazo/logging";
 
 export { resolveCloudAgentProvider, resolveSandboxProvider } from "@rakazo/adapters";
 
@@ -37,33 +39,17 @@ export { resolveCloudAgentProvider, resolveSandboxProvider } from "@rakazo/adapt
 const DEFAULT_WEB_ORIGIN = "http://127.0.0.1:5173";
 
 export interface AppEnv {
-  passwordAuth?: boolean;
-  /** Opt-in Have I Been Pwned check for new passwords. Default off: it calls an outside service. */
-  breachedPasswordCheck?: boolean;
-  oidc?: OidcConfig;
-  /** Bearer token the identity provider presents to provision accounts over SCIM. */
-  scimBearerToken?: string;
   nodeEnv: string;
   desktopStackToken?: string;
   databaseUrl: string;
   realtimeDatabaseUrl: string;
-  authSecret: string;
-  authUrl: string;
   webOrigin: string;
-  /** Extra browser origins trusted for sign-in and CORS, from `RAKAZO_EXTRA_AUTH_ORIGINS`. */
-  extraAuthOrigins: string[];
-  /** `<TEAM_ID>.<bundle id>` of iOS apps that may use this domain's passkeys. */
-  passkeyAppleAppIds: string[];
-  /** SHA-256 signing certificate fingerprints of Android apps that may use this domain's passkeys. */
-  passkeyAndroidCertFingerprints: string[];
   privacyPolicyUrl?: string;
   apiUrl: string;
   apiHost: string;
   /** Proxies whose forwarded client address is believed; empty means local networks. */
   trustedProxies: string[];
   clientIpHeader: string;
-  signupsEnabled: string | undefined;
-  signupAllowlist: string | undefined;
   encryptionKey: string;
   contentEncryption: boolean;
   dataDir: string;
@@ -125,7 +111,6 @@ export interface AppEnv {
   apnsVoip?: ApnsVoipConfig;
   smtpUrl: string | undefined;
   emailProvider?: string;
-  welcomeEmailEnabled?: boolean;
   emailApiKey?: string;
   emailFrom: string | undefined;
   emailReplyTo?: string;
@@ -194,82 +179,27 @@ export interface AppEnv {
 
 export function loadEnv(source: NodeJS.ProcessEnv = process.env): AppEnv {
   secretStoreOptionsFromEnv(source);
-  const issuer = optional(source.OIDC_ISSUER);
-  const clientId = optional(source.OIDC_CLIENT_ID);
-  const clientSecret = optional(source.OIDC_CLIENT_SECRET);
-  const credentials = [issuer, clientId, clientSecret];
-  if (credentials.some(Boolean) && !credentials.every(Boolean)) {
-    throw new Error(
-      "OIDC_ISSUER, OIDC_CLIENT_ID and OIDC_CLIENT_SECRET must be configured together",
-    );
-  }
-  if (issuer) {
-    try {
-      const url = new URL(issuer);
-      if (url.protocol !== "https:" || url.username || url.password || url.search || url.hash)
-        throw new Error();
-    } catch {
-      throw new Error("OIDC_ISSUER must be an HTTPS issuer URL");
-    }
-  }
-  for (const key of [
-    "AUTH_PASSWORD_ENABLED",
-    "AUTH_BREACHED_PASSWORD_CHECK_ENABLED",
-    "OIDC_ALLOW_SIGNUP_BYPASS",
-  ]) {
-    const value = source[key];
-    if (value && !["true", "false"].includes(value))
-      throw new Error(`${key} must be true or false`);
-  }
-  const passwordAuth = source.AUTH_PASSWORD_ENABLED !== "false";
-  if (!passwordAuth && !issuer)
-    throw new Error("AUTH_PASSWORD_ENABLED=false requires OIDC configuration");
-  const oidc =
-    issuer && clientId && clientSecret
-      ? {
-          issuer,
-          clientId,
-          clientSecret,
-          name: optional(source.OIDC_NAME) ?? "SSO",
-          scopes: (optional(source.OIDC_SCOPES) ?? "openid email profile")
-            .split(/[\s,]+/)
-            .filter(Boolean),
-          allowSignupBypass: source.OIDC_ALLOW_SIGNUP_BYPASS === "true",
-        }
-      : undefined;
-  const scimBearerToken = optional(source.SCIM_BEARER_TOKEN);
-  if (scimBearerToken && (scimBearerToken.length < 32 || /\s/.test(scimBearerToken)))
-    throw new Error("SCIM_BEARER_TOKEN must be at least 32 characters with no spaces");
-  const authSecret = resolveAuthSecret(source);
   const webOrigin = resolveWebOrigin(source.WEB_ORIGIN, DEFAULT_WEB_ORIGIN, "WEB_ORIGIN");
+  const apiHost = source.API_HOST ?? "127.0.0.1";
+  if (!isLocalhostOrLoopbackIp(apiHost))
+    throw new Error("Rakazo local mode requires API_HOST to be a loopback host");
   const sandboxProvider = resolveSandboxProvider(source);
   const cloudAgentProvider = resolveCloudAgentProvider(source);
   const deploymentModel = resolveDeploymentModel(source);
   return {
-    passwordAuth,
-    breachedPasswordCheck: source.AUTH_BREACHED_PASSWORD_CHECK_ENABLED === "true",
-    oidc,
-    scimBearerToken,
     nodeEnv: source.NODE_ENV ?? "",
     databaseUrl: required(source, "DATABASE_URL"),
     realtimeDatabaseUrl: source.REALTIME_DATABASE_URL ?? required(source, "DATABASE_URL"),
     desktopStackToken: optional(source.RAKAZO_DESKTOP_STACK_TOKEN),
-    authSecret,
-    authUrl: resolveWebOrigin(source.BETTER_AUTH_URL, webOrigin, "BETTER_AUTH_URL"),
     webOrigin,
-    extraAuthOrigins: parseExtraAuthOrigins(source.RAKAZO_EXTRA_AUTH_ORIGINS),
-    passkeyAppleAppIds: list(source.PASSKEY_APPLE_APP_IDS),
-    passkeyAndroidCertFingerprints: androidCertFingerprints(source.PASSKEY_ANDROID_CERT_SHA256),
     privacyPolicyUrl: optional(source.PRIVACY_POLICY_URL),
     apiUrl: source.API_URL ?? "http://127.0.0.1:3100",
-    apiHost: source.API_HOST ?? "127.0.0.1",
+    apiHost,
     trustedProxies: (source.TRUSTED_PROXIES ?? "")
       .split(/[\s,]+/)
       .map((value) => value.trim())
       .filter(Boolean),
     clientIpHeader: optional(source.CLIENT_IP_HEADER)?.toLowerCase() ?? "x-forwarded-for",
-    signupsEnabled: source.SIGNUPS_ENABLED,
-    signupAllowlist: source.SIGNUP_ALLOWLIST,
     encryptionKey: resolveEncryptionKey(source),
     contentEncryption: resolveContentEncryption(source),
     dataDir: source.DATA_DIR ?? "./data",
@@ -325,7 +255,6 @@ export function loadEnv(source: NodeJS.ProcessEnv = process.env): AppEnv {
     emailFrom: optional(source.EMAIL_FROM),
     emailReplyTo: optional(source.EMAIL_REPLY_TO),
     inboundEmail: inboundEmailFromEnv(source),
-    welcomeEmailEnabled: source.WELCOME_EMAIL_ENABLED === "true",
     stripeSecretKey: optional(source.STRIPE_SECRET_KEY),
     stripeWebhookSecret: optional(source.STRIPE_WEBHOOK_SECRET),
     stripePriceId: optional(source.STRIPE_PRICE_ID),
@@ -394,31 +323,6 @@ function resolveWebOrigin(value: string | undefined, fallback: string, name: str
   return origin;
 }
 
-/**
- * Comma-separated origins an operator adds for a second address of the same install (a tailnet
- * or LAN URL). Only bare `https://` origins, or `http://` on loopback or a private network, are
- * kept; anything else is dropped with a warning so a typo cannot widen trust.
- */
-export function parseExtraAuthOrigins(value: string | undefined): string[] {
-  const origins = new Set<string>();
-  for (const raw of (value ?? "").split(/[\s,]+/).filter(Boolean)) {
-    try {
-      const url = new URL(raw);
-      const bare =
-        url.pathname === "/" && !url.search && !url.hash && !url.username && !url.password;
-      const allowed =
-        url.protocol === "https:" ||
-        (url.protocol === "http:" && isPrivateNetworkHost(url.hostname));
-      if (!bare || !allowed) throw new Error();
-      origins.add(url.origin);
-    } catch {
-      // The entry is not logged: it may carry credentials.
-      getLogger().warn("ignoring invalid RAKAZO_EXTRA_AUTH_ORIGINS entry");
-    }
-  }
-  return [...origins];
-}
-
 function required(source: NodeJS.ProcessEnv, key: string): string {
   const value = source[key];
   if (!value) throw new Error(`Missing ${key}`);
@@ -468,15 +372,4 @@ function optional(value: string | undefined): string | undefined {
 
 function list(value: string | undefined): string[] {
   return (value ?? "").split(/[\s,]+/).filter(Boolean);
-}
-
-/** SHA-256 signing certificate fingerprints, normalized to the `AA:BB:…` form Digital Asset Links uses. */
-function androidCertFingerprints(value: string | undefined): string[] {
-  return list(value).map((fingerprint) => {
-    const hex = fingerprint.replace(/:/g, "");
-    if (!/^[0-9a-f]{64}$/i.test(hex)) {
-      throw new Error("PASSKEY_ANDROID_CERT_SHA256 must list SHA-256 fingerprints");
-    }
-    return hex.toUpperCase().match(/../g)!.join(":");
-  });
 }

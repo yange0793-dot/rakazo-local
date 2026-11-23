@@ -1681,7 +1681,6 @@ describe("MCP pre-registered OAuth client", () => {
         mcpAllowPrivateEndpoint: isDeploymentOwner,
         mcpStdioEnabled: true,
         mcpStdioAllowedCommands: allowedCommands,
-        adminEmails: ["owner@rakazo.test"],
       },
       dataDir: "/tmp/rakazo-router-test",
     } as unknown as RouterDeps;
@@ -1697,6 +1696,7 @@ describe("MCP pre-registered OAuth client", () => {
       server: () => server,
       secrets,
       prisma,
+      env: deps.env,
     };
   }
 
@@ -2036,7 +2036,7 @@ describe("MCP pre-registered OAuth client", () => {
           env: { GOOGLE_ACCESS_TOKEN: "{{oauth.access_token}}" },
           oauthClient: { ...oauthClient, authorizationServer: "http://localhost:3100" },
         }),
-      ).rejects.toMatchObject({ code: "BAD_REQUEST", message: expect.stringMatching(/HTTPS/) });
+      ).rejects.toMatchObject({ code: "FORBIDDEN" });
       expect(secrets.put).not.toHaveBeenCalled();
     });
 
@@ -2062,10 +2062,11 @@ describe("MCP pre-registered OAuth client", () => {
       };
 
       it("rechecks a retained issuer before storing updated material", async () => {
-        const { client, secrets } = harness(false, {
+        const { client, secrets, env } = harness(true, {
           ...stored,
           oauthClient: { ...stored.oauthClient, authorization_server: "https://127.0.0.1/" },
         });
+        env.mcpAllowPrivateEndpoint = false;
         await expect(client.mcp.servers.update(update)).rejects.toMatchObject({
           code: "BAD_REQUEST",
         });
@@ -2188,7 +2189,7 @@ describe("MCP pre-registered OAuth client", () => {
 });
 
 describe("MCP loopback endpoints", () => {
-  const LOOPBACK = "http://localhost:3100/api/auth/get-session";
+  const LOOPBACK = "http://localhost:3100/api/local-identity";
 
   function mcpDeps(mcpAllowPrivateEndpoint = false) {
     const create = vi.fn(async ({ data }: { data: Record<string, unknown> }) => ({
@@ -2404,7 +2405,6 @@ describe("MCP server health", () => {
         sandboxProvider: "fake",
         mcpStdioEnabled: true,
         mcpStdioAllowedCommands: ["npx"],
-        adminEmails: ["owner@rakazo.test"],
       },
       dataDir: "/tmp/rakazo-router-test",
     } as unknown as RouterDeps;
@@ -2483,7 +2483,9 @@ describe("MCP server health", () => {
 
   it("lets only admins add or change stdio servers", async () => {
     const h = harness();
-    Object.assign(h.deps.env, { adminEmails: ["someone-else@rakazo.test"] });
+    vi.mocked(h.deps.prisma.deploymentSettings.findUnique).mockResolvedValue({
+      ownerUserId: "someone-else",
+    } as never);
     const refusal = { code: "FORBIDDEN", message: "Only admins can add local MCP servers" };
 
     expect((await h.client.me()).mcpStdioEnabled).toBe(false);
@@ -4785,7 +4787,7 @@ describe("server operation authorization", () => {
       );
       for (const call of [
         () => client.deployment.get(),
-        () => client.deployment.update({ signupsEnabled: true }),
+        () => client.deployment.update({ computerHost: "docker" }),
         () => client.security.events({}),
         () => client.updater.status(),
         () => client.updater.check({}),
@@ -4893,11 +4895,9 @@ describe("OpenAI-compatible model probes", () => {
   it.each([undefined, "", "   "])("uses the saved key for a blank key %j", async (apiKey) => {
     const { client, fetch, findSecret, load } = fixture();
     const response = await client.models.probeOpenAiCompatible({ baseUrl, apiKey });
-    expect(fetch).toHaveBeenCalledWith(
-      new URL(`${baseUrl}/models`),
-      expect.objectContaining({
-        headers: expect.objectContaining({ Authorization: "Bearer fake-saved-key" }),
-      }),
+    expect(String(fetch.mock.calls[0]?.[0])).toBe(`${baseUrl}/models`);
+    expect(new Headers(fetch.mock.calls[0]?.[1]?.headers).get("authorization")).toBe(
+      "Bearer fake-saved-key",
     );
     expect(findSecret).toHaveBeenCalledWith({
       where: { id: { in: ["secret-1"] }, userId: actor.userId, spaceId: null },
@@ -4911,11 +4911,9 @@ describe("OpenAI-compatible model probes", () => {
   it("uses explicit key and headers without looking up the stored credential", async () => {
     const { client, fetch, findCredential, findCredentials, findSecret, load } = fixture();
     await client.models.probeOpenAiCompatible({ baseUrl, apiKey: " fake-typed-key ", headers: {} });
-    expect(fetch).toHaveBeenCalledWith(
-      expect.any(URL),
-      expect.objectContaining({
-        headers: expect.objectContaining({ Authorization: "Bearer fake-typed-key" }),
-      }),
+    expect(String(fetch.mock.calls[0]?.[0])).toBe(`${baseUrl}/models`);
+    expect(new Headers(fetch.mock.calls[0]?.[1]?.headers).get("authorization")).toBe(
+      "Bearer fake-typed-key",
     );
     expect(findCredential).not.toHaveBeenCalled();
     expect(findCredentials).not.toHaveBeenCalled();
@@ -5024,8 +5022,7 @@ describe("OpenAI-compatible model probes", () => {
         where: { id: { in: ["secret-1", "secret-2"] }, userId: actor.userId, spaceId: null },
         select: { id: true, ciphertext: true },
       });
-      expect(fetch.mock.calls[0]?.[1]?.headers).toHaveProperty(
-        "Authorization",
+      expect(new Headers(fetch.mock.calls[0]?.[1]?.headers).get("authorization")).toBe(
         preferred === "matching endpoint" ? "Bearer fake-preferred-key" : "Bearer fake-saved-key",
       );
       expect(load.mock.calls.map((call) => call[1])).toEqual(
@@ -5591,7 +5588,11 @@ describe("model credential persistence", () => {
           apiKey: "fixture-key",
         });
         expect(response.status).toBe(200);
-        expect(fetchImpl).toHaveBeenCalledWith(url, expect.objectContaining({ headers }));
+        expect(String(fetchImpl.mock.calls[0]?.[0])).toBe(url);
+        const sentHeaders = new Headers(fetchImpl.mock.calls[0]?.[1]?.headers);
+        for (const [key, value] of Object.entries(headers)) {
+          expect(sentHeaders.get(key)).toBe(value);
+        }
         expect(deps.secrets.put).toHaveBeenCalledWith(
           "fixture-key",
           expect.objectContaining({ userId: actor.userId }),

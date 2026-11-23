@@ -1,11 +1,9 @@
 import { Trans, useLingui } from "@lingui/react/macro";
-import { isIdentityConfirmationRequired } from "@rakazo/contracts";
 import { Button, Spinner } from "@rakazo/ui-web";
 import { useRef, useState } from "react";
-import { recheckSessionOnUnauthorized, rpc } from "../lib/rpc";
+import { rpc } from "../lib/rpc";
 import { errorText } from "../lib/user-error";
 import { SuccessPop } from "./ai/primitives";
-import { useIdentityConfirmation } from "./ConfirmIdentityDialog";
 import { SettingsRow } from "./SettingsRows";
 
 export function AccountDataSettings({
@@ -16,7 +14,6 @@ export function AccountDataSettings({
   onImportAgent?: () => void;
 }) {
   const { t } = useLingui();
-  const { withIdentityConfirmation, identityDialog } = useIdentityConfirmation();
   const fileInput = useRef<HTMLInputElement>(null);
   const [pending, setPending] = useState<"export" | "import" | null>(null);
   const [imported, setImported] = useState(false);
@@ -28,14 +25,14 @@ export function AccountDataSettings({
     setImported(false);
     setError(null);
     try {
-      const { token } = await withIdentityConfirmation(() => rpc.export.accountToken());
+      const { token } = await rpc.export.accountToken();
       // A download link, not a fetch, so the browser or Electron saves the stream natively.
       const link = document.createElement("a");
       link.href = `/api/account/export?token=${encodeURIComponent(token)}`;
       link.download = "";
       link.click();
     } catch (cause) {
-      if (!isIdentityConfirmationRequired(cause)) setError(errorText(cause, t`Could not continue`));
+      setError(errorText(cause, t`Could not continue`));
     } finally {
       setPending(null);
     }
@@ -53,7 +50,6 @@ export function AccountDataSettings({
         credentials: "include",
         body: file,
       });
-      recheckSessionOnUnauthorized(response.status);
       if (!response.ok) {
         const body = (await response.json().catch(() => null)) as {
           error?: unknown;
@@ -139,7 +135,6 @@ export function AccountDataSettings({
           }
         />
       ) : null}
-      {identityDialog}
     </>
   );
 }

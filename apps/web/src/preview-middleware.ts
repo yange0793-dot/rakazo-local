@@ -499,7 +499,6 @@ export function webServerSettings(read: (name: string) => string | undefined, lo
         ...process.env,
         SCREEN_PROXY_SECRET: read("SCREEN_PROXY_SECRET"),
         SANDBOX_SUPERVISOR_TOKEN: read("SANDBOX_SUPERVISOR_TOKEN"),
-        BETTER_AUTH_SECRET: read("BETTER_AUTH_SECRET"),
       }),
     performanceAssetDelayMs: Number(read("RAKAZO_PERFORMANCE_ASSET_DELAY_MS") ?? 0),
     desktopStackToken: read("RAKAZO_DESKTOP_STACK_TOKEN") ?? "",

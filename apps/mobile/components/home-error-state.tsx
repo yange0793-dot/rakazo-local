@@ -18,7 +18,6 @@ export function HomeErrorState({
   message,
   loading,
   onRetry,
-  onSignIn,
 }: {
   kind: LoadFailureKind;
   /** Shown under the title only when the cause is unknown. */
@@ -26,7 +25,6 @@ export function HomeErrorState({
   /** A retry is in flight: the failure stays, with a spinner in place of the action. */
   loading: boolean;
   onRetry: () => void;
-  onSignIn: () => void;
 }) {
   const { t } = useLingui();
   const styles = useThemedStyles(createStyles);
@@ -36,7 +34,7 @@ export function HomeErrorState({
     kind === "offline"
       ? t`Could not reach the server`
       : kind === "session"
-        ? t`Your session expired`
+        ? t`Could not open this space`
         : kind === "server"
           ? t`The server had a problem`
           : t`Could not load chats`;
@@ -51,10 +49,6 @@ export function HomeErrorState({
       {loading ? (
         <View style={styles.action}>
           <ActivityIndicator color={native.secondaryLabel} />
-        </View>
-      ) : kind === "session" ? (
-        <View style={styles.action}>
-          <NativeActionButton label={t`Sign in`} fill={false} onPress={onSignIn} />
         </View>
       ) : kind !== "server" ? (
         // A server fault is not fixed by retrying right away; pull to refresh still reloads.

@@ -27,7 +27,6 @@ vi.mock("react-native", () => ({
 }));
 vi.mock("expo-router", () => ({ router: { push: vi.fn() } }));
 vi.mock("./api-server", () => ({}));
-vi.mock("./api-auth", () => ({}));
 vi.mock("./api-live", () => ({}));
 vi.mock("./api", () => ({
   captureApiRequestContext: async () => ({ headers: {} }),
@@ -52,7 +51,7 @@ vi.mock("./outbox-disk", () => ({
 vi.mock("./session", () => ({
   currentReadySessionGeneration: () => state.generation,
   currentSessionGeneration: () => state.generation,
-  loadSessionToken: async () => state.token,
+  loadLocalInstallSessionId: async () => state.token,
   loadVerifiedIntegrationsScope: async () => ({
     apiBase: "https://api.example.test",
     userId: "user-a",

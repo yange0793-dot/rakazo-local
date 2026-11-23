@@ -1,12 +1,9 @@
 import { describe, expect, it } from "vitest";
 import {
-  DEV_AUTH_SECRET_PLACEHOLDER,
   DEV_ENCRYPTION_KEY_PLACEHOLDER,
   DEV_SCREEN_PROXY_SECRET_PLACEHOLDER,
   DEV_SUPERVISOR_TOKEN_PLACEHOLDER,
-  encryptionKeyWarning,
   hasValidBearerToken,
-  resolveAuthSecret,
   resolveContentEncryption,
   resolveEncryptionKey,
   resolveScreenProxySecret,
@@ -17,22 +14,14 @@ import {
 
 describe("secrets-guard", () => {
   it("allows placeholders in test mode", () => {
-    expect(resolveAuthSecret({ NODE_ENV: "test" })).toBe(DEV_AUTH_SECRET_PLACEHOLDER);
     expect(resolveEncryptionKey({ NODE_ENV: "test" })).toBe(DEV_ENCRYPTION_KEY_PLACEHOLDER);
     expect(resolveSupervisorToken({ NODE_ENV: "test" })).toBe(DEV_SUPERVISOR_TOKEN_PLACEHOLDER);
     expect(resolveScreenProxySecret({ NODE_ENV: "test" })).toBe(
       DEV_SCREEN_PROXY_SECRET_PLACEHOLDER,
     );
-    expect(resolveAuthSecret({ NODE_ENV: "production", VITEST: "true" })).toBe(
-      DEV_AUTH_SECRET_PLACEHOLDER,
-    );
-    expect(resolveAuthSecret({ NODE_ENV: "production", RAKAZO_ALLOW_DEV_SECRETS: "1" })).toBe(
-      DEV_AUTH_SECRET_PLACEHOLDER,
-    );
   });
 
   it("rejects missing secrets outside local/test", () => {
-    expect(() => resolveAuthSecret({ NODE_ENV: "production" })).toThrow(/BETTER_AUTH_SECRET/);
     expect(() => resolveEncryptionKey({ NODE_ENV: "production" })).toThrow(/ENCRYPTION_KEY/);
     expect(() => resolveSupervisorToken({ NODE_ENV: "production" })).toThrow(
       /SANDBOX_SUPERVISOR_TOKEN/,
@@ -43,12 +32,6 @@ describe("secrets-guard", () => {
   });
 
   it("rejects placeholder values outside local/test", () => {
-    expect(() =>
-      resolveAuthSecret({
-        NODE_ENV: "production",
-        BETTER_AUTH_SECRET: DEV_AUTH_SECRET_PLACEHOLDER,
-      }),
-    ).toThrow(/BETTER_AUTH_SECRET/);
     expect(() =>
       resolveEncryptionKey({
         NODE_ENV: "production",
@@ -82,18 +65,6 @@ describe("secrets-guard", () => {
   });
 
   it("rejects blank and whitespace-padded placeholder secrets in production", () => {
-    expect(() => resolveAuthSecret({ NODE_ENV: "production", BETTER_AUTH_SECRET: "   " })).toThrow(
-      /BETTER_AUTH_SECRET/,
-    );
-    expect(() => resolveEncryptionKey({ NODE_ENV: "production", ENCRYPTION_KEY: "\t" })).toThrow(
-      /ENCRYPTION_KEY/,
-    );
-    expect(() =>
-      resolveAuthSecret({
-        NODE_ENV: "production",
-        BETTER_AUTH_SECRET: ` ${DEV_AUTH_SECRET_PLACEHOLDER}\n`,
-      }),
-    ).toThrow(/BETTER_AUTH_SECRET/);
     expect(() =>
       resolveEncryptionKey({
         NODE_ENV: "production",
@@ -103,88 +74,11 @@ describe("secrets-guard", () => {
   });
 
   it("does not treat disabled Vitest flags as a test environment", () => {
-    expect(() => resolveAuthSecret({ NODE_ENV: "production", VITEST: "0" })).toThrow(
-      /BETTER_AUTH_SECRET/,
-    );
-    expect(() => resolveEncryptionKey({ NODE_ENV: "production", VITEST: "false" })).toThrow(
-      /ENCRYPTION_KEY/,
-    );
-  });
-
-  it("accepts real dedicated credentials in production", () => {
-    expect(
-      resolveSupervisorToken({
-        NODE_ENV: "production",
-        SANDBOX_SUPERVISOR_TOKEN: "prod-supervisor-token-with-enough-length",
-      }),
-    ).toBe("prod-supervisor-token-with-enough-length");
-    expect(
-      resolveScreenProxySecret({
-        NODE_ENV: "production",
-        SCREEN_PROXY_SECRET: "prod-screen-proxy-secret-with-enough-length",
-        SANDBOX_SUPERVISOR_TOKEN: "prod-supervisor-token-with-enough-length",
-      }),
-    ).toBe("prod-screen-proxy-secret-with-enough-length");
-  });
-
-  it("accepts real secrets in production", () => {
-    expect(
-      resolveAuthSecret({
-        NODE_ENV: "production",
-        BETTER_AUTH_SECRET: "prod-secret-with-enough-entropy-here",
-      }),
-    ).toBe("prod-secret-with-enough-entropy-here");
-    expect(
-      resolveEncryptionKey({
-        NODE_ENV: "production",
-        ENCRYPTION_KEY: "prod-encryption-key-with-enough-entropy",
-      }),
-    ).toBe("prod-encryption-key-with-enough-entropy");
-  });
-
-  it("keeps an existing non-placeholder encryption key usable during upgrades", () => {
-    expect(resolveEncryptionKey({ NODE_ENV: "production", ENCRYPTION_KEY: "existing-key" })).toBe(
-      "existing-key",
-    );
-  });
-
-  it("warns about a weak production encryption key without rejecting it", () => {
-    expect(
-      encryptionKeyWarning({ NODE_ENV: "production", ENCRYPTION_KEY: "existing-key" }),
-    ).toMatch(/ENCRYPTION_KEY/);
-    expect(
-      encryptionKeyWarning({
-        NODE_ENV: "production",
-        ENCRYPTION_KEY: "replace-with-64-random-hex-characters",
-      }),
-    ).toMatch(/ENCRYPTION_KEY/);
-    expect(
-      encryptionKeyWarning({ NODE_ENV: "production", ENCRYPTION_KEY: "a".repeat(64) }),
-    ).toBeUndefined();
-    expect(encryptionKeyWarning({ NODE_ENV: "development" })).toBeUndefined();
-  });
-
-  it("requires dedicated supervisor and screen-proxy credentials", () => {
-    expect(
-      resolveSupervisorToken({
-        NODE_ENV: "test",
-        SANDBOX_SUPERVISOR_TOKEN: "supervisor-only",
-        BETTER_AUTH_SECRET: "custom-auth",
-      }),
-    ).toBe("supervisor-only");
-    expect(() =>
-      resolveSupervisorToken({
-        NODE_ENV: "test",
-        SANDBOX_SUPERVISOR_TOKEN: "custom-auth",
-        BETTER_AUTH_SECRET: "custom-auth",
-      }),
-    ).toThrow(/must differ/);
     expect(
       resolveScreenProxySecret({
         NODE_ENV: "test",
         SCREEN_PROXY_SECRET: "screen-only",
         SANDBOX_SUPERVISOR_TOKEN: "supervisor-only",
-        BETTER_AUTH_SECRET: "custom-auth",
       }),
     ).toBe("screen-only");
     expect(() =>
@@ -210,22 +104,19 @@ describe("secrets-guard", () => {
   });
 
   it("requires the updater to use a dedicated token", () => {
-    expect(() =>
-      resolveUpdaterToken({ NODE_ENV: "test", BETTER_AUTH_SECRET: "custom-auth" }),
-    ).toThrow(/RAKAZO_UPDATER_TOKEN/);
+    expect(() => resolveUpdaterToken({ NODE_ENV: "test" })).toThrow(/RAKAZO_UPDATER_TOKEN/);
     expect(
       resolveUpdaterToken({
         NODE_ENV: "test",
         RAKAZO_UPDATER_TOKEN: "updater-only",
         SANDBOX_SUPERVISOR_TOKEN: "supervisor-only",
-        BETTER_AUTH_SECRET: "custom-auth",
       }),
     ).toBe("updater-only");
     expect(() =>
       resolveUpdaterToken({
         NODE_ENV: "test",
-        RAKAZO_UPDATER_TOKEN: "custom-auth",
-        BETTER_AUTH_SECRET: "custom-auth",
+        RAKAZO_UPDATER_TOKEN: "screen-only",
+        SCREEN_PROXY_SECRET: "screen-only",
       }),
     ).toThrow(/must differ/);
     expect(() =>

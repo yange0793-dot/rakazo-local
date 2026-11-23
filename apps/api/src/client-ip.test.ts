@@ -1,4 +1,3 @@
-import { CLIENT_IP_HEADER } from "@rakazo/auth";
 import { recordSecurityEvent } from "@rakazo/db";
 import {
   createLogger,
@@ -16,7 +15,6 @@ import {
   defaultTrustedProxies,
   LOCAL_NETWORKS,
   requestClientIp,
-  withClientIp,
 } from "./client-ip.js";
 
 const header = "x-forwarded-for";
@@ -177,7 +175,7 @@ describe("clientIpMiddleware", () => {
     hono.use("*", clientIpMiddleware(createClientIpResolver({ trustedProxies, header }), header));
     hono.get("/", async (c) => {
       getLogger().info("http.request.completed");
-      await recordSecurityEvent({ type: "auth.sign_out" });
+      await recordSecurityEvent({ type: "device.revoked" });
       return c.json({ ip: requestClientIp(c) ?? null, context: getLogContext() });
     });
     return hono;
@@ -213,26 +211,5 @@ describe("clientIpMiddleware", () => {
   it("does not let a direct caller choose its address", async () => {
     const body = await fromSocket(app([]), "198.51.100.10", { [header]: "203.0.113.5" });
     expect(body.ip).toBe("198.51.100.10");
-  });
-});
-
-describe("withClientIp", () => {
-  it("replaces a client-supplied copy of the auth IP header", () => {
-    const request = new Request("http://api.test/api/auth/sign-in/email", {
-      headers: { [CLIENT_IP_HEADER]: "192.0.2.66" },
-    });
-    expect(withClientIp(request, "203.0.113.5").headers.get(CLIENT_IP_HEADER)).toBe("203.0.113.5");
-    expect(withClientIp(request, undefined).headers.has(CLIENT_IP_HEADER)).toBe(false);
-  });
-
-  it("keeps the body of a POST", async () => {
-    const request = new Request("http://api.test/api/auth/sign-in/email", {
-      method: "POST",
-      body: JSON.stringify({ email: "user@example.test" }),
-      headers: { "content-type": "application/json" },
-    });
-    expect(await withClientIp(request, "203.0.113.5").json()).toEqual({
-      email: "user@example.test",
-    });
   });
 });

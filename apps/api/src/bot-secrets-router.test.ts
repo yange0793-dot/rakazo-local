@@ -124,9 +124,7 @@ function botSecretDeps(seed: Row[] = []) {
       ciphertext: `enc:${options.recordId}`,
     };
   });
-  const auth = { hasRecentIdentityConfirmation: vi.fn(async () => false) };
   const deps = {
-    auth,
     prisma: prisma as unknown as PrismaClient,
     secrets,
     env: {
@@ -152,7 +150,7 @@ function botSecretDeps(seed: Row[] = []) {
     const text = await response.text();
     return { status: response.status, text, body: JSON.parse(text) as { json: unknown } };
   }
-  return { prisma, secrets, rows, call, auth };
+  return { prisma, secrets, rows, call };
 }
 
 function putInput(origin: string, botId = "bot-1") {
@@ -544,7 +542,7 @@ describe("vault router", () => {
       title: "Portal",
       note: "For work",
     });
-    expect((await call("vault/reveal", { name: "portal" })).status).not.toBe(200);
+    expect((await call("vault/reveal", {name:"portal"})).body.json).toEqual({value:FAKE_VALUE});
     const missing = await call("vault/put", {
       destination: { ...destination, name: "missing" },
       title: "Missing",
@@ -581,16 +579,9 @@ describe("vault router", () => {
     ]);
   });
 
-  it("reveals a value only after this session confirmed it's the owner", async () => {
-    const { secrets, auth, call } = botSecretDeps();
+  it("reveals a value to its local owner and records an audit event", async () => {
+    const { call } = botSecretDeps();
     await call("vault/put", { destination, value: FAKE_VALUE });
-    const refused = await call("vault/reveal", { name: "portal" });
-    expect(refused.status).toBe(403);
-    expect(refused.text).toContain("IDENTITY_CONFIRMATION_REQUIRED");
-    expect(refused.text).not.toContain(FAKE_VALUE);
-    expect(secrets.load).not.toHaveBeenCalled();
-
-    auth.hasRecentIdentityConfirmation.mockResolvedValue(true);
     events.record.mockClear();
     const shown = await call("vault/reveal", { name: "portal" });
     expect(shown.body.json).toEqual({ value: FAKE_VALUE });
@@ -602,15 +593,11 @@ describe("vault router", () => {
       }),
     );
     expect(JSON.stringify(events.record.mock.calls)).not.toContain(FAKE_VALUE);
-    expect(auth.hasRecentIdentityConfirmation).toHaveBeenLastCalledWith({
-      sessionId: "session-1",
-      userId: "user-1",
-    });
     expect((await call("vault/reveal", { name: "missing" })).status).toBe(404);
   });
 
-  it("reveals a bot's webhook key only to its creator after they confirm it's them", async () => {
-    const { prisma, secrets, auth, call } = botSecretDeps();
+  it("reveals a bot's webhook key only to its creator", async () => {
+    const { prisma, secrets, call } = botSecretDeps();
     const bot = {
       id: "bot-1",
       userId: "user-1",
@@ -627,12 +614,6 @@ describe("vault router", () => {
     Object.assign(prisma.bot, { findUnique: currentKey });
     secrets.load.mockResolvedValue(FAKE_VALUE);
 
-    const refused = await call("bots/revealWebhookSecret", { botId: "bot-1" });
-    expect(refused.status).toBe(403);
-    expect(refused.text).toContain("IDENTITY_CONFIRMATION_REQUIRED");
-    expect(secrets.load).not.toHaveBeenCalled();
-
-    auth.hasRecentIdentityConfirmation.mockResolvedValue(true);
     events.record.mockClear();
     const shown = await call("bots/revealWebhookSecret", { botId: "bot-1" });
     expect(shown.body.json).toEqual({ secret: FAKE_VALUE });
@@ -658,19 +639,16 @@ describe("vault router", () => {
     // A space member who did not create the bot never reads its key, and is refused before
     // being asked to confirm it's them.
     prisma.bot.findFirst.mockResolvedValue({ ...bot, userId: "user-2" } as never);
-    auth.hasRecentIdentityConfirmation.mockResolvedValue(false);
     secrets.load.mockClear();
     const forbidden = await call("bots/revealWebhookSecret", { botId: "bot-1" });
     expect(forbidden.status).toBe(403);
     expect(forbidden.text).toContain("FORBIDDEN");
-    expect(forbidden.text).not.toContain("IDENTITY_CONFIRMATION_REQUIRED");
     expect(forbidden.text).not.toContain(FAKE_VALUE);
     expect(secrets.load).not.toHaveBeenCalled();
   });
 
   it("saves an older app's username and password as fields and reveals them", async () => {
-    const { auth, call } = botSecretDeps();
-    auth.hasRecentIdentityConfirmation.mockResolvedValue(true);
+    const { call } = botSecretDeps();
     await call("vault/put", {
       destination: { name: "site", origin: "https://login.example.test", auth: { type: "login" } },
       value: JSON.stringify({ username: "person@example.test", password: FAKE_VALUE }),
@@ -684,8 +662,7 @@ describe("vault router", () => {
   });
 
   it("reveals a website login's fields in order", async () => {
-    const { auth, call } = botSecretDeps();
-    auth.hasRecentIdentityConfirmation.mockResolvedValue(true);
+    const { call } = botSecretDeps();
     const fields = [
       { label: "Account number", value: "12345678", hidden: false },
       { label: "Date of birth", value: FAKE_VALUE, hidden: true },

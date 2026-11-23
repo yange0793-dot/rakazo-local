@@ -40,7 +40,6 @@ describePostgres("finalizing a run (PostgreSQL)", () => {
       provisionMessagingIdentity(
         prisma,
         { provider: "sendblue", address },
-        { signupsEnabled: undefined, signupAllowlist: undefined },
       ),
     ));
     provisioned = true;

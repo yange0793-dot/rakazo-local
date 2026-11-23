@@ -11,6 +11,7 @@ import {
 } from "@rakazo/adapters";
 import type { UserDeviceList, UserDevicePairResponse } from "@rakazo/contracts";
 import {
+  isLocalInstallSessionId,
   USER_DEVICE_CONNECT_PATH,
   USER_DEVICE_PAIR_PATH,
   USER_DEVICE_PATH,
@@ -55,69 +56,6 @@ async function revokeDevice(
   const reason: UserDeviceRevokeReason | undefined = by === "session" ? "session-ended" : undefined;
   await devices.disconnect(deviceId, reason);
   return true;
-}
-
-/**
- * A computer stays paired only while the sign-in that paired it lasts, so signing out, a password
- * reset or signing out everywhere disconnects it. A password change that keeps the caller signed
- * in moves the caller's computers to the replacing session. A computer paired before sessions were
- * recorded is tied to none, so it ends only once the user has no sign-in left; its desktop app ties
- * it to its own sign-in when it next connects.
- */
-export async function endUserDeviceSession(
-  store: DeviceStore,
-  ended: { id: string; userId: string },
-  next?: { id: string },
-) {
-  const { prisma } = store;
-  const { userId } = ended;
-  if (next) {
-    await runAsSystem("move user devices to a new session", () =>
-      prisma.userDevice.updateMany({
-        where: { userId, sessionId: ended.id, revokedAt: null },
-        data: { sessionId: next.id },
-      }),
-    );
-    return;
-  }
-  const signedIn = await runAsSystem("check for a user's remaining sign-ins", () =>
-    prisma.session.findFirst({
-      where: { userId, expiresAt: { gt: new Date() } },
-      select: { id: true },
-    }),
-  );
-  const devices = await runAsSystem("find a session's user devices", () =>
-    prisma.userDevice.findMany({
-      where: {
-        userId,
-        revokedAt: null,
-        OR: [{ sessionId: ended.id }, ...(signedIn ? [] : [{ sessionId: null }])],
-      },
-      select: { id: true, sessionId: true },
-    }),
-  );
-  for (const device of devices)
-    await revokeDevice(store, device.id, userId, "session", device.sessionId);
-}
-
-/**
- * Disconnects every computer the user paired, as when their last sign-in ends. One that fails
- * does not keep the others paired; the failures are reported together at the end.
- */
-export async function revokeUserDevices(store: DeviceStore, userId: string) {
-  const devices = await runAsSystem("find a user's devices", () =>
-    store.prisma.userDevice.findMany({
-      where: { userId, revokedAt: null },
-      select: { id: true },
-    }),
-  );
-  const failures: unknown[] = [];
-  // Without a session to match: a computer moved to a new sign-in meanwhile goes too.
-  for (const device of devices)
-    await revokeDevice(store, device.id, userId, "session").catch((error: unknown) =>
-      failures.push(error),
-    );
-  if (failures.length) throw new AggregateError(failures, "Could not disconnect every computer");
 }
 
 /** The device socket itself is upgraded by the hub before Hono sees it. */
@@ -196,13 +134,7 @@ export function mountUserDeviceRoutes(app: Hono, deps: UserDeviceRouteDeps) {
     );
     if (!count) return c.body(null, 204);
     // A sign-out that ran while this was tying would have missed it.
-    const live = await runAsSystem("check a tied sign-in", () =>
-      prisma.session.findFirst({
-        where: { id: session.sessionId, expiresAt: { gt: new Date() } },
-        select: { id: true },
-      }),
-    );
-    if (!live) {
+    if (!isLocalInstallSessionId(session.sessionId)) {
       await revokeDevice(deps, device.id, device.userId, "session", session.sessionId);
       return c.json({ error: "Unauthorized" }, 401);
     }

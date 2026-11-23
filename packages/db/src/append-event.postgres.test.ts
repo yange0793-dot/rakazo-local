@@ -96,7 +96,6 @@ describePostgres("appending a thread event (PostgreSQL)", () => {
       provisionMessagingIdentity(
         prisma,
         { provider: "sendblue", address },
-        { signupsEnabled: undefined, signupAllowlist: undefined },
       ),
     ));
     provisioned = true;

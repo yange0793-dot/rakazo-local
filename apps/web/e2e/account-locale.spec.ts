@@ -1,5 +1,10 @@
 import { expect, test } from "@playwright/test";
-import { captureScreenshot, completeOnboarding, openUserSettings, signup } from "./helpers";
+import {
+  captureScreenshot,
+  completeOnboarding,
+  openLocalWorkspace,
+  openUserSettings,
+} from "./helpers";
 
 for (const language of [
   {
@@ -24,12 +29,7 @@ for (const language of [
   test(`${language.locale} settings and data controls stay translated after reload`, async ({
     page,
   }, testInfo) => {
-    await signup(
-      page,
-      `ui-locale-${language.locale}-${Date.now()}@rakazo.test`,
-      "password12",
-      "Locale QA",
-    );
+    await openLocalWorkspace(page, "Locale QA");
     await completeOnboarding(page, testInfo);
     const settings = await openUserSettings(page);
     const picker = settings.getByTestId("ui-locale-select");

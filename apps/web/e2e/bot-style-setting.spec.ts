@@ -1,5 +1,10 @@
 import { expect, test } from "@playwright/test";
-import { captureScreenshot, completeOnboarding, openUserSettings, signup } from "./helpers";
+import {
+  captureScreenshot,
+  completeOnboarding,
+  openLocalWorkspace,
+  openUserSettings,
+} from "./helpers";
 
 test("bot style stays available when bootstrap omits the saved preference", async ({
   page,
@@ -10,7 +15,7 @@ test("bot style stays available when bootstrap omits the saved preference", asyn
     delete body.json.me.botAvatarSet;
     await route.fulfill({ response, json: body });
   });
-  await signup(page, `bot-style-${Date.now()}@rakazo.test`, "password12", "Tester");
+  await openLocalWorkspace(page, "Tester");
   await completeOnboarding(page);
   const settings = await openUserSettings(page);
   const picker = settings.getByTestId("bot-style-select");

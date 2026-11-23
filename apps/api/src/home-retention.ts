@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
 import type { TransactionalEmailProvider } from "@rakazo/adapter-kit";
-import type { HomeDeletionReason } from "@rakazo/auth";
-import { emailLocale, homeDeletionEmail } from "@rakazo/auth";
+import type { HomeDeletionReason } from "@rakazo/mail";
+import { emailLocale, homeDeletionEmail } from "@rakazo/mail";
 import type { PrismaClient } from "@rakazo/db";
 import { hasModelAccess, needsBillingPortal, Prisma, runAsSystem } from "@rakazo/db";
 import { getLogger } from "@rakazo/logging";

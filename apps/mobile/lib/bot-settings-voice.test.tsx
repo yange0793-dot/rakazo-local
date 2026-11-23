@@ -66,7 +66,6 @@ vi.mock("./device-voice", () => ({ loadDeviceVoiceEnabled: async () => true }));
 vi.mock("./voice", () => ({ stopVoicePlayback: mocks.stopVoicePlayback }));
 vi.mock("expo-speech", () => ({ stop: mocks.stop, speak: mocks.speak }));
 vi.mock("./api-server", () => ({}));
-vi.mock("./api-auth", () => ({}));
 vi.mock("./api-live", () => ({}));
 vi.mock("./api", () => ({
   currentApiBase: () => "https://api.example.test",
@@ -109,7 +108,7 @@ vi.mock("./api", () => ({
   },
 }));
 vi.mock("./session", () => ({
-  loadSessionToken: async () => "token",
+  loadLocalInstallSessionId: async () => "token",
 }));
 vi.mock("./live-notifications", { spy: true });
 vi.mock("expo-modules-core", () => ({ requireNativeModule: vi.fn() }));

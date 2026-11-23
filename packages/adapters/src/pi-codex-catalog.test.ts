@@ -133,7 +133,8 @@ describe("fetchCodexCatalog", () => {
     const headers = new Headers(init?.headers);
     expect(headers.get("authorization")).toBe(`Bearer ${ACCESS_TOKEN}`);
     expect(headers.get("chatgpt-account-id")).toBe(ACCOUNT_ID);
-    expect(headers.get("originator")).toBe("rakazo");
+    expect(headers.get("originator")).toBe("codex_cli_rs");
+    expect(headers.get("user-agent")).toBe("codex_cli_rs/0.154.0 (external, cli)");
     expect(headers.get("accept")).toBe("application/json");
   });
 

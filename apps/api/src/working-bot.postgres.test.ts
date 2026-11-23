@@ -32,7 +32,6 @@ describe.skipIf(!enabled)("working bot visibility (PostgreSQL)", () => {
           provider: "sendblue",
           address: `working-fixture-${crypto.randomUUID()}`,
         },
-        { signupsEnabled: undefined, signupAllowlist: undefined },
       ),
     );
     const actor: Actor = { ...identity, email: "fixture@example.test", isDeploymentOwner: false };
@@ -181,7 +180,6 @@ describe.skipIf(!enabled)("working bot visibility (PostgreSQL)", () => {
       provisionMessagingIdentity(
         prisma,
         { provider: "sendblue", address: `routine-fixture-${crypto.randomUUID()}` },
-        { signupsEnabled: undefined, signupAllowlist: undefined },
       ),
     );
     const actor: Actor = { ...identity, email: "fixture@example.test", isDeploymentOwner: false };

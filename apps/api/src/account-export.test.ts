@@ -334,15 +334,14 @@ describe("account export archive", () => {
 describe("GET /api/account/export", () => {
   it("refuses a token that does not name a user", async () => {
     const app = new Hono();
-    const consumeAccountExportToken = vi.fn(async () => null);
+    const lookup = vi.fn(async () => []);
     mountAccountExportRoute(app, {
       ...stores(),
-      prisma: {} as never,
-      auth: { consumeAccountExportToken },
+      prisma: { $queryRaw: lookup } as never,
     });
     const response = await app.request("/api/account/export?token=used");
     expect(response.status).toBe(410);
     expect(response.headers.get("cache-control")).toBe("no-store");
-    expect(consumeAccountExportToken).toHaveBeenCalledWith("used");
+    expect(lookup).toHaveBeenCalledOnce();
   });
 });

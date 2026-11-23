@@ -44,12 +44,10 @@ import {
   rpc,
   selectedSpaceId,
   subscribeApiBase,
-  subscribeSessionRejected,
 } from "../lib/api";
 import { loadApiBase } from "../lib/api-server";
 import { clearAppBadge } from "../lib/app-badge";
 import { loadAppearancePreference, mobileTokens } from "../lib/appearance";
-import { replaceWithSignIn } from "../lib/auth-routing";
 import { AvatarScreenFocus } from "../lib/avatar-life";
 import { installClientUpdates, watchForegroundUpdates } from "../lib/client-update";
 import { loadHapticsPreference } from "../lib/haptics";
@@ -76,7 +74,7 @@ import { loadResponseStreamingPreference } from "../lib/response-streaming";
 import { clearSavedChats } from "../lib/saved-chats";
 import {
   currentReadySessionGeneration,
-  loadSessionToken,
+  loadLocalInstallSessionId,
   registerSessionDiskCache,
   subscribeSessionGeneration,
 } from "../lib/session";
@@ -119,7 +117,7 @@ void SplashScreen.preventAutoHideAsync().catch(() => undefined);
 
 const DIVIDER_GRAB_WIDTH = 24;
 // Screens that take the whole window even when it is wide enough for the chat list beside them.
-const FULL_WINDOW_ROUTES = new Set(["/sign-in", "/server", "/image", "/computer", "/share"]);
+const FULL_WINDOW_ROUTES = new Set(["/server", "/image", "/computer", "/share"]);
 
 /** On a wide window the chat list stays on the left and the stack shows the open chat beside it. */
 function SplitFrame({ children }: { children: ReactNode }) {
@@ -296,16 +294,7 @@ function LayoutContent() {
   useEffect(() => {
     const surface = Platform.OS;
     if (!ready || !screen || (surface !== "ios" && surface !== "android")) return;
-    let active = true;
-    void loadSessionToken()
-      .then((token) => {
-        if (active && token)
-          return rpc("analytics/screen", { screen, surface }, { skipSpaceAuthRecovery: true });
-      })
-      .catch(() => undefined);
-    return () => {
-      active = false;
-    };
+    void rpc("analytics/screen", { screen, surface }, { skipSpaceAuthRecovery: true }).catch(() => undefined);
   }, [ready, screen]);
   const [appearanceReady, setAppearanceReady] = useState(false);
   const resolved = useResolvedAppearance();
@@ -338,11 +327,6 @@ function LayoutContent() {
         .catch(() => undefined);
   }, [appearanceReady, ready]);
 
-  useEffect(() => {
-    if (!ready) return;
-    // A session revoked or expired on the server ends here, from whichever screen noticed it.
-    return subscribeSessionRejected(() => replaceWithSignIn());
-  }, [ready]);
 
   useEffect(() => {
     if (!ready) return;
@@ -376,7 +360,7 @@ function LayoutContent() {
         // The native poller stores the locale its notification copy uses, so the
         // restart waits for the language to load rather than saving the default.
         // Notification restoration must not keep the native splash visible.
-        void loadSessionToken()
+        void loadLocalInstallSessionId()
           .then((token) =>
             resumeLiveNotifications(currentApiBase(), token, selectedSpaceId() ?? ""),
           )
@@ -428,7 +412,6 @@ function LayoutContent() {
                       }}
                     />
                     <Stack.Screen name="share" options={{ headerShown: false }} />
-                    <Stack.Screen name="sign-in" options={{ headerShown: false }} />
                     <Stack.Screen
                       name="paywall"
                       options={{

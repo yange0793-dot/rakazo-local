@@ -119,7 +119,7 @@ const InputSchema = z.strictObject({
     route: z.string().min(1),
     budget: z.strictObject({
       maxToolCalls: z.number().int().nonnegative(),
-      maxTotalTokens: z.number().int().nonnegative(),
+      maxTotalTokens: z.number().int().nonnegative().optional(),
       timeoutMs: z.number().int().nonnegative().max(2_147_483_647),
     }),
   }),
@@ -268,7 +268,7 @@ export interface WorkImprovementComparison {
       provider: string;
       id: string;
       apiProtocol: AgentRunRequest["model"]["apiProtocol"] | null;
-      maxTokens: number;
+      maxTokens: number | null;
       contextWindow: number | null;
       thinkingLevel: AgentRunRequest["model"]["thinkingLevel"] | null;
     };
@@ -475,7 +475,7 @@ async function runCase(
   revision: WorkImprovementInput["baseline"],
   deps: WorkImprovementDeps,
   scripted: boolean,
-  maxTokens: number,
+  maxTokens: number | undefined,
 ): Promise<WorkImprovementRun> {
   const runId = randomUUID();
   const workspaceId = randomUUID();
@@ -584,7 +584,10 @@ async function runCase(
     )
       issue("missing_usage", "A model call reported neither a total nor input and output counts.");
     const spent = [...usageByCall.values()].reduce((sum, usage) => sum + reportedTokens(usage), 0);
-    if (spent + unmeasuredReservedTokens > budget.maxTotalTokens)
+    if (
+      budget.maxTotalTokens !== undefined &&
+      spent + unmeasuredReservedTokens > budget.maxTotalTokens
+    )
       issue("token_budget_exhausted", "Measured token usage exceeded the run budget.", true);
   };
 
@@ -604,7 +607,8 @@ async function runCase(
       const reserved = [...reservations.values()].reduce((sum, item) => sum + item.tokens, 0);
       if (
         bound === null ||
-        spent + unmeasuredReservedTokens + reserved + bound > budget.maxTotalTokens
+        (budget.maxTotalTokens !== undefined &&
+          spent + unmeasuredReservedTokens + reserved + bound > budget.maxTotalTokens)
       ) {
         issue("token_budget_exhausted", "There is insufficient budget for this model call.", true);
         throw new Error("Token budget exhausted");
@@ -1025,7 +1029,7 @@ async function runArm(
   revision: WorkImprovementInput["baseline"],
   deps: WorkImprovementDeps,
   scripted: boolean,
-  maxTokens: number,
+  maxTokens: number | undefined,
 ): Promise<WorkImprovementRun> {
   const first = await runCase(input, fixture, revision, deps, scripted, maxTokens);
   const refused = first.errors.some((error) => error.code === "upstream_error");
@@ -1047,12 +1051,17 @@ export async function compareWorkImprovement(
   const createdAt = new Date().toISOString();
   const descriptor = deps.runtime.describe();
   const scripted = descriptor.capabilities.scripted;
+  const tokenBudget = input.execution.budget.maxTotalTokens;
   const modelOutputLimit =
     input.execution.model.maxTokens ??
-    Math.max(1, Math.floor(input.execution.budget.maxTotalTokens / 2));
-  if (tokenCount(modelOutputLimit) === null || modelOutputLimit < 1)
+    (tokenBudget === undefined ? undefined : Math.max(1, Math.floor(tokenBudget / 2)));
+  if (
+    modelOutputLimit !== undefined &&
+    (tokenCount(modelOutputLimit) === null || modelOutputLimit < 1)
+  )
     throw new Error("The resolved model must have a positive output token limit.");
-  const maxTokens = Math.min(modelOutputLimit, input.execution.budget.maxTotalTokens);
+  const maxTokens =
+    tokenBudget === undefined ? modelOutputLimit : Math.min(modelOutputLimit!, tokenBudget);
   // Every run here shares one model route, so its concurrency limit is the resource to respect:
   // an unbounded fan-out gets some arms refused upstream and leaves the whole trial undecided.
   const cases: WorkImprovementComparison["cases"] = [];
@@ -1185,7 +1194,7 @@ export async function compareWorkImprovement(
         provider: input.execution.model.provider,
         id: input.execution.model.id,
         apiProtocol: input.execution.model.apiProtocol ?? null,
-        maxTokens,
+        maxTokens: maxTokens ?? null,
         contextWindow: input.execution.model.contextWindow ?? null,
         thinkingLevel: input.execution.model.thinkingLevel ?? null,
       },
@@ -1243,10 +1252,12 @@ export async function evaluateWorkImprovementRevision(
 ): Promise<Array<{ fixture: WorkImprovementCase; run: WorkImprovementRun }>> {
   validateWorkImprovementCases(input.cases, input.outputContract);
   const scripted = deps.runtime.describe().capabilities.scripted;
+  const tokenBudget = input.execution.budget.maxTotalTokens;
   const modelOutputLimit =
     input.execution.model.maxTokens ??
-    Math.max(1, Math.floor(input.execution.budget.maxTotalTokens / 2));
-  const maxTokens = Math.min(modelOutputLimit, input.execution.budget.maxTotalTokens);
+    (tokenBudget === undefined ? undefined : Math.max(1, Math.floor(tokenBudget / 2)));
+  const maxTokens =
+    tokenBudget === undefined ? modelOutputLimit : Math.min(modelOutputLimit!, tokenBudget);
   const results: Array<{ fixture: WorkImprovementCase; run: WorkImprovementRun }> = [];
   for (let start = 0; start < input.cases.length; start += CASE_CONCURRENCY)
     results.push(

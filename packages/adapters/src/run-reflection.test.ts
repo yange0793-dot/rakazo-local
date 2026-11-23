@@ -76,6 +76,8 @@ const LESSON = {
 
 type HarnessOptions = {
   output?: string;
+  taskPrompt?: string;
+  finalReply?: string;
   status?: string;
   error?: string | null;
   tainted?: boolean;
@@ -202,7 +204,11 @@ function harness(options: HarnessOptions = {}) {
         thread: options.thread ?? RUN.thread,
       })),
     },
-    task: { findUnique: vi.fn(async () => ({ prompt: "compare three venues in Lisbon" })) },
+    task: {
+      findUnique: vi.fn(async () => ({
+        prompt: options.taskPrompt ?? "compare three venues in Lisbon",
+      })),
+    },
     message: {
       findMany: vi.fn(async (args: { where: { role?: string; authorUserId?: string } }) =>
         args.where.role === "user"
@@ -216,7 +222,9 @@ function harness(options: HarnessOptions = {}) {
               {
                 seq: 5,
                 role: "bot",
-                blocks: [{ kind: "text", text: "Three venues fit the budget." }],
+                blocks: [
+                  { kind: "text", text: options.finalReply ?? "Three venues fit the budget." },
+                ],
               },
             ],
       ),
@@ -468,6 +476,61 @@ describe("reflectRun", () => {
       expect.anything(),
       expect.objectContaining({ type: "usage" }),
       expect.objectContaining({ operationId: "reflect:run-1", operationKind: "learning" }),
+    );
+  });
+
+  it("passes complete task and reply tails to the reviewer with escaped, source-bound evidence", async () => {
+    const taskPrefix = "Synthetic task detail.\n".repeat(120);
+    const replyPrefix = "Synthetic reply detail.\n".repeat(300);
+    const taskTail = "Boundary case: <late-item> arrives after the first count & must be included.";
+    const replyTail =
+      "Boundary claim: <late-item> will never affect the accumulated count & total.";
+    const correction =
+      "Correct the claim about <late-item>: later arrivals affect the accumulated total.";
+    const h = harness({
+      taskPrompt: `  \n${taskPrefix}${taskTail}\n  `,
+      finalReply: `  \n${replyPrefix}${replyTail}\n  `,
+      feedback: [{ id: "boundary-correction", text: correction }],
+      output: JSON.stringify({
+        lessons: [
+          {
+            cue: "Counting late arrivals",
+            lesson: "Include late arrivals when checking the final accumulated total.",
+            evidence: { kind: "user_feedback", quote: correction, messageId: "made-up" },
+          },
+        ],
+        skill: DRAFT,
+      }),
+    });
+
+    await reflectRun(h.deps, { runId: "run-1" });
+
+    expect(h.runtimeRun).toHaveBeenCalledOnce();
+    const [request] = h.runtimeRun.mock.calls[0]!;
+    expect(request.prompt).toContain(
+      `<run_task>\n${taskPrefix}Boundary case: &lt;late-item&gt; arrives after the first count &amp; must be included.\n</run_task>`,
+    );
+    expect(request.prompt).toContain(
+      `<final_reply>\n${replyPrefix}Boundary claim: &lt;late-item&gt; will never affect the accumulated count &amp; total.\n</final_reply>`,
+    );
+    expect(request.prompt).toContain(
+      "<user_feedback>\nCorrect the claim about &lt;late-item&gt;: later arrivals affect the accumulated total.\n</user_feedback>",
+    );
+    expect(h.saveLesson).toHaveBeenCalledWith(
+      expect.objectContaining({
+        provenance: expect.objectContaining({
+          runId: "run-1",
+          threadId: "thread-1",
+          harness: expect.objectContaining({
+            evidence: {
+              kind: "user_feedback",
+              quote: correction,
+              messageId: "boundary-correction",
+            },
+          }),
+        }),
+      }),
+      expect.anything(),
     );
   });
 

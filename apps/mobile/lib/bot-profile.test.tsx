@@ -57,7 +57,6 @@ const {
 
 vi.mock("./side-insets", () => ({ useSideInsets: () => ({}) }));
 vi.mock("./api-server", () => ({}));
-vi.mock("./api-auth", () => ({}));
 vi.mock("./api-live", () => ({}));
 vi.mock("./api", () => ({
   rpc,
@@ -66,7 +65,7 @@ vi.mock("./api", () => ({
   captureApiRequestContext: requestContext,
 }));
 vi.mock("./session", () => ({
-  loadSessionToken: async () => "token",
+  loadLocalInstallSessionId: async () => "token",
   currentSessionGeneration: () => session.generation,
 }));
 vi.mock("./live-notifications", () => ({ afterChatNotifyChange }));

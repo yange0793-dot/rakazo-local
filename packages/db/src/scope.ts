@@ -1,6 +1,5 @@
 import type { Actor } from "@rakazo/contracts";
 import type { PrismaClient } from "./client.js";
-import { runAsSystem } from "./row-security.js";
 
 export class IsolationError extends Error {
   constructor(message = "Resource not found") {
@@ -17,20 +16,13 @@ export class BotSectionNameConflictError extends Error {
   }
 }
 
-/**
- * The actor for a request. Without a chosen Space, a session opens the organization it was
- * first given, which is the one the user was last active in, so its requests never drift
- * between organizations as runs finish elsewhere.
- */
+/** The actor for a request. A missing Space opens the user's most recently active Space. */
 export async function requireMembership(
   prisma: PrismaClient,
   userId: string,
   requestedSpaceId?: string | null,
-  sessionId?: string,
 ): Promise<Actor> {
-  const organizationId = requestedSpaceId
-    ? null
-    : await sessionOrganizationId(prisma, userId, sessionId);
+  const organizationId = requestedSpaceId ? null : await recentOrganizationId(prisma, userId);
   const membership = await prisma.spaceMember.findFirst({
     where: requestedSpaceId
       ? { userId, spaceId: requestedSpaceId }
@@ -51,47 +43,6 @@ export async function requireMembership(
     email: membership.member.user.email,
     isDeploymentOwner: false,
   };
-}
-
-async function sessionOrganizationId(
-  prisma: PrismaClient,
-  userId: string,
-  sessionId: string | undefined,
-): Promise<string | null> {
-  return runAsSystem("pick the organization a session opens", async () => {
-    const pinned = sessionId ? await sessionPin(prisma, sessionId) : null;
-    if (pinned && (await opensInOrganization(prisma, userId, pinned))) return pinned;
-    const chosen = await recentOrganizationId(prisma, userId);
-    if (!sessionId || !chosen) return chosen;
-    // Replace only the pin this request read, so concurrent first requests settle on one.
-    const { count } = await prisma.session.updateMany({
-      where: { id: sessionId, userId, activeOrganizationId: pinned },
-      data: { activeOrganizationId: chosen },
-    });
-    if (count > 0) return chosen;
-    const winner = await sessionPin(prisma, sessionId);
-    return winner && (await opensInOrganization(prisma, userId, winner)) ? winner : chosen;
-  });
-}
-
-async function sessionPin(prisma: PrismaClient, sessionId: string): Promise<string | null> {
-  const session = await prisma.session.findUnique({
-    where: { id: sessionId },
-    select: { activeOrganizationId: true },
-  });
-  return session?.activeOrganizationId ?? null;
-}
-
-async function opensInOrganization(
-  prisma: PrismaClient,
-  userId: string,
-  organizationId: string,
-): Promise<boolean> {
-  const membership = await prisma.spaceMember.findFirst({
-    where: { userId, organizationId, space: { deletingAt: null } },
-    select: { id: true },
-  });
-  return membership !== null;
 }
 
 /** The organization of the user's latest finished run, else of the Space they would open first. */

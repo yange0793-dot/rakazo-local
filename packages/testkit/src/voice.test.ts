@@ -6,7 +6,8 @@ import type { PrismaClient } from "@rakazo/db";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import type { BotIntroHarness } from "./discard-bot-intro.js";
 import { discardBotIntroFromCreate } from "./discard-bot-intro.js";
-import { sessionCookieHeader } from "./index.js";
+import { createTestSpace, testSpaceHeaders } from "./index.js";
+
 import { asSystem } from "./system-db.js";
 
 type App = { request: (input: string, init?: RequestInit) => Response | Promise<Response> };
@@ -23,7 +24,6 @@ describeVoice("voice credentials and speech HTTP", () => {
   let app: App;
   let prisma: PrismaClient;
   let stop: () => Promise<void>;
-  const stamp = Date.now();
   const dataDir = mkdtempSync(path.join(tmpdir(), "rakazo-voice-"));
 
   beforeAll(async () => {
@@ -45,23 +45,23 @@ describeVoice("voice credentials and speech HTTP", () => {
   });
 
   it("connects a scripted key, speaks, and transcribes without leaking the secret", async () => {
-    const cookie = await signup(app, `voice-${stamp}@rakazo.test`, "Voice User");
-    const other = await signup(app, `voice-other-${stamp}@rakazo.test`, "Other Voice");
+    const scope = await testSpace(app, "Voice User");
+    const other = await testSpace(app, "Other Voice");
 
     const before = await rpc<{ ready: boolean; utterances: string[] }>(
       app,
-      cookie,
+      scope,
       "voice/prepare",
       { text: "Hello there." },
     );
     expect(before).toEqual({ ready: false, utterances: [] });
 
-    const catalog = await rpc<Array<{ id: string }>>(app, cookie, "voice/catalog");
+    const catalog = await rpc<Array<{ id: string }>>(app, scope, "voice/catalog");
     expect(catalog.map((entry) => entry.id)).toContain("scripted");
 
     const connected = await rpc<{ hasKey: boolean; provider: string; voiceId: string }>(
       app,
-      cookie,
+      scope,
       "voice/connect",
       { provider: "scripted", apiKey: "fake-scripted-voice-key" },
     );
@@ -72,7 +72,7 @@ describeVoice("voice credentials and speech HTTP", () => {
 
     const credentials = await rpc<Array<{ hasKey: boolean; voiceId: string }>>(
       app,
-      cookie,
+      scope,
       "voice/credentials",
     );
     expect(credentials).toEqual([
@@ -82,7 +82,7 @@ describeVoice("voice credentials and speech HTTP", () => {
 
     const prepared = await rpc<{ ready: boolean; utterances: string[] }>(
       app,
-      cookie,
+      scope,
       "voice/prepare",
       { text: "Hello there. How are you?" },
     );
@@ -93,7 +93,7 @@ describeVoice("voice credentials and speech HTTP", () => {
       method: "POST",
       headers: {
         "content-type": "application/json",
-        cookie,
+        ...testSpaceHeaders(scope),
         origin: "http://127.0.0.1:5173",
       },
       body: JSON.stringify({ text: "Hello there." }),
@@ -106,7 +106,7 @@ describeVoice("voice credentials and speech HTTP", () => {
       method: "POST",
       headers: {
         "content-type": "application/json",
-        cookie,
+        ...testSpaceHeaders(scope),
         origin: "http://127.0.0.1:5173",
       },
       body: JSON.stringify({
@@ -117,7 +117,7 @@ describeVoice("voice credentials and speech HTTP", () => {
     expect(transcribed.status).toBe(200);
     expect(await transcribed.json()).toEqual({ text: SCRIPTED_TRANSCRIPT });
 
-    const bot = await rpc<{ id: string }>(app, cookie, "bots/create", {
+    const bot = await rpc<{ id: string }>(app, scope, "bots/create", {
       name: "Speaker",
       title: "",
       description: "",
@@ -130,24 +130,20 @@ describeVoice("voice credentials and speech HTTP", () => {
     });
     expect(stolen.status).toBeGreaterThanOrEqual(400);
 
-    const unauth = await app.request("/api/voice/speak", {
+    const remote = await app.request("/api/voice/speak", {
       method: "POST",
-      headers: { "content-type": "application/json", origin: "http://127.0.0.1:5173" },
+      headers: { "content-type": "application/json", origin: "https://remote.example.test" },
       body: JSON.stringify({ text: "hello" }),
     });
-    expect(unauth.status).toBe(401);
+    expect(remote.status).toBe(403);
   });
 
-  it("disconnects the actor credential and leaves another user's key in place", async () => {
-    const cookie = await signup(app, `voice-disconnect-${stamp}@rakazo.test`, "Voice Disconnect");
-    const other = await signup(
-      app,
-      `voice-disconnect-other-${stamp}@rakazo.test`,
-      "Other Voice Disconnect",
-    );
-    const me = await rpc<{ userId: string }>(app, cookie, "me");
+  it("disconnects the local owner's shared voice credential from either space", async () => {
+    const scope = await testSpace(app, "Voice Disconnect");
+    const other = await testSpace(app, "Other Voice Disconnect");
+    const me = await rpc<{ userId: string }>(app, scope, "me");
 
-    await rpc(app, cookie, "voice/connect", {
+    await rpc(app, scope, "voice/connect", {
       provider: "scripted",
       apiKey: "fake-scripted-voice-key",
     });
@@ -158,18 +154,11 @@ describeVoice("voice credentials and speech HTTP", () => {
     await expect(rpc(app, other, "voice/disconnect", { provider: "scripted" })).resolves.toEqual({
       ok: true,
     });
-    await expect(
-      prisma.userVoiceCredential.findUnique({ where: { id: stored.id } }),
-    ).resolves.toMatchObject({ id: stored.id });
-    await expect(
-      prisma.secret.findUnique({ where: { id: stored.secretId } }),
-    ).resolves.toMatchObject({ id: stored.secretId });
-
-    await expect(rpc(app, cookie, "voice/disconnect", { provider: "scripted" })).resolves.toEqual({
+    await expect(rpc(app, scope, "voice/disconnect", { provider: "scripted" })).resolves.toEqual({
       ok: true,
     });
     await expect(
-      rpc<Array<{ provider: string }>>(app, cookie, "voice/credentials"),
+      rpc<Array<{ provider: string }>>(app, scope, "voice/credentials"),
     ).resolves.toEqual([]);
     await expect(
       prisma.userVoiceCredential.findUnique({ where: { id: stored.id } }),
@@ -182,43 +171,37 @@ describeVoice("voice credentials and speech HTTP", () => {
     ).resolves.toBe(0);
     await expect(prisma.secret.findUnique({ where: { id: stored.secretId } })).resolves.toBeNull();
 
-    const prepared = await rpc<{ ready: boolean }>(app, cookie, "voice/prepare", {
+    const prepared = await rpc<{ ready: boolean }>(app, scope, "voice/prepare", {
       text: "Hello there.",
     });
     expect(prepared.ready).toBe(false);
 
-    await expect(rpc(app, cookie, "voice/disconnect", { provider: "scripted" })).resolves.toEqual({
+    await expect(rpc(app, scope, "voice/disconnect", { provider: "scripted" })).resolves.toEqual({
       ok: true,
     });
   });
 });
 
-async function signup(app: App, email: string, name: string) {
-  const response = await app.request("/api/auth/sign-up/email", {
-    method: "POST",
-    headers: { "content-type": "application/json", origin: "http://127.0.0.1:5173" },
-    body: JSON.stringify({ email, password: "test-password-123", name }),
-  });
-  expect(response.status).toBeLessThan(400);
-  return sessionCookieHeader(response);
+async function testSpace(app: App, name = "Test") {
+  return createTestSpace(app, name);
 }
 
-async function rpc<T>(app: App, cookie: string, proc: string, body: unknown = {}): Promise<T> {
-  const res = await raw(app, cookie, proc, body);
+async function rpc<T>(app: App, scope: string, proc: string, body: unknown = {}): Promise<T> {
+  const res = await raw(app, scope, proc, body);
   const text = await res.text();
   const parsed = JSON.parse(text) as { json?: T; error?: { message?: string } };
   if (res.status >= 400 || parsed.error) {
     throw new Error(`${proc} ${res.status}: ${parsed.error?.message ?? text}`);
   }
-  return discardBotIntroFromCreate(botIntroHarness, cookie, proc, parsed.json as T);
+  return discardBotIntroFromCreate(botIntroHarness, scope, proc, parsed.json as T);
 }
 
-async function raw(app: App, cookie: string, proc: string, body: unknown) {
+async function raw(app: App, scope: string, proc: string, body: unknown) {
   return app.request(`/rpc/${proc}`, {
     method: "POST",
     headers: {
       "content-type": "application/json",
-      cookie,
+      ...testSpaceHeaders(scope),
       origin: "http://127.0.0.1:5173",
     },
     body: JSON.stringify({ json: body }),

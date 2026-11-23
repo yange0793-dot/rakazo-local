@@ -3,7 +3,7 @@ import type { WorkImprovementCase, WorkImprovementOutput } from "./work-improvem
 
 export const FILE_DELIVERY_PILOT = {
   id: "file-delivery",
-  revision: "3",
+  revision: "4",
   outputContract: {
     checkIds: ["installation", "directory", "upload"],
     observationIds: [
@@ -45,6 +45,7 @@ export function fileDeliveryPilotCases(project: string): WorkImprovementCase[] {
     { id: "runtime", split: "holdout", category: "success", protection: true },
     { id: "selected", split: "holdout", category: "insufficient_evidence", protection: true },
     { id: "other-project", split: "holdout", category: "scope_exception", protection: true },
+    { id: "manifest-only", split: "holdout", category: "insufficient_evidence", protection: true },
   ] as const;
   return variants.map((variant, index) => {
     const caseProject = variant.id === "other-project" ? `${project}-unrelated` : project;
@@ -66,6 +67,8 @@ export function fileDeliveryPilotCases(project: string): WorkImprovementCase[] {
             installed[file.path] !== undefined && hash(installed[file.path]!) === file.sha256,
         })),
         scope: "Only manifest paths were checked. Other installed paths were not inspected.",
+        directoryCapture:
+          variant.id === "manifest-only" ? "manifest_members_only" : "full_directory",
       }),
       "upload.json": JSON.stringify({
         state: variant.id === "selected" ? "selected" : "uploaded",
@@ -96,6 +99,11 @@ export function fileDeliveryPilotCases(project: string): WorkImprovementCase[] {
       expected = output({
         outcome: "unknown",
         checks: { installation: "pass", directory: "pass", upload: "unknown" },
+      });
+    } else if (variant.id === "manifest-only") {
+      expected = output({
+        outcome: "unknown",
+        checks: { installation: "pass", directory: "unknown", upload: "pass" },
       });
     } else if (variant.id === "other-project") {
       expected = output({
@@ -128,6 +136,7 @@ export function fileDeliveryPilotCases(project: string): WorkImprovementCase[] {
         task: [
           "Verify this retained delivery for the project named in request.json and report the result.",
           "What the fields mean: installation is whether the manifest's files are installed intact; directory is whether installed/ holds exactly the manifest's files apart from allowed runtime files; upload is whether the upload completed.",
+          "installation.json records the scope of the manifest checks and how the retained installed/ snapshot was captured.",
           "Observation paths are relative to installed/ and list only files you found or found missing there: missing_files are manifest files absent from installed/; hash_mismatches are manifest files whose installed content differs; excluded_runtime_files are files present in installed/ that request.json allows as runtime exclusions; unexpected_files are other files present in installed/ outside the manifest.",
           "outcome is failed when any check fails, otherwise unknown when any check is unknown, otherwise complete. When the manifest belongs to a different project than request.json names, outcome is out_of_scope and every check is not_applicable.",
         ].join("\n"),
@@ -142,6 +151,9 @@ export function fileDeliveryPilotCases(project: string): WorkImprovementCase[] {
           : [
               { tool: "list_files" as const, path: "installed" },
               { tool: "read_file" as const, path: "upload.json" },
+              ...(variant.id === "manifest-only"
+                ? [{ tool: "read_file" as const, path: "installation.json" }]
+                : []),
             ]),
       ],
     };

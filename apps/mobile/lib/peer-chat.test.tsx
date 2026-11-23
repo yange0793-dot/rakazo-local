@@ -24,7 +24,6 @@ vi.mock("../components/native-symbol", () => ({ NativeSymbol: () => null }));
 vi.mock("../components/inline-image-attachment", () => ({ InlineImageAttachment: () => null }));
 vi.mock("./artifact-open", () => ({ openMobileArtifact: vi.fn() }));
 vi.mock("./api-server", () => ({}));
-vi.mock("./api-auth", () => ({}));
 vi.mock("./api-live", () => ({}));
 vi.mock("./api", () => ({ rpc }));
 vi.mock("./side-insets", () => ({ useSideInsets: () => ({}) }));

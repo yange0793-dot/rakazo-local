@@ -1,10 +1,10 @@
 import { expect, test } from "@playwright/test";
-import { captureScreenshot, completeOnboarding, signup } from "./helpers";
+import { captureScreenshot, completeOnboarding, openLocalWorkspace } from "./helpers";
 
 test("ordinary accounts can add personal MCP connections without server setup", async ({
   page,
 }, testInfo) => {
-  await signup(page, `personal-mcp-${Date.now()}@rakazo.test`, "password12", "Personal MCP");
+  await openLocalWorkspace(page, "Personal MCP");
   await completeOnboarding(page);
   await page.goto("/integrations/setup");
   await expect(page.getByRole("heading", { name: "Add MCP server" })).toBeVisible();

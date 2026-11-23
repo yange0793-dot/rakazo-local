@@ -184,15 +184,24 @@ describe("LangMem extractor transport", () => {
         },
       ],
     });
-    const complete = vi.fn(async (_request: MemoryCompletionRequest) => ({
+    const complete = vi.fn(async (_request: MemoryCompletionRequest, _context: AdapterContext) => ({
       content: "",
-      toolCalls: [
-        {
-          id: "call_a",
-          name: "DurableFact",
-          args: { content: "用户偏好深色模式" },
-        },
-      ],
+      toolCalls:
+        complete.mock.calls.length === 1
+          ? [
+              {
+                id: "call_a",
+                name: "DurableFact",
+                args: { content: "用户偏好深色模式" },
+              },
+            ]
+          : [
+              {
+                id: "call_judge",
+                name: "judge_memory_support",
+                args: { decisions: [{ index: 0, supported: true }] },
+              },
+            ],
     }));
     const extractor = createLangMemExtractor({
       pythonPath: child.pythonPath,
@@ -207,18 +216,24 @@ describe("LangMem extractor transport", () => {
         category: "preference",
       },
     ]);
-    expect(complete).toHaveBeenCalledTimes(1);
+    expect(complete).toHaveBeenCalledTimes(2);
     expect(complete.mock.calls[0]?.[0]).toEqual(completionRequest);
+    expect(complete.mock.calls[1]?.[0].messages[0]?.content).toContain("Rubric v1");
+    expect(complete.mock.calls[1]?.[1].operationId).toContain("memory-support:v1");
   });
 
   it("asks the child for the removal-capable protocol and returns a verified removal", async () => {
+    const removalRequest = {
+      ...request,
+      messages: [{ ...request.messages[0]!, content: "请忘掉深色模式偏好" }],
+    };
     const child = writeChild("", {
       type: "result",
       changes: [
         {
           content: "用户喜欢浅色模式",
           sourceMessageId: "m1",
-          sourceQuote: "以后都用深色模式",
+          sourceQuote: "请忘掉深色模式偏好",
           category: "preference",
           replacesId: "f1",
           expectedRevision: 2,
@@ -226,17 +241,30 @@ describe("LangMem extractor transport", () => {
         },
       ],
     });
+    const complete = vi
+      .fn()
+      .mockResolvedValueOnce({ content: "", toolCalls: [] })
+      .mockResolvedValueOnce({
+        content: "",
+        toolCalls: [
+          {
+            id: "call_judge",
+            name: "judge_memory_support",
+            args: { decisions: [{ index: 0, supported: true }] },
+          },
+        ],
+      });
     const extractor = createLangMemExtractor({
       pythonPath: child.pythonPath,
       scriptPath: child.scriptPath,
-      complete: async () => ({ content: "", toolCalls: [] }),
+      complete,
     });
 
-    await expect(extractor.extract(request, context)).resolves.toEqual([
+    await expect(extractor.extract(removalRequest, context)).resolves.toEqual([
       {
         content: "用户喜欢浅色模式",
         sourceMessageId: "m1",
-        sourceQuote: "以后都用深色模式",
+        sourceQuote: "请忘掉深色模式偏好",
         category: "preference",
         replacesId: "f1",
         expectedRevision: 2,
@@ -249,7 +277,7 @@ describe("LangMem extractor transport", () => {
     });
   });
 
-  it("drops a quote that is not in a new user message instead of failing the batch", async () => {
+  it("rejects an unrelated fact even when its quote occurs in the source", async () => {
     const child = writeChild("", {
       type: "result",
       changes: [
@@ -267,19 +295,52 @@ describe("LangMem extractor transport", () => {
         },
       ],
     });
+    const complete = vi
+      .fn()
+      .mockResolvedValueOnce({ content: "", toolCalls: [] })
+      .mockResolvedValueOnce({
+        content: "",
+        toolCalls: [
+          {
+            id: "call_judge",
+            name: "judge_memory_support",
+            args: { decisions: [{ index: 0, supported: false }] },
+          },
+        ],
+      });
     const extractor = createLangMemExtractor({
       pythonPath: child.pythonPath,
       scriptPath: child.scriptPath,
-      complete: async () => ({ content: "", toolCalls: [] }),
+      complete,
     });
-    await expect(extractor.extract(request, context)).resolves.toEqual([
-      {
-        content: "用户偏好先写测试",
-        sourceMessageId: "m1",
-        sourceQuote: "以后都用深色模式",
-        category: "preference",
-      },
-    ]);
+    await expect(extractor.extract(request, context)).resolves.toEqual([]);
+    expect(complete.mock.calls[1]?.[0].messages[1]?.content).toContain("用户偏好先写测试");
+  });
+
+  it("fails closed when the semantic judge returns malformed output", async () => {
+    const child = writeChild("", {
+      type: "result",
+      changes: [
+        {
+          content: "用户偏好深色模式",
+          sourceMessageId: "m1",
+          sourceQuote: "以后都用深色模式",
+          category: "preference",
+        },
+      ],
+    });
+    const complete = vi
+      .fn()
+      .mockResolvedValueOnce({ content: "", toolCalls: [] })
+      .mockResolvedValueOnce({ content: "", toolCalls: [] });
+    const extractor = createLangMemExtractor({
+      pythonPath: child.pythonPath,
+      scriptPath: child.scriptPath,
+      complete,
+    });
+    await expect(extractor.extract(request, context)).rejects.toThrow(
+      "Memory support judge returned no valid decision tool call.",
+    );
   });
 
   it("names a configured extractor path that is gone instead of failing the spawn", async () => {
@@ -558,6 +619,64 @@ describe("runtime memory completion", () => {
         tool_call_id: "call_a",
       });
       expect(usage).toHaveBeenCalled();
+    } finally {
+      await new Promise<void>((resolve, reject) => {
+        server.close((error) => (error ? reject(error) : resolve()));
+        server.closeAllConnections();
+      });
+    }
+  }, 30_000);
+
+  it("uses automatic tool choice for Responses memory calls", async () => {
+    const bodies: Array<Record<string, unknown>> = [];
+    const server = createServer((incoming, response) => {
+      void (async () => {
+        const chunks: Buffer[] = [];
+        for await (const chunk of incoming) chunks.push(Buffer.from(chunk));
+        bodies.push(JSON.parse(Buffer.concat(chunks).toString("utf8")));
+        response.writeHead(200, { "content-type": "text/event-stream" });
+        response.end(
+          [
+            {
+              type: "response.created",
+              response: { id: "resp_fixture", model: "fixture-model", status: "in_progress" },
+            },
+            {
+              type: "response.completed",
+              response: {
+                id: "resp_fixture",
+                status: "completed",
+                output: [],
+                usage: { input_tokens: 1, output_tokens: 0, total_tokens: 1 },
+              },
+            },
+          ]
+            .map((event) => `data: ${JSON.stringify(event)}\n\n`)
+            .join(""),
+        );
+      })().catch(() => response.destroy());
+    });
+    server.listen(0, "127.0.0.1");
+    await once(server, "listening");
+    const address = server.address();
+    if (!address || typeof address === "string") throw new Error("Fixture endpoint unavailable");
+    try {
+      const complete = createRuntimeMemoryCompletion({
+        runtime,
+        resolveModel: resolveModel({
+          provider: "openai-compatible",
+          id: "fixture-model",
+          apiKey: "fixture-key",
+          baseUrl: `http://127.0.0.1:${address.port}/v1`,
+          apiProtocol: "responses",
+          allowPrivateEndpoint: true,
+        }),
+      });
+      await expect(complete(completionRequest, context)).resolves.toMatchObject({
+        content: "",
+        toolCalls: [],
+      });
+      expect(bodies[0]?.tool_choice).toBe("auto");
     } finally {
       await new Promise<void>((resolve, reject) => {
         server.close((error) => (error ? reject(error) : resolve()));

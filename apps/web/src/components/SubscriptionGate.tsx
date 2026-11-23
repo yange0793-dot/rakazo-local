@@ -4,7 +4,7 @@ import { Dialog, DialogContent } from "@rakazo/ui-web";
 import type { ReactNode } from "react";
 import { createContext, Suspense, useContext, useEffect, useRef, useState } from "react";
 import { useSearchParams } from "react-router-dom";
-import { fetchAuthCapabilities } from "../lib/auth-capabilities";
+import { fetchAppCapabilities } from "../lib/app-capabilities";
 import { peekInitialBootstrap } from "../lib/bootstrap";
 import { lazyComponent } from "../lib/preload-recovery";
 import { loadBillingStatus } from "../lib/referral";
@@ -77,7 +77,7 @@ export function SubscriptionGate({
 
   useEffect(() => {
     let active = true;
-    fetchAuthCapabilities()
+    fetchAppCapabilities()
       .then(async (capabilities): Promise<GateState> => {
         if (!capabilities.billing) return { kind: "open" };
         const me = await loadMe();

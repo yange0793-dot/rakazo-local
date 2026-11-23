@@ -42,7 +42,7 @@ export function createBrowserProvider(
       return new EmulatorBrowserProvider(options);
     case "ego":
       // The provider itself defaults its blocked origins to the app's own origins from
-      // WEB_ORIGIN, BETTER_AUTH_URL and RAKAZO_EXTRA_AUTH_ORIGINS when none are passed.
+      // WEB_ORIGIN and API_URL when none are passed.
       return new EgoBrowserProvider(options?.ego ?? {});
     default:
       throw new Error(`Unknown browser provider "${resolved}"`);

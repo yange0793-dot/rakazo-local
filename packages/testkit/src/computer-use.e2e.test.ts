@@ -5,7 +5,7 @@ import type { ComputerRef, SandboxProvider } from "@rakazo/adapter-kit";
 import type { createApp } from "@rakazo/api/app";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { computerTestSandbox } from "./computer-test-config.js";
-import { sessionCookieHeader } from "./index.js";
+import { createTestSpace, testSpaceHeaders } from "./index.js";
 
 const live = process.env.RUN_COMPUTER_E2E === "1";
 const describeLive = live ? describe : describe.skip;
@@ -84,19 +84,8 @@ describeLive("real model and sandbox computer journey", () => {
   }, 120_000);
 
   it("observes and clicks a real browser, then uses terminal and files", async () => {
-    const stamp = Date.now();
-    const signup = await handles.app.request("/api/auth/sign-up/email", {
-      method: "POST",
-      headers: { "content-type": "application/json", origin: "http://127.0.0.1:5173" },
-      body: JSON.stringify({
-        email: `computer-${stamp}@rakazo.test`,
-        password: "password12",
-        name: "Computer E2E",
-      }),
-    });
-    expect(signup.status).toBeLessThan(400);
-    const cookie = sessionCookieHeader(signup);
-    const bot = await rpc<{ id: string }>(handles.app, cookie, "bots/create", {
+    const scope = await createTestSpace(handles.app, "Computer E2E");
+    const bot = await rpc<{ id: string }>(handles.app, scope, "bots/create", {
       name: "Operator",
       title: "Computer acceptance test",
       description: "Uses the visible desktop and its tools.",
@@ -105,7 +94,7 @@ describeLive("real model and sandbox computer journey", () => {
       notifyOnFinish: false,
     });
     botId = bot.id;
-    await rpc(handles.app, cookie, "computer/boot", { botId: bot.id });
+    await rpc(handles.app, scope, "computer/boot", { botId: bot.id });
     const storedBot = await handles.prisma.bot.findUniqueOrThrow({
       where: { id: bot.id },
       include: { computer: true },
@@ -119,7 +108,7 @@ describeLive("real model and sandbox computer journey", () => {
     };
     await installVisualFixture(handles.sandbox, computer);
 
-    const sent = await rpc<{ runId: string }>(handles.app, cookie, "threads/send", {
+    const sent = await rpc<{ runId: string }>(handles.app, scope, "threads/send", {
       botId: bot.id,
       text: [
         "Open http://127.0.0.1:8765 using open_path.",
@@ -144,7 +133,7 @@ describeLive("real model and sandbox computer journey", () => {
       await handles.sandbox.readFile(computer, "results/visual-click.txt", testContext(bot.id)),
     );
     expect(clickMarker).toBe("visual-click-ok");
-    const confirmed = await rpc<{ content: string }>(handles.app, cookie, "computer/readFile", {
+    const confirmed = await rpc<{ content: string }>(handles.app, scope, "computer/readFile", {
       botId: bot.id,
       path: "results/llm-confirmed.txt",
     });
@@ -181,7 +170,7 @@ describeLive("real model and sandbox computer journey", () => {
     await handles.sandbox.destroy(computer, testContext(bot.id));
     // Simulate loss outside the app: the stored state still says running, so use
     // recovery to replace the missing sandbox and restore its checkpoint.
-    const recovery = await rpc<{ id: string }>(handles.app, cookie, "computer/recover", {
+    const recovery = await rpc<{ id: string }>(handles.app, scope, "computer/recover", {
       botId: bot.id,
     });
     await expect
@@ -204,7 +193,7 @@ describeLive("real model and sandbox computer journey", () => {
       kind: sandboxProvider,
     };
     expect(replacement.providerRef).not.toBe(originalRef);
-    const restored = await rpc<{ content: string }>(handles.app, cookie, "computer/readFile", {
+    const restored = await rpc<{ content: string }>(handles.app, scope, "computer/readFile", {
       botId: bot.id,
       path: "results/llm-confirmed.txt",
     });
@@ -276,10 +265,14 @@ function testContext(botId: string) {
 type App = { request: (input: string, init?: RequestInit) => Response | Promise<Response> };
 type RunState = { status: string; error: string | null };
 
-async function rpc<T>(app: App, cookie: string, procedure: string, body: unknown): Promise<T> {
+async function rpc<T>(app: App, scope: string, procedure: string, body: unknown): Promise<T> {
   const response = await app.request(`/rpc/${procedure}`, {
     method: "POST",
-    headers: { "content-type": "application/json", cookie, origin: "http://127.0.0.1:5173" },
+    headers: {
+      "content-type": "application/json",
+      ...testSpaceHeaders(scope),
+      origin: "http://127.0.0.1:5173",
+    },
     body: JSON.stringify({ json: body }),
   });
   const parsed = (await response.json()) as { json?: T; error?: { message?: string } };

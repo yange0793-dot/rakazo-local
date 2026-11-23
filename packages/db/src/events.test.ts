@@ -1938,6 +1938,7 @@ describe("answerRunInput", () => {
     const answerIntro = async (
       answer: string,
       opener: { trigger: string; clientNonce?: string } = { trigger: "created" },
+      answerMessageId?: string,
     ) => {
       const tx = {
         $queryRaw: vi.fn().mockResolvedValue([{ id: "thread-1" }]),
@@ -1993,6 +1994,7 @@ describe("answerRunInput", () => {
           messageId: "message-1",
           answeredByUserId: "user-1",
           answer,
+          answerMessageId,
         }),
       ).resolves.toBe(true);
       return tx;
@@ -2019,9 +2021,9 @@ describe("answerRunInput", () => {
       expect.objectContaining({ data: expect.objectContaining({ trigger: "user" }) }),
     );
 
-    const typed = await answerIntro("Track our competitors' launches");
+    const typed = await answerIntro("Track our competitors' launches", undefined, "composer-message");
     expect(typed.run.updateMany).toHaveBeenCalledWith(
-      expect.objectContaining({ data: expect.objectContaining({ trigger: "user" }) }),
+      expect.objectContaining({ data: expect.objectContaining({ trigger: "user", sourceMessageId: "composer-message" }) }),
     );
     expect(typed.task.updateMany).toHaveBeenCalledWith({
       where: { runs: { some: { id: "run-1" } } },

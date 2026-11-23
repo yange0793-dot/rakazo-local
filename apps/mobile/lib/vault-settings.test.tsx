@@ -22,7 +22,6 @@ const state = vi.hoisted(() => ({
   alert: vi.fn(),
   copy: vi.fn(async () => true),
   actionSheet: vi.fn(),
-  confirmIdentity: vi.fn(async () => true),
   spaceId: undefined as string | undefined,
   focused: true,
   credentials: [] as Credential[],
@@ -46,7 +45,6 @@ vi.mock("./user-error", () => ({ errorText: (_: unknown, fallback: string) => fa
 // The bots' addresses read on their own; this screen's tests cover the vault's items.
 vi.mock("../components/bot-email", () => ({ BotEmailAddressesGroup: () => null }));
 vi.mock("./api-server", () => ({}));
-vi.mock("./api-auth", () => ({}));
 vi.mock("./api-live", () => ({}));
 vi.mock("./api", () => ({
   rpc: state.rpc,
@@ -73,17 +71,6 @@ vi.mock("react-native", () => ({
 vi.mock("react-native-safe-area-context", () => ({ SafeAreaView: element("div") }));
 vi.mock("expo-clipboard", () => ({ setStringAsync: state.copy }));
 vi.mock("./message-action-sheet", () => ({ presentMessageActionSheet: state.actionSheet }));
-// The real retry rule from contracts, with the device prompt replaced by `confirmIdentity`.
-vi.mock("../components/confirm-identity", async () => {
-  const { runWithIdentityConfirmation } = await import("@rakazo/contracts");
-  return {
-    useIdentityConfirmation: () => ({
-      withIdentityConfirmation: <T,>(action: () => Promise<T>) =>
-        runWithIdentityConfirmation(action, state.confirmIdentity),
-      identityDialog: null,
-    }),
-  };
-});
 vi.mock("@expo/ui/community/menu", () => ({
   MenuView: ({
     actions,
@@ -292,7 +279,6 @@ beforeEach(() => {
   state.alert.mockReset();
   state.actionSheet.mockReset();
   state.copy.mockClear();
-  state.confirmIdentity.mockReset().mockResolvedValue(true);
   state.credentials = [credential({}), variable];
   state.rpc.mockReset().mockImplementation(async (proc: string, input: Record<string, unknown>) => {
     if (proc === "vault/list") return state.credentials;
@@ -492,8 +478,6 @@ it("offers a retry when the vault fails to load", async () => {
   expect(rows()).toHaveLength(2);
 });
 
-const identityRequired = () =>
-  Object.assign(new Error("Confirm it's you"), { code: "IDENTITY_CONFIRMATION_REQUIRED" });
 
 it("shows a value in a native alert with a copy action, and never on the screen", async () => {
   await render();
@@ -565,27 +549,6 @@ it("reveals a Space's own vault through that Space", async () => {
     { scope: "space", name: "github" },
     { requestContext: { headers: { space: "space-work" } } },
   );
-});
-
-it("confirms it's the person and retries once when the server asks", async () => {
-  await render();
-  await open("api.github.com");
-  state.rpc.mockRejectedValueOnce(identityRequired());
-  await act(async () => button("Show", dialog())!.click());
-  expect(state.confirmIdentity).toHaveBeenCalledTimes(1);
-  expect(state.rpc.mock.calls.filter(([proc]) => proc === "vault/reveal")).toHaveLength(2);
-  expect(state.alert).toHaveBeenCalledWith("api.github.com", "example-value", expect.any(Array));
-});
-
-it("shows nothing and no error when the confirmation is dismissed", async () => {
-  await render();
-  await open("api.github.com");
-  state.confirmIdentity.mockResolvedValue(false);
-  state.rpc.mockRejectedValueOnce(identityRequired());
-  await act(async () => button("Show", dialog())!.click());
-  expect(state.rpc.mock.calls.filter(([proc]) => proc === "vault/reveal")).toHaveLength(1);
-  expect(state.alert).not.toHaveBeenCalled();
-  expect(container.textContent).not.toContain("Could not show the item");
 });
 
 it("shows an error when revealing fails", async () => {

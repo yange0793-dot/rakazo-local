@@ -19,32 +19,6 @@ const vault = vi.hoisted(() => ({
 const bots = vi.hoisted(() => ({ emailAddresses: vi.fn(async (): Promise<unknown> => null) }));
 
 // The dialog itself is tested on its own; here it is a pair of buttons that settle it.
-vi.mock("./ConfirmIdentityDialog", async () => {
-  const { useState } = await import("react");
-  const { runWithIdentityConfirmation } = await import("@rakazo/contracts");
-  return {
-    useIdentityConfirmation: () => {
-      const [settle, setSettle] = useState<((confirmed: boolean) => void) | null>(null);
-      const done = (confirmed: boolean) => {
-        settle?.(confirmed);
-        setSettle(null);
-      };
-      return {
-        withIdentityConfirmation: <T,>(action: () => Promise<T>) =>
-          runWithIdentityConfirmation(
-            action,
-            () => new Promise<boolean>((resolve) => setSettle(() => resolve)),
-          ),
-        identityDialog: settle ? (
-          <div data-testid="identity-dialog">
-            <button type="button" data-testid="identity-confirm" onClick={() => done(true)} />
-            <button type="button" data-testid="identity-cancel" onClick={() => done(false)} />
-          </div>
-        ) : null,
-      };
-    },
-  };
-});
 
 vi.mock("../lib/rpc", () => ({
   rpc: { vault, bots },
@@ -403,10 +377,6 @@ describe("VaultSettings new items", () => {
 });
 
 describe("VaultSettings item details", () => {
-  const confirmationRequired = Object.assign(new Error("Confirm it's you"), {
-    code: "IDENTITY_CONFIRMATION_REQUIRED",
-  });
-
   it("shows a contact in full and a card's billing contact by its title", async () => {
     await render();
     await click(rowNamed("home"));
@@ -422,18 +392,15 @@ describe("VaultSettings item details", () => {
     expect(detail()?.textContent).toContain("For travel");
   });
 
-  it("shows a value after the person confirms it's them, and hides it again", async () => {
+  it("shows a value on request and hides it again", async () => {
     vi.useFakeTimers({ shouldAdvanceTime: true });
     const writeText = vi.fn().mockResolvedValue(undefined);
     vi.stubGlobal("navigator", { clipboard: { writeText } });
-    vault.reveal
-      .mockRejectedValueOnce(confirmationRequired)
-      .mockResolvedValueOnce({ value: FAKE_VALUE });
+    vault.reveal.mockResolvedValueOnce({ value: FAKE_VALUE });
     await render();
     await click(rowNamed("custom"));
     expect(detail()?.textContent).toContain('Header "X-Api-Key"');
     await click("vault-item-show");
-    await click("identity-confirm");
     expect(vault.reveal).toHaveBeenCalledWith({ scope: "account", name: "custom" });
     expect(byTestId("vault-item-value").textContent).toContain(FAKE_VALUE);
     // A shown value never lands in the query cache.
@@ -450,16 +417,6 @@ describe("VaultSettings item details", () => {
       vi.advanceTimersByTime(REVEAL_MS);
     });
     expect(document.body.innerHTML).not.toContain(FAKE_VALUE);
-  });
-
-  it("shows nothing and no error when the confirmation is dismissed", async () => {
-    vault.reveal.mockRejectedValueOnce(confirmationRequired);
-    await render();
-    await click(rowNamed("custom"));
-    await click("vault-item-show");
-    await click("identity-cancel");
-    expect(detail()?.querySelector('[role="alert"]')).toBeNull();
-    expect(byTestId("vault-item-value").textContent).toContain("••••");
   });
 
   it("shows each field of a website login with its label", async () => {

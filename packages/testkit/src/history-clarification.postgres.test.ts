@@ -63,7 +63,7 @@ describe.skipIf(!enabled)("product history clarification eval boundary", () => {
             createApp({
               databaseUrl: process.env.DATABASE_URL!,
               realtimeDatabaseUrl: process.env.DATABASE_URL!,
-              authUrl: "http://127.0.0.1:5173",
+
               webOrigin: "http://127.0.0.1:5173",
               dataDir,
               sandboxProvider: "fake",
@@ -71,7 +71,6 @@ describe.skipIf(!enabled)("product history clarification eval boundary", () => {
               runtime: new PiAgentRuntime(),
               contextStrategy: "snapshots",
               wakeupDriver: "memory",
-              signupsEnabled: "true",
               composio,
               encryptionKey: "synthetic-clarification-encryption-key",
             }),

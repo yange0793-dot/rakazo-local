@@ -17,7 +17,6 @@ import type {
   Prisma,
   PrismaClient,
   ProvisionedMessagingIdentity,
-  SignupPolicyEnv,
   ThreadEvents,
 } from "@rakazo/db";
 import {
@@ -51,16 +50,12 @@ export interface MessagingInboundDeps {
   events: Pick<ThreadEvents, "sendUserMessage" | "notify">;
   jobs: Pick<JobPublisher, "enqueue">;
   sandbox: SandboxProvider;
-  provision: (
-    request: MessagingIdentityRequest,
-    env: SignupPolicyEnv,
-  ) => Promise<ProvisionedMessagingIdentity>;
+  provision: (request: MessagingIdentityRequest) => Promise<ProvisionedMessagingIdentity>;
   /**
    * Poke-style open line: unknown senders auto-provision their own account.
    * Off by default — strangers' runs would bill the deployment model key.
    */
   openSignup: boolean;
-  signupPolicy: SignupPolicyEnv;
   acknowledge?: MessagingReceipts["acknowledge"];
   storeAttachment?: InboundAttachmentStore;
   /**
@@ -185,7 +180,6 @@ async function handleDirectEvent(
         dmThreadId: event.threadId,
         displayName: event.fromLabel ? sanitizeMessagingLabel(event.fromLabel) : null,
       },
-      deps.signupPolicy,
     );
   }
 

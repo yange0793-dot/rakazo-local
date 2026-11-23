@@ -2,20 +2,6 @@ import * as z from "zod";
 
 /** Every security event the backend records. Alert queries match these strings. */
 export const SECURITY_EVENT_TYPES = [
-  "auth.sign_up",
-  "auth.sign_up.failed",
-  "auth.sign_in",
-  "auth.sign_in.failed",
-  "auth.sign_out",
-  "auth.session.revoked",
-  "auth.password.changed",
-  "auth.passkey.added",
-  "auth.passkey.changed",
-  "auth.passkey.removed",
-  "auth.account.deleted",
-  "auth.account.deactivated",
-  "auth.account.reactivated",
-  "auth.identity.confirmed",
   "credential.created",
   "credential.changed",
   "credential.deleted",

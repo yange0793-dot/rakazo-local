@@ -92,6 +92,7 @@ async function capture(
   const resolved = resolveRuntimeModel(config);
   const model = resolved.model!;
   let body: WireRequest | undefined;
+  let headers: Headers | undefined;
   const result = await resolved.models
     .getProvider(OPENAI_COMPATIBLE_PROVIDER_ID)!
     .streamSimple(modelForCompletion(model), context, {
@@ -100,6 +101,7 @@ async function capture(
       reasoning: requested === "off" ? undefined : requested,
       fetch: async (_url, init) => {
         body = JSON.parse(String(init?.body));
+        headers = new Headers(init?.headers);
         return fixtureResponse(protocol);
       },
     })
@@ -108,17 +110,44 @@ async function capture(
   expect(body).toBeDefined();
   expect(body!.model).toBe(config.id);
   expect(thinkingLevelFor(model, requested)).toBe(resolved.thinking!.effective);
-  return { body: body!, model, selection: resolved.thinking! };
+  return { body: body!, headers: headers!, model, selection: resolved.thinking! };
 }
 
 const allLevels = ["off", "minimal", "low", "medium", "high", "xhigh", "max"] as const;
 const budgets = { minimal: 1024, low: 2048, medium: 8192, high: 16384 } as const;
 
+it.each(["chat-completions", "responses", "anthropic-messages"] as const)(
+  "preserves explicit client headers on the %s wire without duplicates",
+  async (protocol) => {
+    const { headers } = await capture(protocol, "medium", {
+      headers: {
+        "User-Agent": "custom-client/1.0",
+        Originator: "custom-origin",
+        "X-Trace": "fixture",
+      },
+    });
+    expect(headers.get("user-agent")).toBe("custom-client/1.0");
+    expect(headers.get("originator")).toBe("custom-origin");
+    expect(headers.get("x-trace")).toBe("fixture");
+    expect(headers.get(protocol === "anthropic-messages" ? "x-api-key" : "authorization")).toBe(
+      protocol === "anthropic-messages" ? "fake-api-key" : "Bearer fake-api-key",
+    );
+  },
+);
+
 describe.each(["chat-completions", "responses", "anthropic-messages"] as const)(
   "%s local reasoning serialization",
   (protocol) => {
     it.each(allLevels)("reports and emits the effective selection for %s", async (requested) => {
-      const { body, model, selection } = await capture(protocol, requested);
+      const { body, headers, model, selection } = await capture(protocol, requested);
+      expect(headers.get("user-agent")).toBe(
+        protocol === "anthropic-messages"
+          ? "claude-cli/2.1.219 (external, cli)"
+          : "codex_cli_rs/0.154.0 (external, cli)",
+      );
+      expect(headers.get(protocol === "anthropic-messages" ? "x-app" : "originator")).toBe(
+        protocol === "anthropic-messages" ? "cli" : "codex_cli_rs",
+      );
       const effective =
         protocol === "anthropic-messages" && (requested === "xhigh" || requested === "max")
           ? "high"

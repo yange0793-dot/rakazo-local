@@ -33,7 +33,6 @@ vi.mock("@rakazo/ui-web", () => {
     AlertDialogTitle: ({ children }: { children: ReactNode }) => <h2>{children}</h2>,
   };
 });
-vi.mock("../lib/auth", () => ({ authClient: { $store: { notify: vi.fn() } } }));
 
 import { DeleteOrganizationDialog } from "./OrganizationSettingsPanel";
 

@@ -385,6 +385,47 @@ describe("source-bound semantic saves", () => {
   });
 });
 
+describe("redacted Markdown memory writes", () => {
+  function markdownContext() {
+    const read = vi.fn(async () => ({ documents: [] }));
+    const commit = vi.fn(async (request: { path: string; content: string }) => ({
+      path: request.path,
+      revision: 1,
+    }));
+    const { ctx } = semanticToolContext();
+    ctx.deps.memory = { read, commit } as never;
+    ctx.secrets.push("SYNTHETIC_TOKEN_123456789");
+    return { ctx, read, commit };
+  }
+
+  it("redacts secrets from the final bot memory document before committing", async () => {
+    const { ctx, commit } = markdownContext();
+    await memoryTools.remember!(
+      ctx,
+      memoryCall("remember", {
+        content: "The deploy token is SYNTHETIC_TOKEN_123456789.",
+      }),
+    );
+    expect(commit.mock.calls[0]?.[0].content).toBe("The deploy token is [redacted].\n");
+    expect(JSON.stringify(commit.mock.calls[0]?.[0])).not.toContain("SYNTHETIC_TOKEN_123456789");
+  });
+
+  it("redacts secrets from shared memory before committing", async () => {
+    const { ctx, commit } = markdownContext();
+    await memoryTools.save_shared_memory!(
+      ctx,
+      memoryCall("save_shared_memory", {
+        path: "team.md",
+        content: "Shared token: SYNTHETIC_TOKEN_123456789",
+      }),
+    );
+    expect(commit.mock.calls[0]?.[0]).toMatchObject({
+      content: "Shared token: [redacted]",
+    });
+    expect(JSON.stringify(commit.mock.calls[0]?.[0])).not.toContain("SYNTHETIC_TOKEN_123456789");
+  });
+});
+
 describe("explicit semantic recall", () => {
   it("adds thread/generation and returns escaped, redacted, revision-cited untrusted text", async () => {
     const { ctx, recall } = semanticToolContext();
@@ -643,5 +684,39 @@ describe("explicit semantic recall", () => {
     );
     expect(result).toEqual({ ok: false, error: "Memory unavailable." });
     expect(outcome(result)).toBe("failed");
+  });
+});
+
+describe("revisioned semantic forget", () => {
+  it("requires and forwards the revision from the recall citation", async () => {
+    const { ctx, forget } = semanticToolContext();
+    await memoryTools.forget_memory!(
+      ctx,
+      memoryCall("forget_memory", {
+        id: "fact-1",
+        expected_revision: 4,
+        entity: "sm1:shared-namespace",
+      }),
+    );
+    expect(forget).toHaveBeenCalledWith(
+      {
+        id: "fact-1",
+        scope: "isolated",
+        botId: "bot-1",
+        expectedRevision: 4,
+        entity: "sm1:shared-namespace",
+      },
+      ctx.context,
+    );
+  });
+
+  it.each([undefined, 0, 1.5, "4"])("rejects invalid revisions %j", async (revision) => {
+    const { ctx, forget } = semanticToolContext();
+    const result = await memoryTools.forget_memory!(
+      ctx,
+      memoryCall("forget_memory", { id: "fact-1", expected_revision: revision }),
+    );
+    expect(result).toHaveProperty("error", expect.stringContaining("positive integer"));
+    expect(forget).not.toHaveBeenCalled();
   });
 });

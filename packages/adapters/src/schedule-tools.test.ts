@@ -278,6 +278,13 @@ describe("filterBuiltinToolsForThread", () => {
     expect(filterBuiltinToolsForRun(withUpdate, "user").map((tool) => tool.name)).toEqual(
       withUpdate.map((tool) => tool.name),
     );
+    const withForget = [...tools, { name: "forget_memory" }];
+    expect(filterBuiltinToolsForRun(withForget, "routine").map((tool) => tool.name)).not.toContain(
+      "forget_memory",
+    );
+    expect(filterBuiltinToolsForRun(withForget, "user").map((tool) => tool.name)).toContain(
+      "forget_memory",
+    );
   });
 
   it("composes thread then run filters without dropping group schedule tools", () => {

@@ -49,7 +49,6 @@ describePostgres("new bot avatars (PostgreSQL)", () => {
       provisionMessagingIdentity(
         prisma,
         { provider, address },
-        { signupsEnabled: undefined, signupAllowlist: undefined },
       ),
     );
   });
@@ -186,7 +185,6 @@ describePostgres("new bot avatars (PostgreSQL)", () => {
       provisionMessagingIdentity(
         prisma,
         { provider, address: otherAddress },
-        { signupsEnabled: undefined, signupAllowlist: undefined },
       ),
     );
     try {

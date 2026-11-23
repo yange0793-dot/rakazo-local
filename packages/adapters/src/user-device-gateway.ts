@@ -3,7 +3,7 @@ import type { IncomingMessage } from "node:http";
 import { networkInterfaces } from "node:os";
 import type { Duplex } from "node:stream";
 import type { UserDeviceSummary } from "@rakazo/contracts";
-import { USER_DEVICE_CONNECT_PATH } from "@rakazo/contracts";
+import { isLocalInstallSessionId, USER_DEVICE_CONNECT_PATH } from "@rakazo/contracts";
 import type { PrismaClient } from "@rakazo/db";
 import { recordSecurityEvent, runAsSystem } from "@rakazo/db";
 import { getLogger } from "@rakazo/logging";
@@ -126,31 +126,9 @@ function revokeReason(revokedBy: string | null): UserDeviceRevokeReason | undefi
   return revokedBy === "session" ? "session-ended" : undefined;
 }
 
-/** Sessions among these that were deleted or have expired. */
-async function endedSessions(prisma: PrismaClient, sessionIds: string[]): Promise<Set<string>> {
-  if (!sessionIds.length) return new Set();
-  const live = await runAsSystem("check user device sessions", () =>
-    prisma.session.findMany({
-      where: { id: { in: sessionIds }, expiresAt: { gt: new Date() } },
-      select: { id: true },
-    }),
-  );
-  const kept = new Set(live.map((session) => session.id));
-  return new Set(sessionIds.filter((id) => !kept.has(id)));
-}
-
-/** Users among these with no sign-in left. */
-async function signedOutUsers(prisma: PrismaClient, userIds: string[]): Promise<Set<string>> {
-  if (!userIds.length) return new Set();
-  const live = await runAsSystem("check users' remaining sign-ins", () =>
-    prisma.session.findMany({
-      where: { userId: { in: userIds }, expiresAt: { gt: new Date() } },
-      select: { userId: true },
-      distinct: ["userId"],
-    }),
-  );
-  const kept = new Set(live.map((session) => session.userId));
-  return new Set(userIds.filter((id) => !kept.has(id)));
+/** Old account-session pairings are retired; local installation pairings remain live. */
+function endedSessions(sessionIds: string[]): Set<string> {
+  return new Set(sessionIds.filter((id) => !isLocalInstallSessionId(id)));
 }
 
 /**
@@ -162,15 +140,10 @@ async function revokeSignedOut(
   prisma: PrismaClient,
   devices: { id: string; userId: string; sessionId: string | null }[],
 ): Promise<string[]> {
-  const [ended, signedOut] = await Promise.all([
-    endedSessions(
-      prisma,
-      devices.flatMap((device) => (device.sessionId ? [device.sessionId] : [])),
-    ),
-    signedOutUsers(prisma, [
-      ...new Set(devices.filter((device) => !device.sessionId).map((device) => device.userId)),
-    ]),
-  ]);
+  const ended = endedSessions(
+    devices.flatMap((device) => (device.sessionId ? [device.sessionId] : [])),
+  );
+  const signedOut = new Set<string>();
   const revoked: string[] = [];
   for (const device of devices.filter((device) =>
     device.sessionId ? ended.has(device.sessionId) : signedOut.has(device.userId),

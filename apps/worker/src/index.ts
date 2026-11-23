@@ -75,7 +75,6 @@ import {
   isTooManyDatabaseConnections,
   observeThreadChanges,
   parsePositiveInteger,
-  pushSessionExpiresAt,
   rowSecurityWarning,
   runAsSystem,
   verifyContentKeys,
@@ -199,7 +198,6 @@ async function main() {
   // Shared with the reconciler so a stuck wait uses the same push path as a finish notice.
   const pushTokens = new PrismaPushTokenStore(prisma, env.encryptionKey);
   const notifications = new ExpoPushProvider(pushTokens, {
-    sessionExpiresAt: (sessionId) => pushSessionExpiresAt(prisma, sessionId),
     jobs,
     accessToken: process.env.EXPO_ACCESS_TOKEN,
     voip: await createApnsVoipProvider(apnsVoipConfig(process.env)),

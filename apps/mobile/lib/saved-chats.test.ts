@@ -28,7 +28,6 @@ const state = vi.hoisted(() => ({
 }));
 vi.mock("./artifact-cache-session", () => ({ artifactCacheSession: async () => state.namespace }));
 vi.mock("./api-server", () => ({}));
-vi.mock("./api-auth", () => ({}));
 vi.mock("./api-live", () => ({}));
 vi.mock("./api", () => ({
   currentApiBase: () => "https://api.example.test",
@@ -42,7 +41,7 @@ vi.mock("./integrations-cache", () => ({
 }));
 vi.mock("./session", () => ({
   currentSessionGeneration: () => 1,
-  loadSessionToken: async () => "fake-token",
+  loadLocalInstallSessionId: async () => "fake-token",
   loadVerifiedIntegrationsScope: async () => state.verified,
   saveVerifiedIntegrationsScope: vi.fn(),
 }));

@@ -4,7 +4,8 @@ import path from "node:path";
 import { ComposioConnector, FakeComposioClient } from "@rakazo/adapters";
 import type { createApp } from "@rakazo/api/app";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import { sessionCookieHeader } from "./index.js";
+import { createTestSpace, testSpaceHeaders } from "./index.js";
+
 import { asSystem } from "./system-db.js";
 
 type App = { request: (input: string, init?: RequestInit) => Response | Promise<Response> };
@@ -32,7 +33,6 @@ describeWithDatabase("structured @ mention targets", () => {
       sandboxProvider: "fake",
       agentRuntime: "scripted",
       composio: new ComposioConnector({ client: new FakeComposioClient() }),
-      signupsEnabled: "true",
     });
     app = handles.app;
     prisma = asSystem(handles.prisma);
@@ -44,15 +44,15 @@ describeWithDatabase("structured @ mention targets", () => {
   });
 
   it("starts a routine test run on the owning bot", async () => {
-    const cookie = await signup(app, `mention-routine-${stamp}@rakazo.test`, "Routine Owner");
-    const bot = await rpc<{ id: string }>(app, cookie, "bots/create", {
+    const scope = await testSpace(app, "Routine Owner");
+    const bot = await rpc<{ id: string }>(app, scope, "bots/create", {
       name: "Chief",
       title: "",
       description: "",
       instructions: "",
       notifyOnFinish: true,
     });
-    const routine = await rpc<{ id: string }>(app, cookie, "routines/create", {
+    const routine = await rpc<{ id: string }>(app, scope, "routines/create", {
       botId: bot.id,
       name: "Daily digest",
       prompt: "Summarize inbox",
@@ -61,7 +61,7 @@ describeWithDatabase("structured @ mention targets", () => {
       notify: false,
       active: false,
     });
-    const tested = await rpc<{ runId: string }>(app, cookie, "routines/testRun", {
+    const tested = await rpc<{ runId: string }>(app, scope, "routines/testRun", {
       routineId: routine.id,
     });
     const run = await prisma.run.findUniqueOrThrow({ where: { id: tested.runId } });
@@ -76,26 +76,26 @@ describeWithDatabase("structured @ mention targets", () => {
   });
 
   it("runs a group-bound routine test in its group conversation", async () => {
-    const cookie = await signup(app, `mention-routine-group-${stamp}@rakazo.test`, "Group Routine");
-    const botA = await rpc<{ id: string }>(app, cookie, "bots/create", {
+    const scope = await testSpace(app, "Group Routine");
+    const botA = await rpc<{ id: string }>(app, scope, "bots/create", {
       name: "RoutineA",
       title: "",
       description: "",
       instructions: "",
       notifyOnFinish: true,
     });
-    const botB = await rpc<{ id: string }>(app, cookie, "bots/create", {
+    const botB = await rpc<{ id: string }>(app, scope, "bots/create", {
       name: "RoutineB",
       title: "",
       description: "",
       instructions: "",
       notifyOnFinish: true,
     });
-    const group = await rpc<{ id: string; threadId: string }>(app, cookie, "groups/create", {
+    const group = await rpc<{ id: string; threadId: string }>(app, scope, "groups/create", {
       name: "Routine Group",
       botIds: [botA.id, botB.id],
     });
-    const routine = await rpc<{ id: string }>(app, cookie, "routines/create", {
+    const routine = await rpc<{ id: string }>(app, scope, "routines/create", {
       botId: botA.id,
       name: "Group digest",
       prompt: "Summarize the group.",
@@ -110,7 +110,7 @@ describeWithDatabase("structured @ mention targets", () => {
       data: { threadId: group.threadId },
     });
 
-    const tested = await rpc<{ runId: string }>(app, cookie, "routines/testRun", {
+    const tested = await rpc<{ runId: string }>(app, scope, "routines/testRun", {
       routineId: routine.id,
     });
     const run = await prisma.run.findUniqueOrThrow({
@@ -123,33 +123,33 @@ describeWithDatabase("structured @ mention targets", () => {
   });
 
   it("falls back to the bot chat when the bound group no longer has the bot", async () => {
-    const cookie = await signup(app, `mention-routine-stale-${stamp}@rakazo.test`, "Stale Routine");
-    const botA = await rpc<{ id: string }>(app, cookie, "bots/create", {
+    const scope = await testSpace(app, "Stale Routine");
+    const botA = await rpc<{ id: string }>(app, scope, "bots/create", {
       name: "StaleA",
       title: "",
       description: "",
       instructions: "",
       notifyOnFinish: true,
     });
-    const botB = await rpc<{ id: string }>(app, cookie, "bots/create", {
+    const botB = await rpc<{ id: string }>(app, scope, "bots/create", {
       name: "StaleB",
       title: "",
       description: "",
       instructions: "",
       notifyOnFinish: true,
     });
-    const botC = await rpc<{ id: string }>(app, cookie, "bots/create", {
+    const botC = await rpc<{ id: string }>(app, scope, "bots/create", {
       name: "StaleC",
       title: "",
       description: "",
       instructions: "",
       notifyOnFinish: true,
     });
-    const group = await rpc<{ id: string; threadId: string }>(app, cookie, "groups/create", {
+    const group = await rpc<{ id: string; threadId: string }>(app, scope, "groups/create", {
       name: "Other Group",
       botIds: [botB.id, botC.id],
     });
-    const routine = await rpc<{ id: string }>(app, cookie, "routines/create", {
+    const routine = await rpc<{ id: string }>(app, scope, "routines/create", {
       botId: botA.id,
       name: "Stale digest",
       prompt: "Summarize the inbox.",
@@ -163,7 +163,7 @@ describeWithDatabase("structured @ mention targets", () => {
       data: { threadId: group.threadId },
     });
 
-    const tested = await rpc<{ runId: string }>(app, cookie, "routines/testRun", {
+    const tested = await rpc<{ runId: string }>(app, scope, "routines/testRun", {
       routineId: routine.id,
     });
     const run = await prisma.run.findUniqueOrThrow({ where: { id: tested.runId } });
@@ -175,15 +175,15 @@ describeWithDatabase("structured @ mention targets", () => {
   });
 
   it("replays routine testRun with the same clientNonce", async () => {
-    const cookie = await signup(app, `mention-routine-replay-${stamp}@rakazo.test`, "Replay Owner");
-    const bot = await rpc<{ id: string }>(app, cookie, "bots/create", {
+    const scope = await testSpace(app, "Replay Owner");
+    const bot = await rpc<{ id: string }>(app, scope, "bots/create", {
       name: "ReplayBot",
       title: "",
       description: "",
       instructions: "",
       notifyOnFinish: true,
     });
-    const routine = await rpc<{ id: string }>(app, cookie, "routines/create", {
+    const routine = await rpc<{ id: string }>(app, scope, "routines/create", {
       botId: bot.id,
       name: "Replay digest",
       prompt: "Replay inbox",
@@ -193,11 +193,11 @@ describeWithDatabase("structured @ mention targets", () => {
       active: false,
     });
     const nonce = `routine-mention:${stamp}:replay`;
-    const first = await rpc<{ runId: string }>(app, cookie, "routines/testRun", {
+    const first = await rpc<{ runId: string }>(app, scope, "routines/testRun", {
       routineId: routine.id,
       clientNonce: nonce,
     });
-    const second = await rpc<{ runId: string }>(app, cookie, "routines/testRun", {
+    const second = await rpc<{ runId: string }>(app, scope, "routines/testRun", {
       routineId: routine.id,
       clientNonce: nonce,
     });
@@ -230,7 +230,7 @@ describeWithDatabase("structured @ mention targets", () => {
         clientNonce: `routine-test:${legacyNonce}`,
       },
     });
-    const retried = await rpc<{ runId: string }>(app, cookie, "routines/testRun", {
+    const retried = await rpc<{ runId: string }>(app, scope, "routines/testRun", {
       routineId: routine.id,
       clientNonce: legacyNonce,
     });
@@ -242,8 +242,8 @@ describeWithDatabase("structured @ mention targets", () => {
     type Receipt = { routineRunIds: string[]; send?: { runId: string; taskId: string } };
 
     async function owner(name: string) {
-      const cookie = await signup(app, `send-routines-${name}-${stamp}@rakazo.test`, name);
-      const bot = await rpc<{ id: string }>(app, cookie, "bots/create", {
+      const scope = await testSpace(app, name);
+      const bot = await rpc<{ id: string }>(app, scope, "bots/create", {
         name: "Chief",
         title: "",
         description: "",
@@ -251,7 +251,7 @@ describeWithDatabase("structured @ mention targets", () => {
         notifyOnFinish: true,
       });
       const routine = (routineName: string) =>
-        rpc<{ id: string }>(app, cookie, "routines/create", {
+        rpc<{ id: string }>(app, scope, "routines/create", {
           botId: bot.id,
           name: routineName,
           prompt: `Run ${routineName}`,
@@ -260,11 +260,11 @@ describeWithDatabase("structured @ mention targets", () => {
           notify: false,
           active: false,
         });
-      return { cookie, bot, digest: await routine("Digest"), review: await routine("Review") };
+      return { scope, bot, digest: await routine("Digest"), review: await routine("Review") };
     }
 
     it("saves the message and runs once for a repeated or concurrent nonce", async () => {
-      const { cookie, bot, digest, review } = await owner("Once");
+      const { scope, bot, digest, review } = await owner("Once");
       const clientNonce = `send-routines-${stamp}`;
       const input = {
         botId: bot.id,
@@ -274,10 +274,10 @@ describeWithDatabase("structured @ mention targets", () => {
       };
       const concurrent = await Promise.all(
         Array.from({ length: 3 }, () =>
-          rpc<Receipt>(app, cookie, "threads/sendWithRoutines", input),
+          rpc<Receipt>(app, scope, "threads/sendWithRoutines", input),
         ),
       );
-      const retried = await rpc<Receipt>(app, cookie, "threads/sendWithRoutines", input);
+      const retried = await rpc<Receipt>(app, scope, "threads/sendWithRoutines", input);
 
       const [first] = concurrent;
       expect(first?.routineRunIds).toHaveLength(2);
@@ -297,20 +297,18 @@ describeWithDatabase("structured @ mention targets", () => {
       };
       const [ran, ...others] = await Promise.all(
         Array.from({ length: 3 }, () =>
-          rpc<Receipt>(app, cookie, "threads/sendWithRoutines", routinesOnly),
+          rpc<Receipt>(app, scope, "threads/sendWithRoutines", routinesOnly),
         ),
       );
       expect(ran?.send).toBeUndefined();
       for (const receipt of others) expect(receipt).toEqual(ran);
-      expect(await rpc<Receipt>(app, cookie, "threads/sendWithRoutines", routinesOnly)).toEqual(
-        ran,
-      );
+      expect(await rpc<Receipt>(app, scope, "threads/sendWithRoutines", routinesOnly)).toEqual(ran);
       expect(await prisma.run.count({ where: { routineId: digest.id } })).toBe(2);
     });
 
     it("treats stop sent with a routine as a message, so the routine still runs", async () => {
-      const { cookie, bot, digest } = await owner("Stop");
-      const sent = await rpc<Receipt>(app, cookie, "threads/sendWithRoutines", {
+      const { scope, bot, digest } = await owner("Stop");
+      const sent = await rpc<Receipt>(app, scope, "threads/sendWithRoutines", {
         botId: bot.id,
         clientNonce: `send-stop-${stamp}`,
         text: "stop",
@@ -326,14 +324,14 @@ describeWithDatabase("structured @ mention targets", () => {
       ["routines-only", {}],
       ["with-text", { text: "and the notes" }],
     ])("replays a saved submission when a retry adds a routine (%s)", async (name, extra) => {
-      const { cookie, bot, digest, review } = await owner(`Grow-${name}`);
+      const { scope, bot, digest, review } = await owner(`Grow-${name}`);
       // A backslash must not change which submission the nonce names.
       const input = { botId: bot.id, clientNonce: `send-grow\\${name}-${stamp}`, ...extra };
-      const first = await rpc<Receipt>(app, cookie, "threads/sendWithRoutines", {
+      const first = await rpc<Receipt>(app, scope, "threads/sendWithRoutines", {
         ...input,
         routineIds: [digest.id],
       });
-      const retried = await rpc<Receipt>(app, cookie, "threads/sendWithRoutines", {
+      const retried = await rpc<Receipt>(app, scope, "threads/sendWithRoutines", {
         ...input,
         routineIds: [digest.id, review.id],
       });
@@ -349,9 +347,9 @@ describeWithDatabase("structured @ mention targets", () => {
     ])(
       "lets one of two concurrent sends win while the other waits mid-transaction (%s)",
       async (name, text) => {
-        const { cookie, bot, digest } = await owner(`Race-${name}`);
+        const { scope, bot, digest } = await owner(`Race-${name}`);
         const createBot = (botName: string) =>
-          rpc<{ id: string }>(app, cookie, "bots/create", {
+          rpc<{ id: string }>(app, scope, "bots/create", {
             name: botName,
             title: "",
             description: "",
@@ -360,7 +358,7 @@ describeWithDatabase("structured @ mention targets", () => {
           });
         const slow = await createBot("Slow");
         const other = await createBot("Other");
-        const late = await rpc<{ id: string }>(app, cookie, "routines/create", {
+        const late = await rpc<{ id: string }>(app, scope, "routines/create", {
           botId: slow.id,
           name: "Late",
           prompt: "Run late",
@@ -389,7 +387,7 @@ describeWithDatabase("structured @ mention targets", () => {
           { timeout: 20_000 },
         );
         await holding;
-        const second = raw(app, cookie, "threads/sendWithRoutines", {
+        const second = raw(app, scope, "threads/sendWithRoutines", {
           botId: other.id,
           clientNonce,
           text,
@@ -402,7 +400,7 @@ describeWithDatabase("structured @ mention targets", () => {
           if (tries > 100) throw new Error("the second send never waited");
           await new Promise((resolve) => setTimeout(resolve, 50));
         }
-        const first = await rpc<Receipt>(app, cookie, "threads/sendWithRoutines", {
+        const first = await rpc<Receipt>(app, scope, "threads/sendWithRoutines", {
           botId: bot.id,
           clientNonce,
           text,
@@ -423,7 +421,7 @@ describeWithDatabase("structured @ mention targets", () => {
     );
 
     it("rolls back the message and every run when the last step fails", async () => {
-      const { cookie, bot, digest, review } = await owner("Rollback");
+      const { scope, bot, digest, review } = await owner("Rollback");
       const clientNonce = `send-rollback-${stamp}`;
       const thread = await prisma.thread.findUniqueOrThrow({ where: { botId: bot.id } });
       // An event already holds the next sequence number, so appending the message's event, the
@@ -440,7 +438,7 @@ describeWithDatabase("structured @ mention targets", () => {
       });
       const tasksBefore = await prisma.task.count({ where: { threadId: thread.id } });
 
-      const response = await raw(app, cookie, "threads/sendWithRoutines", {
+      const response = await raw(app, scope, "threads/sendWithRoutines", {
         botId: bot.id,
         clientNonce,
         text: "and the notes",
@@ -464,7 +462,7 @@ describeWithDatabase("structured @ mention targets", () => {
       const caller = await owner("Caller");
       const clientNonce = `send-foreign-${stamp}`;
 
-      const response = await raw(app, caller.cookie, "threads/sendWithRoutines", {
+      const response = await raw(app, caller.scope, "threads/sendWithRoutines", {
         botId: caller.bot.id,
         clientNonce,
         text: "and the notes",
@@ -483,21 +481,21 @@ describeWithDatabase("structured @ mention targets", () => {
   });
 
   it("includes connector intent on a 1:1 send prompt", async () => {
-    const cookie = await signup(app, `mention-connector-${stamp}@rakazo.test`, "Connector Owner");
-    const bot = await rpc<{ id: string }>(app, cookie, "bots/create", {
+    const scope = await testSpace(app, "Connector Owner");
+    const bot = await rpc<{ id: string }>(app, scope, "bots/create", {
       name: "Chief",
       title: "",
       description: "",
       instructions: "",
       notifyOnFinish: true,
     });
-    const started = await rpc<{ connectionId: string }>(app, cookie, "connections/begin", {
+    const started = await rpc<{ connectionId: string }>(app, scope, "connections/begin", {
       provider: "gmail",
       displayName: "Gmail",
     });
-    await rpc(app, cookie, "connections/complete", { connectionId: started.connectionId });
+    await rpc(app, scope, "connections/complete", { connectionId: started.connectionId });
 
-    const sent = await rpc<{ runId: string }>(app, cookie, "threads/send", {
+    const sent = await rpc<{ runId: string }>(app, scope, "threads/send", {
       botId: bot.id,
       text: "check my email",
       mentions: [{ kind: "connector", id: started.connectionId }],
@@ -510,36 +508,36 @@ describeWithDatabase("structured @ mention targets", () => {
   });
 
   it("lands a group-targeted send in the group transcript, not the 1:1 bot thread", async () => {
-    const cookie = await signup(app, `mention-group-${stamp}@rakazo.test`, "Group Owner");
-    const botA = await rpc<{ id: string }>(app, cookie, "bots/create", {
+    const scope = await testSpace(app, "Group Owner");
+    const botA = await rpc<{ id: string }>(app, scope, "bots/create", {
       name: "BotA",
       title: "",
       description: "",
       instructions: "",
       notifyOnFinish: true,
     });
-    const botB = await rpc<{ id: string }>(app, cookie, "bots/create", {
+    const botB = await rpc<{ id: string }>(app, scope, "bots/create", {
       name: "BotB",
       title: "",
       description: "",
       instructions: "",
       notifyOnFinish: true,
     });
-    const group = await rpc<{ id: string; threadId: string }>(app, cookie, "groups/create", {
+    const group = await rpc<{ id: string; threadId: string }>(app, scope, "groups/create", {
       name: "Planning",
       botIds: [botA.id, botB.id],
     });
     const messageText = "follow up from 1:1 reroute";
-    await rpc(app, cookie, "threads/send", {
+    await rpc(app, scope, "threads/send", {
       groupId: group.id,
       text: messageText,
     });
     const groupSnap = await rpc<{
       messages: Array<{ blocks: Array<{ kind: string; text?: string }> }>;
-    }>(app, cookie, "threads/get", { groupId: group.id });
+    }>(app, scope, "threads/get", { groupId: group.id });
     const botSnap = await rpc<{
       messages: Array<{ blocks: Array<{ kind: string; text?: string }> }>;
-    }>(app, cookie, "threads/get", { botId: botA.id });
+    }>(app, scope, "threads/get", { botId: botA.id });
     const groupHasMessage = groupSnap.messages.some((message) =>
       message.blocks.some((block) => block.kind === "text" && block.text?.includes(messageText)),
     );
@@ -551,29 +549,29 @@ describeWithDatabase("structured @ mention targets", () => {
   });
 
   it("wakes every member, each free to stay silent, on an unmentioned group send", async () => {
-    const cookie = await signup(app, `mention-group-default-${stamp}@rakazo.test`, "Group Default");
-    const botA = await rpc<{ id: string }>(app, cookie, "bots/create", {
+    const scope = await testSpace(app, "Group Default");
+    const botA = await rpc<{ id: string }>(app, scope, "bots/create", {
       name: "BotA",
       title: "",
       description: "",
       instructions: "",
       notifyOnFinish: true,
     });
-    const botB = await rpc<{ id: string }>(app, cookie, "bots/create", {
+    const botB = await rpc<{ id: string }>(app, scope, "bots/create", {
       name: "BotB",
       title: "",
       description: "",
       instructions: "",
       notifyOnFinish: true,
     });
-    const group = await rpc<{ id: string; threadId: string }>(app, cookie, "groups/create", {
+    const group = await rpc<{ id: string; threadId: string }>(app, scope, "groups/create", {
       name: "Squad",
       botIds: [botA.id, botB.id],
     });
     const before = await prisma.run.count({
       where: { threadId: group.threadId, trigger: "user" },
     });
-    await rpc(app, cookie, "threads/send", { groupId: group.id, text: "hello team" });
+    await rpc(app, scope, "threads/send", { groupId: group.id, text: "hello team" });
     const runs = await prisma.run.findMany({
       where: { threadId: group.threadId, trigger: "user" },
       select: { botId: true, groupReplyOptional: true },
@@ -584,33 +582,33 @@ describeWithDatabase("structured @ mention targets", () => {
   });
 
   it("wakes a mentioned group member from typed bot chips and ignores non-members", async () => {
-    const cookie = await signup(app, `mention-out-${stamp}@rakazo.test`, "Out Of Chat");
-    const botA = await rpc<{ id: string }>(app, cookie, "bots/create", {
+    const scope = await testSpace(app, "Out Of Chat");
+    const botA = await rpc<{ id: string }>(app, scope, "bots/create", {
       name: "MemberA",
       title: "",
       description: "",
       instructions: "",
       notifyOnFinish: true,
     });
-    const botB = await rpc<{ id: string }>(app, cookie, "bots/create", {
+    const botB = await rpc<{ id: string }>(app, scope, "bots/create", {
       name: "MemberB",
       title: "",
       description: "",
       instructions: "",
       notifyOnFinish: true,
     });
-    const outsider = await rpc<{ id: string }>(app, cookie, "bots/create", {
+    const outsider = await rpc<{ id: string }>(app, scope, "bots/create", {
       name: "Outsider",
       title: "",
       description: "",
       instructions: "",
       notifyOnFinish: true,
     });
-    const group = await rpc<{ id: string; threadId: string }>(app, cookie, "groups/create", {
+    const group = await rpc<{ id: string; threadId: string }>(app, scope, "groups/create", {
       name: "Core",
       botIds: [botA.id, botB.id],
     });
-    const sent = await rpc<{ runId: string; runIds?: string[] }>(app, cookie, "threads/send", {
+    const sent = await rpc<{ runId: string; runIds?: string[] }>(app, scope, "threads/send", {
       groupId: group.id,
       text: "@MemberB @Outsider please review",
       mentions: [
@@ -627,8 +625,8 @@ describeWithDatabase("structured @ mention targets", () => {
   });
 
   it("rejects another user's routine, connection, and group mentions", async () => {
-    const ada = await signup(app, `mention-auth-ada-${stamp}@rakazo.test`, "Ada Auth");
-    const bob = await signup(app, `mention-auth-bob-${stamp}@rakazo.test`, "Bob Auth");
+    const ada = await testSpace(app, "Ada Auth");
+    const bob = await testSpace(app, "Bob Auth");
     const adaBot = await rpc<{ id: string }>(app, ada, "bots/create", {
       name: "AdaBot",
       title: "",
@@ -690,35 +688,24 @@ describeWithDatabase("structured @ mention targets", () => {
   });
 });
 
-async function signup(app: App, email: string, name: string) {
-  const res = await app.request("/api/auth/sign-up/email", {
-    method: "POST",
-    headers: {
-      "content-type": "application/json",
-      origin: "http://127.0.0.1:5173",
-    },
-    body: JSON.stringify({ email, password: "password12", name }),
-  });
-  if (res.status >= 400) {
-    throw new Error(`signup failed ${res.status}: ${await res.text()}`);
-  }
-  return sessionCookieHeader(res);
+async function testSpace(app: App, name = "Test") {
+  return createTestSpace(app, name);
 }
 
-async function raw(app: App, cookie: string, proc: string, body: unknown = {}) {
+async function raw(app: App, scope: string, proc: string, body: unknown = {}) {
   return app.request(`/rpc/${proc}`, {
     method: "POST",
     headers: {
       "content-type": "application/json",
-      cookie,
+      ...testSpaceHeaders(scope),
       origin: "http://127.0.0.1:5173",
     },
     body: JSON.stringify({ json: body }),
   });
 }
 
-async function rpc<T>(app: App, cookie: string, proc: string, body: unknown = {}): Promise<T> {
-  const res = await raw(app, cookie, proc, body);
+async function rpc<T>(app: App, scope: string, proc: string, body: unknown = {}): Promise<T> {
+  const res = await raw(app, scope, proc, body);
   const text = await res.text();
   let parsed: { json?: T; error?: { message?: string } };
   try {

@@ -24,6 +24,7 @@ import { Hono } from "hono";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { mountAccountExportRoute } from "./account-export.js";
 import { importAccount } from "./account-import.js";
+import { issueLocalAccountExportToken } from "./local-export-token.js";
 
 const databaseUrl = process.env.DATABASE_URL;
 const describePostgres = process.env.VERIFY_DATABASE && databaseUrl ? describe : describe.skip;
@@ -293,7 +294,6 @@ describePostgres("account export (PostgreSQL)", () => {
     const app = new Hono();
     mountAccountExportRoute(app, {
       prisma,
-      auth: { consumeAccountExportToken: async (token) => (token === "good" ? exporter : null) },
       artifacts: { get: async (key) => new TextEncoder().encode(`bytes:${key}`) },
       home: { exportHome: async function* () {} },
     });
@@ -303,7 +303,13 @@ describePostgres("account export (PostgreSQL)", () => {
       );
     await setDeactivated(new Date());
     try {
-      expect((await app.request("/api/account/export?token=good")).status).toBe(410);
+      expect(
+        (
+          await app.request(
+            `/api/account/export?token=${await issueLocalAccountExportToken(prisma, exporter)}`,
+          )
+        ).status,
+      ).toBe(410);
     } finally {
       await setDeactivated(null);
     }
@@ -313,11 +319,12 @@ describePostgres("account export (PostgreSQL)", () => {
     const app = new Hono();
     mountAccountExportRoute(app, {
       prisma,
-      auth: { consumeAccountExportToken: async (token) => (token === "good" ? exporter : null) },
       artifacts: { get: async (key) => new TextEncoder().encode(`bytes:${key}`) },
       home: { exportHome: async function* () {} },
     });
-    const response = await app.request("/api/account/export?token=good");
+    const response = await app.request(
+      `/api/account/export?token=${await issueLocalAccountExportToken(prisma, exporter)}`,
+    );
     expect(response.status).toBe(200);
     expect(response.headers.get("content-type")).toBe("application/zip");
     expect(response.headers.get("content-disposition")).toMatch(
@@ -467,13 +474,16 @@ describePostgres("account export (PostgreSQL)", () => {
     const exportApp = new Hono();
     mountAccountExportRoute(exportApp, {
       prisma,
-      auth: { consumeAccountExportToken: async (token) => token },
       artifacts: { get: async (key) => blobs.get(key) ?? new TextEncoder().encode(`bytes:${key}`) },
       home: { exportHome: async function* () {} },
     });
     const download = async (userId: string) =>
       new Uint8Array(
-        await (await exportApp.request(`/api/account/export?token=${userId}`)).arrayBuffer(),
+        await (
+          await exportApp.request(
+            `/api/account/export?token=${await issueLocalAccountExportToken(prisma, userId)}`,
+          )
+        ).arrayBuffer(),
       );
     const archive = await download(exporter);
 

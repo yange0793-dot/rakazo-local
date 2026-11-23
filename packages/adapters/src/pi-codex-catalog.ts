@@ -3,6 +3,7 @@ import type { SecretStore } from "@rakazo/adapter-kit";
 import type { ThinkingLevel } from "@rakazo/contracts";
 import { ThinkingLevelSchema } from "@rakazo/contracts";
 import type { PrismaClient } from "@rakazo/db";
+import { CODEX_CLIENT_HEADERS } from "./model-client-headers.js";
 import type { StoredModelSecret } from "./model-secret.js";
 import { parseModelSecret } from "./model-secret.js";
 import { listAvailablePiCatalog } from "./pi-catalog-availability.js";
@@ -94,9 +95,9 @@ export async function fetchCodexCatalog(
   try {
     response = await fetchImpl(url, {
       headers: {
+        ...CODEX_CLIENT_HEADERS,
         authorization: `Bearer ${accessToken}`,
         "chatgpt-account-id": accountId,
-        originator: "rakazo",
         accept: "application/json",
       },
       redirect: "error",

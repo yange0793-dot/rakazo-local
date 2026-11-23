@@ -11,8 +11,6 @@ Rakazo อ่านจากตัวแปรสภาพแวดล้อม 
 ## ค่าหลักที่มักปรับ
 
 ```env
-SIGNUPS_ENABLED=true
-SIGNUP_ALLOWLIST=you@example.com,@company.com
 SANDBOX_PROVIDER=docker
 SANDBOX_IDLE_MS=600000
 # Set 0 when self-hosting with Docker, where an idle computer costs nothing.

@@ -38,7 +38,11 @@ describe("catalog provider authentication", () => {
       "https://openrouter.ai/api/v1/models",
     ]);
     expect(fetchImpl.mock.calls[0]?.[1]).toMatchObject({
-      headers: { Authorization: "Bearer fixture-key" },
+      headers: {
+        Authorization: "Bearer fixture-key",
+        "user-agent": "codex_cli_rs/0.154.0 (external, cli)",
+        originator: "codex_cli_rs",
+      },
       redirect: "error",
       signal: expect.any(AbortSignal),
     });
@@ -70,7 +74,15 @@ describe("catalog provider authentication", () => {
   );
 
   it.each([
-    ["deepseek", "https://api.deepseek.com/models", { Authorization: "Bearer fixture-key" }],
+    [
+      "deepseek",
+      "https://api.deepseek.com/models",
+      {
+        Authorization: "Bearer fixture-key",
+        "user-agent": "codex_cli_rs/0.154.0 (external, cli)",
+        originator: "codex_cli_rs",
+      },
+    ],
     [
       "google",
       "https://generativelanguage.googleapis.com/v1beta/models",

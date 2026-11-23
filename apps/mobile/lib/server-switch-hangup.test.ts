@@ -39,7 +39,7 @@ vi.mock("./voice", () => ({
 import { resetApiBase, saveApiBase } from "./api-server";
 import type { CallDeps } from "./call-session";
 import { startCall } from "./call-session";
-import { currentSessionGeneration, saveSessionToken } from "./session";
+import { currentSessionGeneration, loadLocalInstallSessionId } from "./session";
 
 /** Every part of a call except the ones that reach the server: those stay production code. */
 const idleDeps: Partial<CallDeps> = {
@@ -72,14 +72,14 @@ it.each([
   vi.stubGlobal("fetch", fetchImpl);
   const first = "https://first-server.example";
   await saveApiBase(first);
-  await saveSessionToken("token-a");
+  const installation = await loadLocalInstallSessionId();
   startCall(
     {
       botId: "bot-1",
       botName: "Ada",
       requestContext: {
         apiBase: first,
-        headers: { authorization: "Bearer token-a" },
+        headers: { "x-rakazo-install-id": installation },
         sessionGeneration: currentSessionGeneration(),
       },
     },
@@ -88,5 +88,5 @@ it.each([
   await expect(change()).resolves.toMatchObject({ ok: true });
   const hangUp = requests.find((request) => request.url === `${first}/rpc/threads/endCall`);
   expect(hangUp).toBeDefined();
-  expect(hangUp?.headers.get("authorization")).toBe("Bearer token-a");
+  expect(hangUp?.headers.get("x-rakazo-install-id")).toBe(installation);
 });

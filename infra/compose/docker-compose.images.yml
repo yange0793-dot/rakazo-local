@@ -39,6 +39,7 @@ x-app-environment: &app-environment # Runtime
   WAKEUP_DRIVER: graphile
   AGENT_RUNTIME: pi
   API_URL: ${API_URL:-http://127.0.0.1:5173}
+  WEB_ORIGIN: ${WEB_ORIGIN:-http://127.0.0.1:5173}
   MAX_UPLOAD_SIZE_MB:
   MAX_ATTACHMENTS_PER_MESSAGE:
   RAKAZO_UPDATE_RESTART_SUPERVISOR:
@@ -103,6 +104,12 @@ x-app-environment: &app-environment # Runtime
   PI_DEFAULT_CREDENTIALS:
   PI_SESSION_RECORDING:
   RAKAZO_LIVE_MODEL_CATALOG:
+  MODEL_CATALOG_SOURCES:
+  RAKAZO_LOCAL_MEMORY_ALLOWED_URLS:
+  RAKAZO_MEMORY_EXTRACTOR_PYTHON:
+  RAKAZO_MEMORY_EXTRACTOR_SCRIPT:
+  SELF_EVOLUTION:
+  TICKET_WORK_RECEIPTS:
   OPENROUTER_API_KEY:
   ANTHROPIC_API_KEY:
   TYPESAFE_API_KEY:
@@ -459,31 +466,15 @@ services:
       - "host.docker.internal:host-gateway"
     environment:
       <<: *app-environment
-      # Sign-in, sessions, billing and inbound webhooks: API only.
+      # Local identity, billing and inbound webhooks: API only.
       API_HOST: "0.0.0.0"
       API_PORT:
-      BETTER_AUTH_SECRET:
-      BETTER_AUTH_URL: ${BETTER_AUTH_URL:-http://127.0.0.1:5173}
       WEB_ORIGIN: ${WEB_ORIGIN:-http://127.0.0.1:5173}
-      RAKAZO_EXTRA_AUTH_ORIGINS:
-      AUTH_PASSWORD_ENABLED: ${AUTH_PASSWORD_ENABLED:-true}
-      AUTH_BREACHED_PASSWORD_CHECK_ENABLED: ${AUTH_BREACHED_PASSWORD_CHECK_ENABLED:-false}
-      PASSKEY_APPLE_APP_IDS:
-      PASSKEY_ANDROID_CERT_SHA256:
       COMPUTER_SETTINGS_ENABLED:
       # Proxies whose X-Forwarded-For is believed. Unset trusts this stack's own networks: the web
       # proxy and a reverse proxy on the host. See docs/self-host-production.md#client-addresses.
       TRUSTED_PROXIES:
       CLIENT_IP_HEADER:
-      OIDC_ISSUER: ${OIDC_ISSUER:-}
-      OIDC_CLIENT_ID: ${OIDC_CLIENT_ID:-}
-      OIDC_CLIENT_SECRET: ${OIDC_CLIENT_SECRET:-}
-      OIDC_NAME: ${OIDC_NAME:-SSO}
-      OIDC_SCOPES: ${OIDC_SCOPES:-openid email profile}
-      OIDC_ALLOW_SIGNUP_BYPASS: ${OIDC_ALLOW_SIGNUP_BYPASS:-false}
-      SCIM_BEARER_TOKEN: ${SCIM_BEARER_TOKEN:-}
-      SIGNUPS_ENABLED:
-      SIGNUP_ALLOWLIST:
       SCREEN_PROXY_SECRET: ${SCREEN_PROXY_SECRET:?Set SCREEN_PROXY_SECRET in .env}
       RAKAZO_DESKTOP_STACK_TOKEN: ${RAKAZO_DESKTOP_STACK_TOKEN:-}
       RAKAZO_GIT_SHA:
@@ -491,7 +482,6 @@ services:
       PRIVACY_POLICY_URL:
       INBOUND_EMAIL_SECRET:
       INBOUND_EMAIL_RELAY_ARC_DOMAIN:
-      WELCOME_EMAIL_ENABLED:
       STRIPE_SECRET_KEY:
       STRIPE_WEBHOOK_SECRET:
       STRIPE_PRICE_ID:

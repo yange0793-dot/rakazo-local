@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from concurrent.futures import Future, ThreadPoolExecutor
 import http.client
 import importlib.util
 import json
@@ -197,6 +198,84 @@ class IndexTests(unittest.TestCase):
             index = index_module.LocalIndex(FakeBackend(), Path("/synthetic-index"), lambda input: [value])
             with self.assertRaises(RuntimeError):
                 index.upsert(self.input())
+
+    def test_overlapping_queries_share_encoding_but_keep_namespace_results_fresh(self):
+        self.index.upsert(self.input())
+        self.index.upsert(self.input(namespace="space-b:bot-b", id="fact-b"))
+        entered, joined, release = threading.Event(), threading.Event(), threading.Event()
+        calls = []
+
+        class JoinedFuture(Future):
+            def result(self, timeout=None):
+                joined.set()
+                return super().result(timeout)
+
+        def embed(input):
+            calls.extend(input)
+            if input == ["synthetic-query"]:
+                entered.set()
+                if not release.wait(5):
+                    raise RuntimeError("Test did not release the encoder.")
+            return self.embedder(input)
+
+        self.index.embedder = embed
+        with patch.object(index_module, "Future", JoinedFuture), ThreadPoolExecutor(max_workers=3) as pool:
+            first = pool.submit(self.index.search, {
+                "namespace": "space-a:bot-a", "query": "synthetic-query", "limit": 5,
+            })
+            try:
+                self.assertTrue(entered.wait(5))
+                # An intervening different query must not evict an overlapping query.
+                different = pool.submit(self.index.vector, "synthetic-b")
+                second = pool.submit(self.index.search, {
+                    "namespace": "space-b:bot-b", "query": "synthetic-query", "limit": 5,
+                })
+                self.assertTrue(joined.wait(5))
+            finally:
+                release.set()
+            self.assertEqual([row["id"] for row in first.result()["candidates"]], ["fact-a"])
+            self.assertEqual([row["id"] for row in second.result()["candidates"]], ["fact-b"])
+            self.assertEqual(different.result(), [0.0, 1.0])
+        self.assertEqual(calls.count("synthetic-query"), 1)
+        self.assertEqual(calls.count("synthetic-b"), 1)
+        self.index.remove({"namespace": "space-b:bot-b", "indexId": "fact-a:1"})
+        self.assertEqual(self.index.search({
+            "namespace": "space-b:bot-b", "query": "synthetic-query", "limit": 5,
+        }), {"candidates": []})
+        self.assertEqual(calls.count("synthetic-query"), 2)
+
+    def test_shared_encoding_failure_releases_waiters_and_allows_retry(self):
+        for output in (RuntimeError("inference failed"), [[0.0, 0.0]]):
+            with self.subTest(output=output):
+                entered, joined, release = threading.Event(), threading.Event(), threading.Event()
+
+                class JoinedFuture(Future):
+                    def result(self, timeout=None):
+                        joined.set()
+                        return super().result(timeout)
+
+                def embed(input):
+                    entered.set()
+                    if not release.wait(5):
+                        raise RuntimeError("Test did not release the encoder.")
+                    if isinstance(output, Exception):
+                        raise output
+                    return output
+
+                self.index.embedder = embed
+                with patch.object(index_module, "Future", JoinedFuture), ThreadPoolExecutor(max_workers=2) as pool:
+                    first = pool.submit(self.index.vector, "synthetic-query")
+                    try:
+                        self.assertTrue(entered.wait(5))
+                        second = pool.submit(self.index.vector, "synthetic-query")
+                        self.assertTrue(joined.wait(5))
+                    finally:
+                        release.set()
+                    for pending in (first, second):
+                        with self.assertRaises(RuntimeError):
+                            pending.result()
+                self.index.embedder = self.embedder
+                self.assertEqual(self.index.vector("synthetic-query"), [1.0, 0.0])
 
     def test_relevance_floor_drops_vectors_below_the_measured_background(self):
         for distance, expected in (

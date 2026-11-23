@@ -4,7 +4,6 @@ import { activityPreview, formatActivityRelativeTime, routineRunLateLabel } from
 import { resetI18nForTests } from "./i18n";
 
 vi.mock("./api-server", () => ({}));
-vi.mock("./api-auth", () => ({}));
 vi.mock("./api-live", () => ({}));
 vi.mock("./api", () => ({ rpc: vi.fn() }));
 afterEach(() => resetI18nForTests());

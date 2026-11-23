@@ -1,6 +1,7 @@
+import { randomUUID } from "node:crypto";
 import type { Locator, Page, Route, TestInfo } from "@playwright/test";
-import { expect, test } from "@playwright/test";
-import { signupRequiresEmailVerification } from "@rakazo/core";
+import { expect } from "@playwright/test";
+import { createDb, createOrganizationWithDefaultSpace, runAsSystem } from "@rakazo/db";
 
 export function isRealSandboxProvider(provider = process.env.SANDBOX_PROVIDER) {
   return (
@@ -59,45 +60,34 @@ export async function completeOnboarding(page: Page, testInfo?: TestInfo) {
   }
 }
 
-/**
- * Creates the account through the auth API, as the sign-up form does, and opens
- * the page the form would land on. Passing testInfo goes through the form to
- * capture it; tests of the form itself use signupThroughForm.
- */
-export async function signup(
-  page: Page,
-  email: string,
-  password: string,
-  name: string,
-  testInfo?: TestInfo,
-) {
-  if (testInfo) return signupThroughForm(page, email, password, name, testInfo);
-  const baseURL = test.info().project.use.baseURL;
-  if (!baseURL) throw new Error("signup needs a baseURL");
-  const response = await page.request.post("/api/auth/sign-up/email", {
-    data: { email, password, name },
-    // Better Auth checks the origin of credential requests that carry cookies.
-    headers: { origin: new URL(baseURL).origin },
+/** Opens a fresh workspace owned by this local installation. */
+export async function openLocalWorkspace(page: Page, name: string, testInfo?: TestInfo) {
+  const response = await page.request.get("/api/local-identity");
+  if (!response.ok()) throw new Error(`Local identity failed (${response.status()})`);
+  const user = (await response.json()) as { id: string };
+  const { prisma, pool } = createDb(process.env.DATABASE_URL!);
+  let spaceId: string;
+  try {
+    spaceId = await runAsSystem("create local browser test workspace", async () => {
+      await prisma.user.update({ where: { id: user.id }, data: { name } });
+      return createOrganizationWithDefaultSpace(prisma, {
+        orgId: randomUUID(),
+        userId: user.id,
+        name: name.slice(0, 60),
+        slug: `e2e-${randomUUID()}`,
+      });
+    });
+  } finally {
+    await prisma.$disconnect();
+    await pool.end();
+  }
+  await page.context().setExtraHTTPHeaders({
+    "x-rakazo-space-id": spaceId,
+    "x-rakazo-install-id": `rakazo-local-install:${spaceId}`,
   });
-  if (!response.ok()) throw new Error(`sign-up ${response.status()}: ${await response.text()}`);
-  const verify = signupRequiresEmailVerification(await response.json());
-  await page.goto(verify ? "/sign-up?verify=email" : "/onboarding");
-}
-
-export async function signupThroughForm(
-  page: Page,
-  email: string,
-  password: string,
-  name: string,
-  testInfo?: TestInfo,
-) {
-  await page.goto("/sign-up");
-  await expect(page.getByRole("heading", { name: "Create your Rakazo" })).toBeVisible();
-  if (testInfo) await captureScreenshot(page, testInfo, "01-sign-up");
-  await page.getByPlaceholder("Your name").fill(name);
-  await page.getByPlaceholder("Your email address").fill(email);
-  await page.getByPlaceholder("Password").fill(password);
-  await page.getByRole("button", { name: "Create account" }).click();
+  await page.addInitScript((id) => localStorage.setItem("rakazo:space-id", id), spaceId);
+  await page.goto("/onboarding");
+  if (testInfo) await captureScreenshot(page, testInfo, "01-local-workspace");
 }
 
 /** Opens Integrations' add menu and picks one of its custom sources. */

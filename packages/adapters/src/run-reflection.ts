@@ -67,8 +67,6 @@ export interface ReflectionPayload {
   exceptMessageId?: string;
 }
 
-const MAX_TASK_CHARS = 2_000;
-const MAX_FINAL_REPLY_CHARS = 4_000;
 const MAX_FOLLOW_UP_CHARS = 1_000;
 const MAX_TOOL_EVENTS = 200;
 const MAX_TOOL_ERROR_CHARS = 200;
@@ -791,8 +789,8 @@ async function reviewAndRecord(
       )
     : [];
 
-  const taskPrompt = (task?.prompt ?? "").trim().slice(0, MAX_TASK_CHARS);
-  const finalReply = finalBotReply(recentMessages).slice(0, MAX_FINAL_REPLY_CHARS);
+  const taskPrompt = (task?.prompt ?? "").trim();
+  const finalReply = finalBotReply(recentMessages);
   const skillLines = [
     ...savedSkills.map((skill) => {
       const name = skill.name || skill.goal.slice(0, MAX_NAME_CHARS);

@@ -27,7 +27,6 @@ it.skipIf(!databaseUrl)(
         bootstrapUserSpace(
           db.prisma,
           { id: userId },
-          { signupsEnabled: "false", signupAllowlist: "" },
         ),
       ));
       await system.deploymentSettings.update({

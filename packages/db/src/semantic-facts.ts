@@ -1284,13 +1284,35 @@ export class SemanticFactStore {
   }
 
   private async tombstone(tx: Tx, row: FactRecord): Promise<void> {
-    if (row.status === "forgotten") return;
-    // Forgetting must not leave the body recoverable in the live row or in any revision.
-    // Source fingerprints and the tombstone itself stay to block a later identical learn.
+    // Keep only non-identifying tombstone metadata; source fingerprints remain keyed digests.
+    const provenance = SemanticFactProvenanceSchema.parse(JSON.parse(row.provenance));
+    const forgottenProvenance = JSON.stringify({
+      kind: provenance.kind,
+      observedAt: provenance.observedAt ?? new Date().toISOString(),
+    });
     await tx.semanticFactRevision.deleteMany({ where: { factId: row.id } });
+    if (row.status === "forgotten") {
+      const updated =
+        row.content === FORGOTTEN_CONTENT && row.provenance === forgottenProvenance
+          ? row
+          : await tx.semanticFact.update({
+              where: { id: row.id },
+              data: {
+                content: FORGOTTEN_CONTENT,
+                provenance: forgottenProvenance,
+              },
+            });
+      await this.snapshot(tx, updated);
+      return;
+    }
     const updated = await tx.semanticFact.update({
       where: { id: row.id },
-      data: { status: "forgotten", revision: { increment: 1 }, content: FORGOTTEN_CONTENT },
+      data: {
+        status: "forgotten",
+        revision: { increment: 1 },
+        content: FORGOTTEN_CONTENT,
+        provenance: forgottenProvenance,
+      },
     });
     await this.snapshot(tx, updated);
     await this.enqueueIndex(tx, updated, row.revision, "delete");
@@ -1301,9 +1323,9 @@ export class SemanticFactStore {
     request: SemanticMemoryForgetRequest,
     ctx: AdapterContext,
   ): Promise<{ id: string; expired: boolean; reason: string | null }> {
-    if (request.expectedRevision !== undefined) positiveRevision(request.expectedRevision);
-    if (request.expectedRevision === undefined && !ctx.runId)
+    if (request.expectedRevision === undefined)
       throw new Error("Forgetting a managed fact requires its expected revision.");
+    positiveRevision(request.expectedRevision);
     const namespace = request.entity
       ? this.citationNamespace({ botId: request.botId, entity: request.entity }, ctx)
       : this.scopeNamespace(request, ctx);
@@ -1314,8 +1336,10 @@ export class SemanticFactStore {
       const row = await this.lockFact(tx, request.id, namespace);
       if (request.expectedRevision !== undefined && row.revision !== request.expectedRevision) {
         // A retry after a committed forget sees exactly one revision past its expectation.
-        if (row.status === "forgotten" && row.revision === request.expectedRevision + 1)
+        if (row.status === "forgotten" && row.revision === request.expectedRevision + 1) {
+          await this.tombstone(tx, row);
           return { id: row.id, expired: true, reason: null };
+        }
         throw new Error(MEMORY_REVISION_CONFLICT_ERROR);
       }
       if (ctx.runId)

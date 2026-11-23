@@ -763,12 +763,12 @@ describePostgres("shared spaces: invites and membership (PostgreSQL)", () => {
     ).resolves.toEqual({ organizationId: owner.organizationId, isOwner: true });
     await expect(organizationSeatCount(system, owner.organizationId)).resolves.toBe(1);
 
-    await recordAuditEvent({ action: "auth.sign_in", actor: { type: "user", id: invitee.id } });
+    await recordAuditEvent({ action: "device.paired", actor: { type: "user", id: invitee.id } });
     await expect(
       system.auditEvent.count({
         where: {
           actorId: invitee.id,
-          action: "auth.sign_in",
+          action: "device.paired",
           organizationId: owner.organizationId,
         },
       }),
@@ -777,7 +777,7 @@ describePostgres("shared spaces: invites and membership (PostgreSQL)", () => {
       system.auditEvent.count({
         where: {
           actorId: invitee.id,
-          action: "auth.sign_in",
+          action: "device.paired",
           organizationId: invitee.organizationId,
         },
       }),

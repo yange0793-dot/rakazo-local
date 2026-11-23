@@ -1,11 +1,17 @@
 import { expect, test } from "@playwright/test";
-import { captureScreenshot, completeOnboarding, openUserSettings, rpc, signup } from "./helpers";
+import {
+  captureScreenshot,
+  completeOnboarding,
+  openLocalWorkspace,
+  openUserSettings,
+  rpc,
+} from "./helpers";
 
 test("saves a contact, a card billed to it, and a login from Settings, showing no protected value", async ({
   page,
 }, testInfo) => {
   const stamp = Date.now();
-  await signup(page, `vault-${stamp}@rakazo.test`, "password12", "Vault Owner");
+  await openLocalWorkspace(page, "Vault Owner");
   await completeOnboarding(page);
   const settings = await openUserSettings(page, "vault");
   const vault = settings.getByTestId("vault");

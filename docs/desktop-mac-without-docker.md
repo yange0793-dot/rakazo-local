@@ -225,7 +225,7 @@ plus the kernel download on its first start (about 45 s measured). The computer 
   stack exists yet (`.native-ports`), the saved setup is **This computer** and Docker answers, the
   app asks once ("Run Rakazo without Docker?" with **Move** and **Keep Docker**) and remembers the
   answer in `.desktop-stack-choice`. **Keep Docker** keeps today's path. **Move** keeps the same
-  `.env` (so `BETTER_AUTH_SECRET`, `ENCRYPTION_KEY` and the other secrets carry over) and, on the
+  `.env` (so `ENCRYPTION_KEY` and the other secrets carry over) and, on the
   next start, after the database VM is up and before migrations: empties the `rakazo` database,
   stops the Docker API, worker, web and supervisor, creates the `rakazo_app` role if it is missing,
   then streams `pg_dump --format=custom` from the Docker database container through the app into

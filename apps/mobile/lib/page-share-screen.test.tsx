@@ -65,7 +65,6 @@ vi.mock("./native", () => ({ useMobileTokens: () => ({}) }));
 vi.mock("./session", () => ({ registerSessionDiskCache: () => undefined }));
 vi.mock("./page-runtime", () => ({ loadPageRuntime: async () => "" }));
 vi.mock("./api-server", () => ({}));
-vi.mock("./api-auth", () => ({}));
 vi.mock("./api-live", () => ({}));
 vi.mock("./api", () => ({
   rpc: vi.fn(async (proc: string, input: { visibility?: "private" | "link"; link?: true }) => {

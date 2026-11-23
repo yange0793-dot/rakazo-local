@@ -37,7 +37,6 @@ pg("lesson feedback through the worker and owner API (PostgreSQL)", () => {
         provisionMessagingIdentity(
           db.prisma,
           { provider: "email", address },
-          { signupsEnabled: undefined, signupAllowlist: undefined },
         ),
       );
       const { userId, spaceId, botId, threadId } = identity;

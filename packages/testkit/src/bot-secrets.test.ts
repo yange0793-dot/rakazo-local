@@ -6,8 +6,9 @@ import { EncryptedSecretStore, ScriptedAgentRuntime } from "@rakazo/adapters";
 import type { createApp } from "@rakazo/api/app";
 import { resolveEncryptionKey } from "@rakazo/core";
 import { answerRunInput, runAsSystem, runAsTenant } from "@rakazo/db";
-import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
+import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { discardBotIntroFromCreate } from "./discard-bot-intro.js";
+import { createTestSpace, testSpaceHeaders } from "./index.js";
 import { asSystem } from "./system-db.js";
 
 const hasDb = process.env.VERIFY_DATABASE === "1" && Boolean(process.env.DATABASE_URL);
@@ -23,7 +24,6 @@ describeIntegration("reusable credential lifecycle", () => {
   let handles: Awaited<ReturnType<typeof createApp>>;
   let db: Awaited<ReturnType<typeof createApp>>["prisma"];
   const dataDir = mkdtempSync(path.join(tmpdir(), "rakazo-secret-lifecycle-"));
-  const stamp = `${Date.now()}-${Math.random().toString(36).slice(2)}`;
   const fetch = vi.fn<typeof globalThis.fetch>(async (_url, init) => {
     const auth = new Headers(init?.headers).get("Authorization");
     return Response.json({
@@ -48,6 +48,11 @@ describeIntegration("reusable credential lifecycle", () => {
       },
     });
     db = asSystem(handles.prisma);
+  });
+  beforeEach(async () => {
+    await db.userActionApprovalRule.deleteMany({});
+    await db.userActionAutoReviewPreference.deleteMany({});
+    await db.vaultCredential.deleteMany({});
   });
   afterAll(async () => {
     await handles?.stop();
@@ -152,7 +157,7 @@ describeIntegration("reusable credential lifecycle", () => {
               handles.executor.continueRun(runId, "recovery-worker"),
             );
           } else {
-            await rpc(seeded.cookie, "threads/answer", {
+            await rpc(seeded.scope, "threads/answer", {
               botId: seeded.bot.id,
               runId,
               messageId: message.id,
@@ -178,7 +183,7 @@ describeIntegration("reusable credential lifecycle", () => {
               expect.objectContaining({ input: "secret", credential: destination }),
             ]),
           );
-          await rpc(seeded.cookie, "threads/answer", {
+          await rpc(seeded.scope, "threads/answer", {
             botId: seeded.bot.id,
             runId,
             messageId: message.id,
@@ -215,7 +220,7 @@ describeIntegration("reusable credential lifecycle", () => {
         );
         for (const invalid of ["x".repeat(16_385), "key\r\nX-Evil: injected", "key "]) {
           await expect(
-            rpc(seeded.cookie, "threads/answer", {
+            rpc(seeded.scope, "threads/answer", {
               botId: seeded.bot.id,
               runId: seeded.run.id,
               messageId: pending.id,
@@ -408,7 +413,7 @@ describeIntegration("reusable credential lifecycle", () => {
         where: { runId: seeded.run.id, role: "bot" },
         orderBy: { seq: "desc" },
       });
-      await rpc(seeded.cookie, "threads/answer", {
+      await rpc(seeded.scope, "threads/answer", {
         botId: seeded.bot.id,
         runId: seeded.run.id,
         messageId: card.id,
@@ -488,13 +493,13 @@ describeIntegration("reusable credential lifecycle", () => {
         },
         { timeout: 15_000 },
       );
-      // Another member's vault is not searched.
+      // The same local owner's vault is available in another space.
       const other = await seedRun("site-login-other", "Sign in to the site");
       const otherRun = await nextRun(other, [requestLogin("my_site_account")]);
       await vi.waitFor(
         async () => {
           expect(await db.run.findUniqueOrThrow({ where: { id: otherRun.id } })).toMatchObject({
-            status: "waiting_input",
+            status: "completed",
           });
         },
         { timeout: 15_000 },
@@ -534,13 +539,13 @@ describeIntegration("reusable credential lifecycle", () => {
     try {
       const seeded = await seedRun("login-replace", "Sign in");
       const { userId, spaceId } = seeded.me;
-      await rpc(seeded.cookie, "vault/put", {
+      await rpc(seeded.scope, "vault/put", {
         destination: www,
         value: JSON.stringify({ username: "fake-user", password: "fake-password-www" }),
       });
       const saved = await db.vaultCredential.findFirstOrThrow({ where: { userId } });
       // A second bot of the same member asks to replace the same login for another site.
-      const bot = await rpc<{ id: string }>(seeded.cookie, "bots/create", {
+      const bot = await rpc<{ id: string }>(seeded.scope, "bots/create", {
         name: "Executor login-replace 2",
         title: "",
         description: "",
@@ -599,7 +604,7 @@ describeIntegration("reusable credential lifecycle", () => {
             headers: {
               "content-type": "application/json",
               origin: "http://127.0.0.1:5173",
-              cookie: seeded.cookie,
+              ...testSpaceHeaders(seeded.scope),
             },
             body: JSON.stringify({
               json: {
@@ -648,9 +653,9 @@ describeIntegration("reusable credential lifecycle", () => {
       completedAt?: Date;
     } = {},
   ) {
-    const cookie = await signup(`executor-${label}-${stamp}@rakazo.test`, `Executor ${label}`);
-    const me = await rpc<{ userId: string; spaceId: string }>(cookie, "me");
-    const bot = await rpc<{ id: string }>(cookie, "bots/create", {
+    const scope = await testSpace(`Executor ${label}`);
+    const me = await rpc<{ userId: string; spaceId: string }>(scope, "me");
+    const bot = await rpc<{ id: string }>(scope, "bots/create", {
       name: `Executor ${label}`,
       title: "",
       description: "",
@@ -684,29 +689,20 @@ describeIntegration("reusable credential lifecycle", () => {
         completedAt: runState.completedAt,
       },
     });
-    return { cookie, me, bot, thread, task, run };
+    return { scope, me, bot, thread, task, run };
   }
 
-  async function signup(email: string, name: string) {
-    const response = await handles.app.request("/api/auth/sign-up/email", {
-      method: "POST",
-      headers: { "content-type": "application/json", origin: "http://127.0.0.1:5173" },
-      body: JSON.stringify({ email, password: "password12", name }),
-    });
-    expect(response.status).toBeLessThan(400);
-    const raw = response.headers.get("set-cookie") ?? "";
-    const match = raw.match(/better-auth\.session_token=([^;]+)/);
-    expect(match?.[1]).toBeTruthy();
-    return `better-auth.session_token=${match![1]}`;
+  async function testSpace(name = "Test") {
+    return createTestSpace(handles.app, name);
   }
 
-  async function rpc<T>(cookie: string, procedure: string, body: unknown = {}): Promise<T> {
+  async function rpc<T>(scope: string, procedure: string, body: unknown = {}): Promise<T> {
     const response = await handles.app.request(`/rpc/${procedure}`, {
       method: "POST",
       headers: {
         "content-type": "application/json",
         origin: "http://127.0.0.1:5173",
-        cookie,
+        ...testSpaceHeaders(scope),
       },
       body: JSON.stringify({ json: body }),
     });
@@ -714,6 +710,6 @@ describeIntegration("reusable credential lifecycle", () => {
     if (!response.ok || payload.error) {
       throw new Error(payload.error?.message ?? `${procedure} failed (${response.status})`);
     }
-    return discardBotIntroFromCreate(handles, cookie, procedure, payload.json as T);
+    return discardBotIntroFromCreate(handles, scope, procedure, payload.json as T);
   }
 });

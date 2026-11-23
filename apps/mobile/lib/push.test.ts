@@ -47,12 +47,10 @@ import { requireOptionalNativeModule } from "expo-modules-core";
 import * as Notifications from "expo-notifications";
 import { Platform } from "react-native";
 import { rpc } from "./api";
-import { signOut } from "./api-auth";
 import { selectInitialSpace } from "./api-server";
 import { resumeLiveNotifications, stopLiveNotifications } from "./live-notifications.js";
 import { registerPushToken } from "./push";
 import * as session from "./session";
-import { restoreSessionToken } from "./session";
 
 function deferred<T>() {
   let resolve!: (value: T) => void;
@@ -91,7 +89,6 @@ beforeEach(async () => {
   vi.mocked(Notifications.requestPermissionsAsync).mockImplementation(
     () => native.run(() => undefined).then(() => permission.promise) as never,
   );
-  await restoreSessionToken("fake-session");
 });
 
 afterEach(() => {
@@ -152,13 +149,14 @@ it("syncs the native session before the server can push", async () => {
   vi.mocked(Notifications.getPermissionsAsync).mockResolvedValue({ granted: true } as never);
   const resumed = deferred<boolean>();
   vi.mocked(resumeLiveNotifications).mockReturnValueOnce(resumed.promise);
+  const installation = await session.loadLocalInstallSessionId();
 
   const registration = registerPushToken();
   try {
     await vi.waitFor(() =>
       expect(resumeLiveNotifications).toHaveBeenCalledExactlyOnceWith(
         "http://127.0.0.1:3100",
-        "fake-session",
+        installation,
         expect.any(String),
       ),
     );
@@ -174,13 +172,13 @@ it("syncs the native session before the server can push", async () => {
   );
 });
 
-it("does not restore a signed-out session while push registration loads its token", async () => {
+it("drops a pending registration when its endpoint changes", async () => {
   Platform.OS = "android";
   vi.mocked(Notifications.getPermissionsAsync).mockResolvedValue({ granted: true } as never);
   const loaded = deferred<void>();
   const release = deferred<void>();
-  const loadToken = session.loadSessionToken;
-  vi.spyOn(session, "loadSessionToken").mockImplementationOnce(async () => {
+  const loadToken = session.loadLocalInstallSessionId;
+  vi.spyOn(session, "loadLocalInstallSessionId").mockImplementationOnce(async () => {
     const token = await loadToken();
     loaded.resolve();
     await release.promise;
@@ -190,9 +188,9 @@ it("does not restore a signed-out session while push registration loads its toke
   const registration = registerPushToken();
   try {
     await loaded.promise;
-    await signOut();
+    await session.changeLocalEndpoint(() => {});
     expect(stopLiveNotifications).toHaveBeenCalledWith(true);
-    expect(native.store.has("rakazo.session_token")).toBe(false);
+    expect(await session.loadLocalInstallSessionId()).toMatch(/^rakazo-local-install:/);
   } finally {
     release.resolve();
     await registration;
@@ -223,7 +221,7 @@ it("does not register the push token when the native session sync fails", async 
 it("does not register push while a sign-in has not saved its token yet", async () => {
   Platform.OS = "android";
   vi.mocked(Notifications.getPermissionsAsync).mockResolvedValue({ granted: true } as never);
-  vi.spyOn(session, "loadSessionToken").mockResolvedValueOnce("");
+  vi.spyOn(session, "loadLocalInstallSessionId").mockResolvedValueOnce("");
 
   await registerPushToken();
 

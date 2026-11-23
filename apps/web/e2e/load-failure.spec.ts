@@ -1,10 +1,10 @@
 import { expect, test } from "@playwright/test";
-import { captureScreenshot, completeOnboarding, signup } from "./helpers";
+import { captureScreenshot, completeOnboarding, openLocalWorkspace } from "./helpers";
 
 test("a failed integrations load offers Retry instead of an empty catalog", async ({
   page,
 }, testInfo) => {
-  await signup(page, `catalog-load-${Date.now()}@rakazo.test`, "password12", "Catalog Load");
+  await openLocalWorkspace(page, "Catalog Load");
   await completeOnboarding(page);
 
   // A 502 is what the proxy answers while the API restarts.
@@ -55,12 +55,7 @@ for (const result of ["empty", "plugin", "unavailable"] as const) {
   test(`integrations waits for plugins before showing an empty catalog (${result})`, async ({
     page,
   }, testInfo) => {
-    await signup(
-      page,
-      `catalog-pending-${result}-${Date.now()}@rakazo.test`,
-      "password12",
-      "Catalog Load",
-    );
+    await openLocalWorkspace(page, "Catalog Load");
     await completeOnboarding(page);
     await page.route("**/rpc/connections/catalog", (route) =>
       route.fulfill({ json: { json: [] } }),

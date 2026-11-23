@@ -107,7 +107,6 @@ export const ROW_SECURITY_MODELS: ReadonlySet<string> = new Set([
   "CallPushDevice",
   "WorkActivityToken",
   "WorkActivityStartToken",
-  "EmailSend",
   "Thread",
   "ThreadRead",
   "Message",

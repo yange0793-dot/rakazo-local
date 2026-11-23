@@ -1,0 +1,13 @@
+appId: com.rakazo.app
+---
+- runFlow: server.yaml
+- extendedWaitUntil:
+    visible:
+      id: "organization-menu"
+    timeout: 30000
+- tapOn:
+    id: "organization-menu"
+- tapOn: "Screenshot User"
+- extendedWaitUntil:
+    visible: "Researcher"
+    timeout: 30000

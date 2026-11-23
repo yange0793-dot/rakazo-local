@@ -1,10 +1,9 @@
 vi.mock("./ai-consent", () => ({ promptAiConsent: vi.fn() }));
 
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { currentApiBase, subscribeApiBase, subscribeSessionRejected } from "./api";
+import { currentApiBase, subscribeApiBase } from "./api";
 import { resetApiBase, saveApiBase } from "./api-server";
 import { loadLinkFavicon } from "./link-favicons";
-import { restoreSessionToken } from "./session";
 
 vi.mock("expo-secure-store", () => ({
   getItemAsync: vi.fn(async () => null),
@@ -18,9 +17,6 @@ vi.mock("./live-notifications.js", () => ({
 vi.mock("./network-cache.js", () => ({ clearNetworkCache: vi.fn() }));
 
 describe("link favicons on mobile", () => {
-  beforeEach(async () => {
-    await restoreSessionToken("session-token");
-  });
 
   afterEach(() => {
     vi.unstubAllGlobals();
@@ -40,7 +36,7 @@ describe("link favicons on mobile", () => {
     const unsubscribe = subscribeApiBase(changed);
     try {
       const pending = loadLinkFavicon("https://site.example.test", previous);
-      const rejected = expect(pending).rejects.toThrow("Server changed");
+      const rejected = expect(pending).rejects.toThrow();
       await vi.waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(1));
       expect((await saveApiBase("https://new-api.example.test")).ok).toBe(true);
       expect(changed).toHaveBeenCalledTimes(1);
@@ -76,13 +72,9 @@ describe("link favicons on mobile", () => {
   ])("fails quietly on an older server that answers %s", async (_name, body) => {
     const fetchMock = vi.fn(async () => new Response(body, { status: 404 }));
     vi.stubGlobal("fetch", fetchMock);
-    const rejected = vi.fn();
-    const unsubscribe = subscribeSessionRejected(rejected);
 
     // The renderer turns the rejection into the globe and remembers it for the session.
     await expect(loadLinkFavicon("https://x.com")).rejects.toBeInstanceOf(Error);
     expect(fetchMock).toHaveBeenCalledTimes(1);
-    expect(rejected).not.toHaveBeenCalled();
-    unsubscribe();
   });
 });

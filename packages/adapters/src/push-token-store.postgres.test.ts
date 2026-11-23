@@ -12,7 +12,7 @@ suite("database push registrations", () => {
   let worker: PrismaPushTokenStore;
   const prefix = `push-fixture-${randomUUID()}`;
   const user = (id: string) => `${prefix}-${id}`;
-  const session = (id: string) => `${prefix}-session-${id}`;
+  const session = (id: string) => `rakazo-local-install:${prefix}-${id}`;
   const token = (id: string) => `ExponentPushToken[${prefix}-${id}]`;
   beforeAll(async () => {
     a = createDb(process.env.DATABASE_URL!);
@@ -24,23 +24,7 @@ suite("database push registrations", () => {
         await a.prisma.user.create({
           data: { id: user(id), name: "Fixture", email: `${user(id)}@example.invalid` },
         });
-        await a.prisma.session.create({
-          data: {
-            id: session(id),
-            token: session(id),
-            userId: user(id),
-            expiresAt: new Date(Date.now() + 3600_000),
-          },
-        });
       }
-      await a.prisma.session.create({
-        data: {
-          id: session("a2"),
-          token: session("a2"),
-          userId: user("a"),
-          expiresAt: new Date(Date.now() + 3600_000),
-        },
-      });
     });
   });
   beforeEach(async () => {
@@ -100,17 +84,6 @@ suite("database push registrations", () => {
     expect(await worker.load(user("a"))).toBeUndefined();
   });
 
-  it("retargets only the replaced session and cannot reclaim a handed-over device", async () => {
-    await api.save(user("a"), token("shared"), session("a"));
-    await worker.endSession(user("a"), session("a"), session("a2"));
-    await api.endSession(user("a"), session("a"));
-    expect((await worker.load(user("a")))?.sessionId).toBe(session("a2"));
-    await worker.save(user("b"), token("shared"), session("b"));
-    await api.endSession(user("a"), session("a2"), session("a"));
-    expect(await api.load(user("a"))).toBeUndefined();
-    expect((await worker.load(user("b")))?.token).toBe(token("shared"));
-  });
-
   it("imports only unclaimed devices and accounts, including concurrent imports", async () => {
     await api.save(user("b"), token("owned"), session("b"));
     expect(await worker.importLegacy(user("a"), token("owned"), session("a"))).toBe(false);
@@ -134,44 +107,12 @@ suite("database push registrations", () => {
     expect((await worker.load(user("b")))?.token).toBe(token("racing"));
   });
 
-  it("rejects expired, missing and another account's sessions without stealing tokens", async () => {
+  it("rejects obsolete account session identifiers without stealing registrations", async () => {
     await api.save(user("a"), token("shared"), session("a"));
-    for (const invalid of [session("missing"), session("a")])
+    for (const invalid of ["", "old-login-session"])
       await expect(worker.save(user("b"), token("shared"), invalid)).rejects.toBeInstanceOf(
         PushSessionEndedError,
       );
-    await runAsSystem("expire fixture session", () =>
-      a.prisma.session.update({ where: { id: session("c") }, data: { expiresAt: new Date(0) } }),
-    );
-    await expect(worker.save(user("c"), token("shared"), session("c"))).rejects.toBeInstanceOf(
-      PushSessionEndedError,
-    );
     expect((await api.load(user("a")))?.token).toBe(token("shared"));
-  });
-
-  it("does not publish a registration after a concurrent session deletion commits", async () => {
-    let release!: () => void;
-    let locked!: () => void;
-    const ready = new Promise<void>((resolve) => {
-      locked = resolve;
-    });
-    const hold = new Promise<void>((resolve) => {
-      release = resolve;
-    });
-    const deletion = runAsSystem("delete fixture session concurrently", () =>
-      a.prisma.$transaction(async (tx) => {
-        await tx.session.delete({ where: { id: session("a2") } });
-        locked();
-        await hold;
-      }),
-    );
-    await ready;
-    const registering = worker.save(user("a"), token("late"), session("a2"));
-    // Attach rejection handling before releasing the blocked registration.
-    const rejected = expect(registering).rejects.toBeInstanceOf(PushSessionEndedError);
-    release();
-    await deletion;
-    await rejected;
-    expect(await api.load(user("a"))).toBeUndefined();
   });
 });

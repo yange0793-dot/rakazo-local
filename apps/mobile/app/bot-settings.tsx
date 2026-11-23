@@ -50,7 +50,7 @@ import { afterChatNotifyChange } from "../lib/live-notifications";
 import type { MobileMe, MobileModel, MobileModelCredential } from "../lib/mobile-types";
 import { native, useMobileTokens } from "../lib/native";
 import { createQueuedSave } from "../lib/queued-save";
-import { loadSessionToken } from "../lib/session";
+import { loadLocalInstallSessionId } from "../lib/session";
 import { useSideInsets } from "../lib/side-insets";
 import { thinkingLevelLabel } from "../lib/thinking-level";
 import { errorText } from "../lib/user-error";
@@ -159,7 +159,7 @@ export default function BotSettingsScreen() {
           try {
             await afterChatNotifyChange(
               currentApiBase(),
-              await loadSessionToken(),
+              await loadLocalInstallSessionId(),
               selectedSpaceId() ?? "",
               { botId, threadId: threadId.current, notify },
             );

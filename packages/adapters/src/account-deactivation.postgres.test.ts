@@ -43,7 +43,6 @@ describePostgres("a deactivated account's work (PostgreSQL)", () => {
       provisionMessagingIdentity(
         db.prisma,
         { provider: "email", address: `deactivation-${randomUUID()}@rakazo.test` },
-        { signupsEnabled: undefined, signupAllowlist: undefined },
       ),
     );
     const identity = { userId, spaceId, botId, threadId };

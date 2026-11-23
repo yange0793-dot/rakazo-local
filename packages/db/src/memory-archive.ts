@@ -569,7 +569,10 @@ export class MemoryArchiveStore {
             ? directUserText(row.blocks)
             : null;
         const bytes = Buffer.byteLength(message?.content ?? text ?? "");
-        // The first row always goes in; the cursor has to be able to move past it.
+        if (bytes > MAX_BATCH_TEXT_BYTES) {
+          batchThroughSeq = row.seq;
+          continue;
+        }
         if (fresh.length > 0 && rangeBytes + bytes > MAX_BATCH_TEXT_BYTES) break;
         rangeBytes += bytes;
         if (message) fresh.push(message);
@@ -602,34 +605,42 @@ export class MemoryArchiveStore {
         }),
       ]);
       const evidence = [...forgotten, ...historical].slice(0, RETIREMENT_EVIDENCE_LIMIT);
-      const retirementEvidence: MemoryExtractionExisting[] = evidence.flatMap((row) => {
-        const provenance = provenanceValue(row.provenance);
-        const status =
-          row.status === "forgotten" || row.status === "historical" ? row.status : null;
-        if (!status) return [];
-        const category = provenance.category;
-        const quote = typeof provenance.quote === "string" ? provenance.quote : undefined;
-        return [
-          {
-            id: row.id,
-            revision: row.revision,
-            // Forgetting erases the stored body; its quoted words are all that remains as
-            // evidence of what must not be recreated.
-            content: status === "forgotten" ? (quote ?? row.content) : row.content,
-            status,
-            ...(typeof provenance.messageId === "string"
-              ? { sourceMessageId: provenance.messageId }
-              : {}),
-            ...(quote === undefined ? {} : { sourceQuote: quote }),
-            ...(category === "preference" ||
-            category === "project" ||
-            category === "experience" ||
-            category === "reference"
-              ? { category }
-              : {}),
-          },
-        ];
-      });
+      const retirementEvidence: MemoryExtractionExisting[] = evidence.flatMap(
+        (row): MemoryExtractionExisting[] => {
+          if (row.status === "forgotten") {
+            return [
+              {
+                id: row.id,
+                revision: row.revision,
+                content: row.content,
+                status: "forgotten" as const,
+              },
+            ];
+          }
+          const provenance = provenanceValue(row.provenance);
+          if (row.status !== "historical") return [];
+          const category = provenance.category;
+          const quote = typeof provenance.quote === "string" ? provenance.quote : undefined;
+          return [
+            {
+              id: row.id,
+              revision: row.revision,
+              content: row.content,
+              status: "historical",
+              ...(typeof provenance.messageId === "string"
+                ? { sourceMessageId: provenance.messageId }
+                : {}),
+              ...(quote === undefined ? {} : { sourceQuote: quote }),
+              ...(category === "preference" ||
+              category === "project" ||
+              category === "experience" ||
+              category === "reference"
+                ? { category }
+                : {}),
+            },
+          ];
+        },
+      );
       return {
         threadId: input.threadId,
         botId: input.botId,

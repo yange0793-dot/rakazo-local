@@ -37,7 +37,6 @@ describePostgres("bot email addresses (PostgreSQL)", () => {
     const { spaceId } = await bootstrapUserSpace(
       system,
       { id: userId },
-      { signupsEnabled: undefined, signupAllowlist: undefined },
     );
     return { userId, spaceId };
   }

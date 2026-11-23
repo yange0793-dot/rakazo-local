@@ -64,7 +64,7 @@ dbTests("referrals", () => {
     const referrer = await newOrganization("early");
     const { referral } = await service.status(referrer);
     expect(referral).toEqual({
-      url: expect.stringMatching(`^${webOrigin}/sign-up\\?ref=`),
+      url: expect.stringMatching(`^${webOrigin}/app\\?ref=`),
       rewards: 0,
     });
     await expect(service.status(referrer)).resolves.toMatchObject({ referral });

@@ -1,9 +1,8 @@
 // @vitest-environment jsdom
 
-import type { AccountSecurity } from "@rakazo/contracts";
 import type * as UiWeb from "@rakazo/ui-web";
 import type { ReactNode } from "react";
-import { act, useEffect } from "react";
+import { act } from "react";
 import { createRoot } from "react-dom/client";
 import { MemoryRouter } from "react-router-dom";
 import { afterEach, expect, it, vi } from "vitest";
@@ -74,27 +73,6 @@ vi.mock("@rakazo/ui-web", async (importOriginal) => ({
   cn: (...values: unknown[]) => values.filter(Boolean).join(" "),
 }));
 
-const accountPolicy = vi.hoisted(() => ({
-  passwordChangeEnabled: undefined as boolean | undefined,
-}));
-vi.mock("../components/AccountAccess", () => ({
-  AccountAccess: ({ onSecurity }: { onSecurity: (value: AccountSecurity) => void }) => {
-    useEffect(
-      () =>
-        onSecurity({
-          hasPassword: true,
-          passwordChangeEnabled: accountPolicy.passwordChangeEnabled,
-          freshOidcAuth: false,
-          ssoLinked: false,
-          emailDeletion: false,
-          sso: null,
-        }),
-      [onSecurity],
-    );
-    return null;
-  },
-}));
-
 vi.mock("../components/AccountDataSettings", () => ({ AccountDataSettings: () => null }));
 vi.mock("../components/ApprovalRulesSettings", () => ({ ApprovalRulesSettings: () => null }));
 vi.mock("../components/TrustedLinkSitesSettings", () => ({
@@ -106,7 +84,7 @@ vi.mock("../components/ComputersUnavailableHint", () => ({
 }));
 vi.mock("../components/ComputerDeviceSettings", () => ({ ComputerDeviceSettings: () => null }));
 vi.mock("../components/DesktopUpdates", () => ({ DesktopUpdateSection: () => null }));
-vi.mock("../lib/auth", () => ({ authClient: { changePassword: vi.fn(), updateUser: vi.fn() } }));
+vi.mock("../lib/rpc", () => ({ rpc: { profile: { updateName: vi.fn() } } }));
 vi.mock("../lib/i18n", () => ({
   getActiveUiLocale: () => "en",
   setUiLocale: (locale: string) => Promise.resolve(locale),
@@ -116,7 +94,7 @@ vi.mock("../lib/ui-appearance", () => ({
   setUiAppearance: vi.fn(),
 }));
 
-import { authClient } from "../lib/auth";
+import { rpc } from "../lib/rpc";
 import {
   COMPOSER_ENTER_TO_SEND_STORAGE_KEY,
   composerEnterToSendPreference,
@@ -232,61 +210,6 @@ it("turns loading web images on and off from the settings toggle", async () => {
     });
     expect(toggle.getAttribute("aria-checked")).toBe("false");
     expect(remoteImagesPreference.get()).toBe(false);
-  } finally {
-    await act(async () => root.unmount());
-    container.remove();
-    vi.unstubAllGlobals();
-  }
-});
-
-it.each([undefined, true, false])("respects the password-change policy (%s)", async (enabled) => {
-  accountPolicy.passwordChangeEnabled = enabled;
-  vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
-  const container = document.createElement("div");
-  const root = createRoot(container);
-  try {
-    await act(async () => root.render(<GeneralSettingsPanels name="Test" />));
-    expect(container.textContent?.includes("Change password")).toBe(enabled !== false);
-  } finally {
-    await act(async () => root.unmount());
-    accountPolicy.passwordChangeEnabled = undefined;
-    vi.unstubAllGlobals();
-  }
-});
-
-it("keeps the password form closed until asked and closes it after a change", async () => {
-  vi.mocked(authClient.changePassword).mockResolvedValue({ data: {}, error: null } as never);
-  vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
-  const container = document.createElement("div");
-  document.body.append(container);
-  const root = createRoot(container);
-  const passwordFields = () => container.querySelectorAll('input[type="password"]');
-  const setValue = (input: Element, value: string) => {
-    Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")?.set?.call(input, value);
-    input.dispatchEvent(new Event("input", { bubbles: true }));
-  };
-  try {
-    await act(async () => root.render(<GeneralSettingsPanels name="Test" />));
-    expect(passwordFields()).toHaveLength(0);
-
-    const open = [...container.querySelectorAll("button")].find(
-      (button) => button.textContent === "Change password",
-    );
-    await act(async () => open?.click());
-    const [current, next, confirm] = passwordFields();
-    await act(async () => {
-      setValue(current!, "old-password");
-      setValue(next!, "new-password-123");
-      setValue(confirm!, "new-password-123");
-    });
-    await act(async () => container.querySelector("form")?.requestSubmit());
-
-    expect(authClient.changePassword).toHaveBeenCalledWith({
-      currentPassword: "old-password",
-      newPassword: "new-password-123",
-      revokeOtherSessions: true,
-    });
-    expect(passwordFields()).toHaveLength(0);
   } finally {
     await act(async () => root.unmount());
     container.remove();
@@ -447,14 +370,14 @@ async function renderNameEditor(name = "Alex Rivera") {
 }
 
 it("saves a trimmed name and refreshes the account data", async () => {
-  vi.mocked(authClient.updateUser).mockResolvedValue({ data: { status: true }, error: null });
+  vi.mocked(rpc.profile.updateName).mockReset();
   const editor = await renderNameEditor();
   try {
     expect(editor.input.value).toBe("Alex Rivera");
     expect(editor.input.maxLength).toBe(80);
     await editor.change("  Sam Rivera  ");
     await editor.submit();
-    expect(authClient.updateUser).toHaveBeenCalledWith({ name: "Sam Rivera" });
+    expect(rpc.profile.updateName).toHaveBeenCalledWith({ name: "Sam Rivera" });
     expect(editor.onNameSaved).toHaveBeenCalledOnce();
     expect(editor.card.querySelector("input")).toBeNull();
   } finally {
@@ -463,12 +386,12 @@ it("saves a trimmed name and refreshes the account data", async () => {
 });
 
 it("closes an unchanged name without saving", async () => {
-  vi.mocked(authClient.updateUser).mockClear();
+  vi.mocked(rpc.profile.updateName).mockClear();
   const editor = await renderNameEditor();
   try {
     await editor.change("  Alex Rivera  ");
     await editor.submit();
-    expect(authClient.updateUser).not.toHaveBeenCalled();
+    expect(rpc.profile.updateName).not.toHaveBeenCalled();
     expect(editor.onNameSaved).not.toHaveBeenCalled();
     expect(editor.card.querySelector("input")).toBeNull();
     expect(editor.card.querySelector('[role="alert"]')).toBeNull();
@@ -478,7 +401,7 @@ it("closes an unchanged name without saving", async () => {
 });
 
 it.each(["button", "Escape"])("cancels a name edit with %s without saving", async (method) => {
-  vi.mocked(authClient.updateUser).mockClear();
+  vi.mocked(rpc.profile.updateName).mockClear();
   const editor = await renderNameEditor();
   try {
     await editor.change("Discard me");
@@ -489,7 +412,7 @@ it.each(["button", "Escape"])("cancels a name edit with %s without saving", asyn
     });
     expect(editor.card.querySelector("input")).toBeNull();
     expect(editor.card.textContent).toContain("Alex Rivera");
-    expect(authClient.updateUser).not.toHaveBeenCalled();
+    expect(rpc.profile.updateName).not.toHaveBeenCalled();
     await act(async () => editor.button("Edit").click());
     expect(editor.card.querySelector("input")!.value).toBe("Alex Rivera");
   } finally {
@@ -527,7 +450,7 @@ it.each([{ isComposing: true }, { keyCode: 229 }])(
 it.each(["__AbCdEfGh__", "demo", "demo@example.com"])(
   "starts hidden name %s empty and rejects invalid submissions",
   async (name) => {
-    vi.mocked(authClient.updateUser).mockClear();
+    vi.mocked(rpc.profile.updateName).mockClear();
     const editor = await renderNameEditor(name);
     try {
       expect(editor.input.value).toBe("");
@@ -536,7 +459,7 @@ it.each(["__AbCdEfGh__", "demo", "demo@example.com"])(
         await editor.change(value);
         await editor.submit();
       }
-      expect(authClient.updateUser).not.toHaveBeenCalled();
+      expect(rpc.profile.updateName).not.toHaveBeenCalled();
       expect(editor.onNameSaved).not.toHaveBeenCalled();
     } finally {
       await editor.cleanup();
@@ -547,12 +470,12 @@ it.each(["__AbCdEfGh__", "demo", "demo@example.com"])(
 it.each(["💬", "__AbCdEfGh__"])(
   "rejects unsupported name %s without losing the current name",
   async (name) => {
-    vi.mocked(authClient.updateUser).mockClear();
+    vi.mocked(rpc.profile.updateName).mockClear();
     const editor = await renderNameEditor();
     try {
       await editor.change(name);
       await editor.submit();
-      expect(authClient.updateUser).not.toHaveBeenCalled();
+      expect(rpc.profile.updateName).not.toHaveBeenCalled();
       expect(editor.onNameSaved).not.toHaveBeenCalled();
       expect(editor.input.value).toBe(name);
       expect(editor.card.querySelector('[role="alert"]')?.textContent).toBe(
@@ -570,12 +493,9 @@ it.each(["response", "network"])(
   "keeps the draft and shows an inline %s error",
   async (failure) => {
     if (failure === "network")
-      vi.mocked(authClient.updateUser).mockRejectedValue(new Error("offline"));
+      vi.mocked(rpc.profile.updateName).mockRejectedValue(new Error("offline"));
     else
-      vi.mocked(authClient.updateUser).mockResolvedValue({
-        data: null,
-        error: { status: 500, statusText: "Server error" },
-      });
+      vi.mocked(rpc.profile.updateName).mockRejectedValue(new Error('Server error'));
     const editor = await renderNameEditor();
     try {
       await editor.change("Sam Rivera");
@@ -593,7 +513,7 @@ it.each(["response", "network"])(
 );
 
 it("closes the name editor before refresh finishes and ignores a refresh failure", async () => {
-  vi.mocked(authClient.updateUser).mockResolvedValue({ data: { status: true }, error: null });
+  vi.mocked(rpc.profile.updateName).mockReset();
   const editor = await renderNameEditor();
   let rejectRefresh!: (error: Error) => void;
   editor.onNameSaved.mockImplementation(
@@ -605,7 +525,7 @@ it("closes the name editor before refresh finishes and ignores a refresh failure
   try {
     await editor.change("Sam Rivera");
     await editor.submit();
-    expect(authClient.updateUser).toHaveBeenCalledWith({ name: "Sam Rivera" });
+    expect(rpc.profile.updateName).toHaveBeenCalledWith({ name: "Sam Rivera" });
     expect(editor.onNameSaved).toHaveBeenCalledOnce();
     expect(editor.card.querySelector("input")).toBeNull();
     expect(editor.button("Edit").disabled).toBe(false);

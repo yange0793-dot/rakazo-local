@@ -44,7 +44,6 @@ describePostgres("steering after a run ends without completing (PostgreSQL)", ()
       provisionMessagingIdentity(
         prisma,
         { provider: "sendblue", address },
-        { signupsEnabled: undefined, signupAllowlist: undefined },
       ),
     );
     ({ userId, spaceId, botId, threadId } = identity);

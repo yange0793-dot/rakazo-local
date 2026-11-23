@@ -100,13 +100,12 @@ vi.mock("./message-action-sheet", () => ({ presentMessageActionSheet: vi.fn() })
 vi.mock("./live-notifications", () => ({ afterChatNotifyChange: vi.fn(async () => undefined) }));
 
 vi.mock("./session", () => ({
-  loadSessionToken: async () => "token",
+  loadLocalInstallSessionId: async () => "token",
   currentSessionGeneration: () => 1,
 }));
 // Cache updates reach the screen inside act instead of on a later timer.
 notifyManager.setScheduler((callback) => callback());
 vi.mock("./api-server", () => ({}));
-vi.mock("./api-auth", () => ({}));
 vi.mock("./api-live", () => ({}));
 vi.mock("./api", () => ({
   currentApiBase: () => "https://app.example.test",

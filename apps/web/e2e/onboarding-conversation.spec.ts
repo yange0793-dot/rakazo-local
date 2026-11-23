@@ -1,6 +1,6 @@
 import type { Page } from "@playwright/test";
 import { expect, test } from "@playwright/test";
-import { captureScreenshot, completeOnboarding, rpc, signup } from "./helpers";
+import { captureScreenshot, completeOnboarding, openLocalWorkspace, rpc } from "./helpers";
 
 function slackCard(page: Page) {
   return page.getByRole("group", { name: "Slack connection" });
@@ -9,8 +9,7 @@ function slackCard(page: Page) {
 test("focus choice suggests apps and preserves a completed connection", async ({
   page,
 }, testInfo) => {
-  const stamp = Date.now();
-  await signup(page, `onboarding-${stamp}@rakazo.test`, "password12", "Robin");
+  await openLocalWorkspace(page, "Robin");
   await completeOnboarding(page);
 
   await expect(page.getByText("What do you want me on first?", { exact: true })).toBeVisible();
@@ -81,7 +80,7 @@ test("focus choice suggests apps and preserves a completed connection", async ({
 test("choice refresh failures leave options available for retry", { tag: "@nightly" }, async ({
   page,
 }) => {
-  await signup(page, `choice-refresh-${Date.now()}@rakazo.test`, "password12", "Choice Retry");
+  await openLocalWorkspace(page, "Choice Retry");
   await completeOnboarding(page);
   const choice = page.getByRole("button", { name: /Day-to-day work/ });
   await expect(choice).toBeEnabled();

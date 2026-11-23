@@ -56,7 +56,6 @@ import { botEmailAddress, botEmailAddresses, claimBotEmailAddress } from "../bot
 import { loadBotForRemoval } from "../bot-removal.js";
 import { changedBotSettings } from "../bot-setting-analytics.js";
 import { createBotFromTemplate, listBotTemplates } from "../bot-templates.js";
-import { requireIdentityConfirmation } from "../identity-confirmation.js";
 import { managedAppCatalog } from "../onboarding.js";
 import type { RouterDeps } from "../router.js";
 import { loadMessagePage } from "../thread-message-pages.js";
@@ -717,7 +716,6 @@ export function botsRoutes(ctx: RouterContext) {
         // Only the creator can issue the secret, so only the creator can read it back. Checked
         // first, so another member is never asked to confirm their identity for nothing.
         if (bot.userId !== context.actor.userId) throw new ORPCError("FORBIDDEN");
-        await requireIdentityConfirmation(deps.auth, context);
         const stored = bot.webhookSecretId
           ? await deps.prisma.secret.findFirst({
               where: {
@@ -887,7 +885,6 @@ export function botsRoutes(ctx: RouterContext) {
         saveVaultCredential(deps, vaultScope(context.actor, input.scope), input),
       ),
       reveal: authed.vault.reveal.handler(async ({ context, input }) => {
-        await requireIdentityConfirmation(deps.auth, context);
         // Resolved here, so the event names the vault that was read even when scope is omitted.
         const scope = await settingsTarget(deps.prisma, context.actor, "credentials", input.scope);
         const revealed = await revealBotSecret({

@@ -1,9 +1,14 @@
 import type { Route } from "@playwright/test";
 import { expect, test } from "@playwright/test";
-import { captureScreenshot, completeOnboarding, openBotPanelTab, signup } from "./helpers";
+import {
+  captureScreenshot,
+  completeOnboarding,
+  openBotPanelTab,
+  openLocalWorkspace,
+} from "./helpers";
 
 test("a nearly full computer offers to clean up its disk", async ({ page }, testInfo) => {
-  await signup(page, `disk-warning-${Date.now()}@rakazo.test`, "password12", "Disk Warning");
+  await openLocalWorkspace(page, "Disk Warning");
   await completeOnboarding(page);
   let full = true;
   // The fixture computer reports no disk use, so the reads it answers say it is 93% full.

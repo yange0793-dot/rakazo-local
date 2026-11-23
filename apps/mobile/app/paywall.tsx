@@ -26,7 +26,6 @@ import {
   View,
 } from "react-native";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
-import { useAccountDeletion } from "../components/account-deletion";
 import { BotAvatar } from "../components/bot-avatar";
 import { GlassIconButton } from "../components/glass-icon-button";
 import { NativeActionButton } from "../components/native-action-button";
@@ -35,8 +34,6 @@ import { NativeSymbol } from "../components/native-symbol";
 import { useOrganizationMenuAction } from "../components/organization-menu";
 import { FORM_COLUMN_WIDTH } from "../lib/adaptive-layout";
 import { rpc } from "../lib/api";
-import { signOut } from "../lib/api-auth";
-import { replaceWithSignIn } from "../lib/auth-routing";
 import type { Plan } from "../lib/billing";
 import {
   currentPlan,
@@ -47,7 +44,6 @@ import {
   setPaywallShown,
   subscribedPlan,
 } from "../lib/billing";
-import { endCallBeforeSessionEnd } from "../lib/call-session";
 import { translucentColor } from "../lib/color";
 import { dateLocaleForUi } from "../lib/i18n";
 import { useMobileTokens } from "../lib/native";
@@ -56,7 +52,6 @@ import {
   organizationSwitchActions,
   useOrganizations,
 } from "../lib/organizations";
-import { confirmUnsentSendLoss } from "../lib/unsent-send-warning";
 import { errorText } from "../lib/user-error";
 
 type Amount = (typeof MODEL_CREDIT_AMOUNTS)[number];
@@ -88,17 +83,12 @@ export default function Paywall() {
   const [amount, setAmount] = useState<Amount>(DEFAULT_MONTHLY_CREDIT_AMOUNT);
   const [interval, setByokInterval] = useState<ByokInterval>("month");
   const [pending, setPending] = useState(false);
-  const leaving = useRef(false);
-  const deletion = useAccountDeletion();
   const organizations = useOrganizations(!dismissible).data;
   const organizationAction = useOrganizationMenuAction(organizations);
   const active = activeOrganization(organizations);
   const deletableOrganization =
     active && canDeleteOrganization(organizations?.organizations ?? [], active) ? active : null;
 
-  useEffect(() => {
-    if (deletion.error) Alert.alert(deletion.error);
-  }, [deletion.error]);
   const [started, setStarted] = useState<Plan | null>(null);
   const [loadFailed, setLoadFailed] = useState(false);
   const planPicked = useRef(false);
@@ -172,23 +162,6 @@ export default function Paywall() {
     }
   }
 
-  async function leave() {
-    // Held from the tap, so a second tap while the unsent-message check runs starts nothing.
-    if (leaving.current) return;
-    leaving.current = true;
-    try {
-      if (!(await confirmUnsentSendLoss("sign-out"))) return;
-      // Hang up while the session still exists, so the server records the call's end.
-      await endCallBeforeSessionEnd();
-      await signOut();
-      replaceWithSignIn();
-    } catch (err) {
-      Alert.alert(errorText(err, t`Could not sign out`));
-    } finally {
-      leaving.current = false;
-    }
-  }
-
   const topBar = (
     // A solid row, so scrolled content never slides under the status bar or this action.
     <View
@@ -217,15 +190,11 @@ export default function Paywall() {
                   },
                 ]
               : []),
-            { id: "sign-out", title: t`Sign out` },
-            { id: "delete", title: t`Delete account` },
           ]}
           onPressAction={({ nativeEvent }) => {
-            if (pending || deletion.pending) return;
-            if (nativeEvent.event === "delete") void deletion.request();
-            else if (nativeEvent.event === "delete-organization")
+            if (pending) return;
+            if (nativeEvent.event === "delete-organization")
               router.push("/organization?delete=1");
-            else if (nativeEvent.event === "sign-out") void leave();
             else organizationAction(nativeEvent.event);
           }}
         >
@@ -244,7 +213,6 @@ export default function Paywall() {
           </View>
         </MenuView>
       )}
-      {deletion.dialog}
     </View>
   );
 

@@ -82,19 +82,6 @@ describe("share route", () => {
     expect(state.cancel).toHaveBeenCalledOnce();
     expect(state.dismissTo).toHaveBeenCalledWith("/");
   });
-  it("preserves the pending share while redirecting to sign-in", async () => {
-    await render();
-    expect(state.guarded).toBe(true);
-    const repeat = vi.fn();
-    await act(async () =>
-      state.blocked?.({ data: { action: { payload: { name: "sign-in" } } }, repeat }),
-    );
-    expect(repeat).toHaveBeenCalledOnce();
-    expect(state.allowRemoval).toHaveBeenCalledOnce();
-    expect(state.guarded).toBe(false);
-    expect(state.cancel).not.toHaveBeenCalled();
-    expect(state.dismissTo).not.toHaveBeenCalled();
-  });
   it("cancels on native back or dismissal", async () => {
     await render();
     const repeat = vi.fn();

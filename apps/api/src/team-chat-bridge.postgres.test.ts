@@ -26,7 +26,6 @@ describePostgres("TeamChat deferred routing (PostgreSQL)", () => {
       provisionMessagingIdentity(
         db.prisma,
         { provider: "email", address },
-        { signupsEnabled: undefined, signupAllowlist: undefined },
       ),
     );
   });

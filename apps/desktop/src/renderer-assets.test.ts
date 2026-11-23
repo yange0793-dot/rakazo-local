@@ -33,7 +33,7 @@ describe("bundled desktop renderer", () => {
   });
 
   it("leaves APIs, screen proxying, and other origins on the network", () => {
-    for (const pathname of ["/api/auth/session", "/rpc/bots", "/novnc/socket"]) {
+    for (const pathname of ["/api/local-identity", "/rpc/bots", "/novnc/socket"]) {
       expect(bundledRendererCandidates(root, `${origin}${pathname}`, origin, false)).toBeNull();
     }
     expect(

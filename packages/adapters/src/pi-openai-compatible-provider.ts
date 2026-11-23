@@ -28,6 +28,7 @@ import type { CompatibleReasoningCapabilities } from "@rakazo/core";
 import { COMPATIBLE_THINKING_LEVELS, compatibleThinkingLevels } from "@rakazo/core";
 import type { Dispatcher } from "undici";
 import { Agent } from "undici";
+import { CODEX_CLIENT_HEADERS, modelClientHeaders } from "./model-client-headers.js";
 import { declaredVisionModelIds, inputModalities } from "./model-modalities.js";
 import type { ResolvedAddress, ResolveHostname } from "./network-address.js";
 import { createAddressCheckedLookup } from "./network-address.js";
@@ -167,6 +168,7 @@ function openAiCompatibleProvider(
         model,
         api(model.api).stream(model, context, {
           ...options,
+          headers: modelClientHeaders(model.api, model.headers, options?.headers),
           fetch: createOpenAiCompatibleFetch(options?.fetch, undefined, streamPolicy),
         }),
       ),
@@ -176,6 +178,7 @@ function openAiCompatibleProvider(
         model,
         api(model.api).streamSimple(model, context, {
           ...options,
+          headers: modelClientHeaders(model.api, model.headers, options?.headers),
           reasoning: reasoning === "off" ? undefined : reasoning,
           fetch: createOpenAiCompatibleFetch(options?.fetch, undefined, streamPolicy),
         }),
@@ -568,11 +571,11 @@ export async function verifyOpenAiCompatibleApiKey(
 ): Promise<void> {
   if (new URL(input.baseUrl).hostname !== "ollama.com") return;
   if (!input.apiKey?.trim()) throw new Error(MODEL_KEY_REJECTED_ERROR);
-  const safeFetch = createOpenAiCompatibleFetch(fetchImpl);
+  const safeFetch = createOpenAiCompatibleFetch(fetchImpl, undefined, { headers: input.headers });
   let response: Response;
   try {
     response = await safeFetch("https://ollama.com/api/balance", {
-      headers: { Authorization: `Bearer ${input.apiKey.trim()}` },
+      headers: { ...CODEX_CLIENT_HEADERS, Authorization: `Bearer ${input.apiKey.trim()}` },
       redirect: "error",
       signal: AbortSignal.any([
         AbortSignal.timeout(MODEL_CONNECT_TIMEOUT_MS),
@@ -625,14 +628,18 @@ export async function probeOpenAiCompatibleModels(
   const timeout = setTimeout(() => controller.abort(), 5_000);
   const merged = signal ? AbortSignal.any([signal, controller.signal]) : controller.signal;
   try {
-    const headers: Record<string, string> = { Accept: "application/json" };
+    const headers = new Headers();
+    for (const [name, value] of Object.entries(modelClientHeaders(input.apiProtocol))) {
+      if (value !== null) headers.set(name, value);
+    }
+    headers.set("Accept", "application/json");
     // Anthropic Messages authenticates with its own headers, not a Bearer token;
     // the version header is required even when the endpoint needs no key.
     if (input.apiProtocol === "anthropic-messages") {
-      headers["anthropic-version"] = ANTHROPIC_MESSAGES_VERSION;
-      if (input.apiKey?.trim()) headers["x-api-key"] = input.apiKey.trim();
+      headers.set("anthropic-version", ANTHROPIC_MESSAGES_VERSION);
+      if (input.apiKey?.trim()) headers.set("x-api-key", input.apiKey.trim());
     } else if (input.apiKey?.trim()) {
-      headers.Authorization = `Bearer ${input.apiKey.trim()}`;
+      headers.set("Authorization", `Bearer ${input.apiKey.trim()}`);
     }
     const safeFetch = createOpenAiCompatibleFetch(fetchImpl, undefined, {
       ...opts,

@@ -1,6 +1,6 @@
 import type { Page } from "@playwright/test";
 import { expect, test } from "@playwright/test";
-import { captureScreenshot, completeOnboarding, signup } from "./helpers";
+import { captureScreenshot, completeOnboarding, openLocalWorkspace } from "./helpers";
 
 test.use({
   hasTouch: true,
@@ -59,8 +59,7 @@ async function swipe(page: Page, start: [number, number], end: [number, number])
 
 test("swiping inward from the mobile edge opens the bots sidebar", async ({ page }, testInfo) => {
   await prepareOnboarding(page);
-  const stamp = Date.now();
-  await signup(page, `mobile-sidebar-swipe-${stamp}@rakazo.test`, "password12", "Swipe Test");
+  await openLocalWorkspace(page, "Swipe Test");
   await completeOnboarding(page);
   await page.goto("/app");
   await page.waitForURL(/\/app\/[^/]+$/);

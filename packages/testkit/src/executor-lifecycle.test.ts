@@ -17,8 +17,9 @@ import {
   runAsSystem,
   runAsTenant,
 } from "@rakazo/db";
-import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import { discardBotIntroFromCreate } from "./discard-bot-intro.js";
+import { createTestSpace, testSpaceHeaders } from "./index.js";
 import { asSystem } from "./system-db.js";
 
 process.env.WAKEUP_DRIVER = "memory";
@@ -48,6 +49,11 @@ describeIntegration("run executor lifecycle", () => {
       connectors: [destination],
     });
     db = asSystem(handles.prisma);
+  });
+
+  beforeEach(async () => {
+    await db.userActionApprovalRule.deleteMany({});
+    await db.userActionAutoReviewPreference.deleteMany({});
   });
 
   afterAll(async () => {
@@ -539,13 +545,13 @@ describeIntegration("run executor lifecycle", () => {
       leaseExpiresAt: new Date(Date.now() + 60_000),
       startedAt: new Date(),
     });
-    await rpc(seeded.cookie, "threads/send", {
+    await rpc(seeded.scope, "threads/send", {
       botId: seeded.bot.id,
       text: "Context that should stop with the run.",
       clientNonce: `stop-steering-${stamp}`,
     });
 
-    await rpc(seeded.cookie, "threads/stop", { botId: seeded.bot.id });
+    await rpc(seeded.scope, "threads/stop", { botId: seeded.bot.id });
 
     await expect(db.run.findUniqueOrThrow({ where: { id: seeded.run.id } })).resolves.toMatchObject(
       { status: "cancelled" },
@@ -572,8 +578,8 @@ describeIntegration("run executor lifecycle", () => {
       text: "Use this additional context.",
       clientNonce: `bot-steering-${stamp}`,
     };
-    await rpc(seeded.cookie, "threads/send", steeringInput);
-    await rpc(seeded.cookie, "threads/send", steeringInput);
+    await rpc(seeded.scope, "threads/send", steeringInput);
+    await rpc(seeded.scope, "threads/send", steeringInput);
 
     expect(
       await db.run.count({
@@ -602,8 +608,8 @@ describeIntegration("run executor lifecycle", () => {
       text: "Skip that and tell me what you were going to check.",
       clientNonce: `bot-steering-takeover-${stamp}`,
     };
-    await rpc(seeded.cookie, "threads/send", steeringInput);
-    await rpc(seeded.cookie, "threads/send", steeringInput);
+    await rpc(seeded.scope, "threads/send", steeringInput);
+    await rpc(seeded.scope, "threads/send", steeringInput);
 
     expect(
       await db.run.count({
@@ -623,26 +629,23 @@ describeIntegration("run executor lifecycle", () => {
   });
 
   it("applies the same no-parallel-run rule to the targeted group member", async () => {
-    const cookie = await signup(
-      `executor-group-steering-${stamp}@rakazo.test`,
-      "Executor group steering",
-    );
-    const me = await rpc<{ userId: string; spaceId: string }>(cookie, "me");
-    const botA = await rpc<{ id: string }>(cookie, "bots/create", {
+    const scope = await testSpace("Executor group steering");
+    const me = await rpc<{ userId: string; spaceId: string }>(scope, "me");
+    const botA = await rpc<{ id: string }>(scope, "bots/create", {
       name: "Group lead",
       title: "",
       description: "",
       instructions: "",
       notifyOnFinish: false,
     });
-    const botB = await rpc<{ id: string }>(cookie, "bots/create", {
+    const botB = await rpc<{ id: string }>(scope, "bots/create", {
       name: "Group helper",
       title: "",
       description: "",
       instructions: "",
       notifyOnFinish: false,
     });
-    const group = await rpc<{ id: string }>(cookie, "groups/create", {
+    const group = await rpc<{ id: string }>(scope, "groups/create", {
       name: "Steering group",
       botIds: [botA.id, botB.id],
     });
@@ -677,7 +680,7 @@ describeIntegration("run executor lifecycle", () => {
       },
     });
 
-    await rpc(cookie, "threads/send", {
+    await rpc(scope, "threads/send", {
       groupId: group.id,
       text: "Use this group context.",
       mentions: [{ kind: "bot", id: member.botId }],
@@ -701,8 +704,8 @@ describeIntegration("run executor lifecycle", () => {
       ],
       clientNonce: `group-mixed-${stamp}`,
     };
-    const first = await rpc<{ runIds: string[] }>(cookie, "threads/send", mixedInput);
-    const replay = await rpc<{ runIds: string[] }>(cookie, "threads/send", mixedInput);
+    const first = await rpc<{ runIds: string[] }>(scope, "threads/send", mixedInput);
+    const replay = await rpc<{ runIds: string[] }>(scope, "threads/send", mixedInput);
     expect(first.runIds).toHaveLength(2);
     expect(replay.runIds).toEqual(first.runIds);
     expect(await db.run.count({ where: { threadId: thread.id } })).toBe(2);
@@ -760,7 +763,7 @@ describeIntegration("run executor lifecycle", () => {
         prompt: "Private DM detail",
       }),
     );
-    const privateSend = await rpc<{ runId: string }>(seeded.cookie, "threads/send", {
+    const privateSend = await rpc<{ runId: string }>(seeded.scope, "threads/send", {
       botId: seeded.bot.id,
       text: "New private detail",
       clientNonce: `private-channel-${stamp}`,
@@ -1342,6 +1345,7 @@ describeIntegration("run executor lifecycle", () => {
 
   it("takes the computer lease only when a helper's first computer tool runs", async () => {
     const seeded = await seedRun("helper-lazy-lease", "unused", {}, "team");
+    await rpc(seeded.scope, "autoReview/set", { mode: "never" });
     const helper = await seedHelperRun(seeded, "run the shell command echo lazy-lease");
     await db.run.update({
       where: { id: seeded.run.id },
@@ -1375,6 +1379,7 @@ describeIntegration("run executor lifecycle", () => {
 
   it("reports a computer held by another run as a tool error without failing the helper", async () => {
     const seeded = await seedRun("helper-busy-computer", "unused", {}, "team");
+    await rpc(seeded.scope, "autoReview/set", { mode: "never" });
     const helper = await seedHelperRun(seeded, "run the shell command echo busy");
     const heldUntil = new Date(Date.now() + 60_000);
     await db.run.update({
@@ -1469,16 +1474,16 @@ describeIntegration("run executor lifecycle", () => {
     } = {},
     computerMode?: "team" | "dedicated",
   ) {
-    const cookie = await signup(`executor-${label}-${stamp}@rakazo.test`, `Executor ${label}`);
-    const me = await rpc<{ userId: string; spaceId: string }>(cookie, "me");
-    const bot = await rpc<{ id: string }>(cookie, "bots/create", {
+    const scope = await testSpace(`Executor ${label}`);
+    const me = await rpc<{ userId: string; spaceId: string }>(scope, "me");
+    const bot = await rpc<{ id: string }>(scope, "bots/create", {
       name: `Executor ${label}`,
       title: "",
       description: "",
       instructions: "",
       notifyOnFinish: false,
     });
-    if (computerMode) await rpc(cookie, "bots/setComputer", { botId: bot.id, mode: computerMode });
+    if (computerMode) await rpc(scope, "bots/setComputer", { botId: bot.id, mode: computerMode });
     const thread = await db.thread.findUniqueOrThrow({ where: { botId: bot.id } });
     const task = await db.task.create({
       data: {
@@ -1506,7 +1511,7 @@ describeIntegration("run executor lifecycle", () => {
         completedAt: runState.completedAt,
       },
     });
-    return { cookie, me, bot, thread, task, run };
+    return { scope, me, bot, thread, task, run };
   }
 
   async function createRunForBot(
@@ -1543,26 +1548,17 @@ describeIntegration("run executor lifecycle", () => {
     });
   }
 
-  async function signup(email: string, name: string) {
-    const response = await handles.app.request("/api/auth/sign-up/email", {
-      method: "POST",
-      headers: { "content-type": "application/json", origin: "http://127.0.0.1:5173" },
-      body: JSON.stringify({ email, password: "password12", name }),
-    });
-    expect(response.status).toBeLessThan(400);
-    const raw = response.headers.get("set-cookie") ?? "";
-    const match = raw.match(/better-auth\.session_token=([^;]+)/);
-    expect(match?.[1]).toBeTruthy();
-    return `better-auth.session_token=${match![1]}`;
+  async function testSpace(name = "Test") {
+    return createTestSpace(handles.app, name);
   }
 
-  async function rpc<T>(cookie: string, procedure: string, body: unknown = {}): Promise<T> {
+  async function rpc<T>(scope: string, procedure: string, body: unknown = {}): Promise<T> {
     const response = await handles.app.request(`/rpc/${procedure}`, {
       method: "POST",
       headers: {
         "content-type": "application/json",
         origin: "http://127.0.0.1:5173",
-        cookie,
+        ...testSpaceHeaders(scope),
       },
       body: JSON.stringify({ json: body }),
     });
@@ -1570,6 +1566,6 @@ describeIntegration("run executor lifecycle", () => {
     if (!response.ok || payload.error) {
       throw new Error(payload.error?.message ?? `${procedure} failed (${response.status})`);
     }
-    return discardBotIntroFromCreate(handles, cookie, procedure, payload.json as T);
+    return discardBotIntroFromCreate(handles, scope, procedure, payload.json as T);
   }
 });

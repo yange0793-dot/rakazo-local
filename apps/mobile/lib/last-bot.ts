@@ -16,22 +16,21 @@ function enqueueWrite(task: () => Promise<void>): Promise<void> {
 /** Verify the owner with the bearer we will use, including after a cold start or token rotation. */
 async function currentOwner() {
   const context = await captureApiRequestContext(null);
-  if (!context.headers.authorization) return null;
-  const { response, body, invalidJson } = await fetchMobileJson<{ user?: { id?: string } }>(
-    `${context.apiBase}/api/auth/get-session`,
+  const { response, body, invalidJson } = await fetchMobileJson<{ id?: string }>(
+    `${context.apiBase}/api/local-identity`,
     { headers: { ...context.headers, origin: "rakazo://" } },
     {},
   );
   if (
     !response.ok ||
     invalidJson ||
-    typeof body?.user?.id !== "string" ||
-    !body.user.id.trim() ||
+    typeof body?.id !== "string" ||
+    !body.id.trim() ||
     context.sessionGeneration !== currentSessionGeneration() ||
     context.apiBase !== currentApiBase()
   )
     return null;
-  return { apiBase: context.apiBase, userId: body.user.id };
+  return { apiBase: context.apiBase, userId: body.id };
 }
 
 /** The bot, Space, and owner form one record; a partial or late write cannot change its owner. */

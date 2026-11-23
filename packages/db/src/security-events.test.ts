@@ -28,7 +28,7 @@ function fakeStore() {
       findMany: vi.fn(async (_args: unknown) => [
         {
           id: "event-1",
-          type: "auth.sign_in.failed",
+          type: "egress.refused",
           userId: null,
           spaceId: null,
           ip: "203.0.113.5",
@@ -141,14 +141,14 @@ describe("recordSecurityEvent", () => {
         ["192.0.2.2", "192.0.2.3"].map((ip) =>
           withSecurityRequest({ ip }, async () => {
             await Promise.resolve();
-            await recordSecurityEvent({ type: "auth.sign_out" });
+            await recordSecurityEvent({ type: "device.revoked" });
           }),
         ),
       );
-      await recordSecurityEvent({ type: "auth.sign_out", ip: "192.0.2.4" });
-      await recordSecurityEvent({ type: "auth.sign_out" });
+      await recordSecurityEvent({ type: "device.revoked", ip: "192.0.2.4" });
+      await recordSecurityEvent({ type: "device.revoked" });
     });
-    await recordSecurityEvent({ type: "auth.sign_out" });
+    await recordSecurityEvent({ type: "device.revoked" });
     expect(store.rows.map((row) => [row.ip, row.userAgent])).toEqual([
       ["192.0.2.2", null],
       ["192.0.2.3", null],
@@ -160,7 +160,7 @@ describe("recordSecurityEvent", () => {
 
   it("still logs and never throws when the database write fails", async () => {
     store.securityEvent.create.mockRejectedValueOnce(new Error("database unavailable"));
-    await expect(recordSecurityEvent({ type: "auth.sign_out" })).resolves.toBeUndefined();
+    await expect(recordSecurityEvent({ type: "device.revoked" })).resolves.toBeUndefined();
     expect(sink.events.map((event) => event.message)).toEqual([
       "security.event",
       "security.event.write_failed",
@@ -169,7 +169,7 @@ describe("recordSecurityEvent", () => {
 
   it("only logs before a store is installed", async () => {
     installSecurityEventStore(undefined);
-    await recordSecurityEvent({ type: "auth.sign_up", userId: "user-3" });
+    await recordSecurityEvent({ type: "device.paired", userId: "user-3" });
     expect(store.securityEvent.create).not.toHaveBeenCalled();
     expect(sink.events).toHaveLength(1);
   });
@@ -218,7 +218,7 @@ describe("listSecurityEvents", () => {
 
   it("pages newest first from a cursor and skips types this release does not know", async () => {
     const events = await listSecurityEvents(store as never, {
-      type: "auth.sign_in.failed",
+      type: "egress.refused",
       ip: "203.0.113.5",
       cursor: "event-2",
       limit: 50,
@@ -226,7 +226,7 @@ describe("listSecurityEvents", () => {
     const at = new Date("2026-10-20T10:00:00.000Z");
     expect(store.securityEvent.findMany).toHaveBeenCalledWith({
       where: {
-        type: "auth.sign_in.failed",
+        type: "egress.refused",
         ip: "203.0.113.5",
         OR: [{ createdAt: { lt: at } }, { createdAt: at, id: { lt: "event-2" } }],
       },

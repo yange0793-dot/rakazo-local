@@ -213,12 +213,7 @@ async function prepareAuthenticatedProfile(benchmark: BenchmarkContext, profile:
     waitForReady: false,
   });
   try {
-    const stamp = Date.now();
-    await page.goto(`${webOrigin}/sign-up`);
-    await page.getByPlaceholder("Your name").fill("Benchmark User");
-    await page.getByPlaceholder("Your email address").fill(`benchmark-${stamp}@rakazo.test`);
-    await page.getByPlaceholder("Password").fill("password12");
-    await page.getByRole("button", { name: "Create account" }).click();
+    await page.goto(`${webOrigin}/app`);
     await page
       .waitForFunction(() => /^\/(?:onboarding|app)/.test(window.location.pathname), undefined, {
         timeout: 10_000,
@@ -229,7 +224,7 @@ async function prepareAuthenticatedProfile(benchmark: BenchmarkContext, profile:
           .textContent()
           .catch(() => null);
         throw new Error(
-          `Benchmark sign-up stayed on ${new URL(page.url()).pathname}${message ? `: ${message}` : ""}`,
+          `Benchmark startup stayed on ${new URL(page.url()).pathname}${message ? `: ${message}` : ""}`,
           { cause: error },
         );
       });
@@ -238,7 +233,7 @@ async function prepareAuthenticatedProfile(benchmark: BenchmarkContext, profile:
     await connectHeading.or(composer).waitFor({ timeout: 20_000 });
     if (await connectHeading.isVisible().catch(() => false)) {
       throw new Error(
-        "Benchmark sign-up requires a default model; connect-model is unsupported here",
+        "Benchmark startup requires a default model; connect-model is unsupported here",
       );
     }
     await expect(composer).toBeVisible({ timeout: 20_000 });

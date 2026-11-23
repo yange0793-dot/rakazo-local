@@ -127,7 +127,6 @@ describe("desktop command execution", () => {
     roots.push(root);
     vi.stubEnv("DATABASE_URL", "postgres://fake:fake@127.0.0.1/fake");
     vi.stubEnv("ENCRYPTION_KEY", "fake-encryption-key");
-    vi.stubEnv("BETTER_AUTH_SECRET", "fake-auth-secret");
     vi.stubEnv("HOME", "/fake-home");
     const desktop = new DesktopSandboxProvider({ root });
     const computer = await desktop.provision({ botId: "env", homePath: "/unused" }, ctx);
@@ -146,7 +145,6 @@ describe("desktop command execution", () => {
       const env = JSON.parse(result.stdout) as Record<string, string>;
       expect(env).not.toHaveProperty("DATABASE_URL");
       expect(env).not.toHaveProperty("ENCRYPTION_KEY");
-      expect(env).not.toHaveProperty("BETTER_AUTH_SECRET");
       expect(env.BOT_TOKEN).toBe("fake-bot-token");
       expect(env.HOME).toBe("/fake-home");
       expect(env.PATH ?? env.Path).toBeTruthy();

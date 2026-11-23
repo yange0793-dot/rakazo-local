@@ -15,7 +15,6 @@ import { UI_LOCALE_STORAGE_KEY, UI_LOCALES } from "./ui-locale";
 
 vi.mock("./side-insets", () => ({ useSideInsets: () => ({}) }));
 vi.mock("./api-server", () => ({}));
-vi.mock("./api-auth", () => ({}));
 vi.mock("./api-live", () => ({}));
 vi.mock("./api", () => ({
   currentApiBase: () => "https://rakazo.test",
@@ -23,7 +22,7 @@ vi.mock("./api", () => ({
   selectedSpaceId: () => "space-1",
 }));
 vi.mock("./session", () => ({
-  loadSessionToken: async () => "token",
+  loadLocalInstallSessionId: async () => "token",
 }));
 vi.mock("./live-notifications", () => ({ resumeLiveNotifications: vi.fn(async () => undefined) }));
 vi.mock("expo-secure-store", () => ({ setItemAsync: vi.fn() }));

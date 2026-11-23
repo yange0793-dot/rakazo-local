@@ -552,14 +552,10 @@ async function main() {
     Object.assign(process.env, {
       ...disposableDatabaseEnv(databaseUrl),
       WAKEUP_DRIVER: "memory",
-      BETTER_AUTH_SECRET: "synthetic-eval-auth-secret-at-least-32-characters",
       ENCRYPTION_KEY: "synthetic-eval-encryption-key-at-least-32-characters",
       SANDBOX_SUPERVISOR_TOKEN: "synthetic-eval-supervisor-token-at-least-32-characters",
       SCREEN_PROXY_SECRET: "synthetic-eval-screen-secret-at-least-32-characters",
-      BETTER_AUTH_URL: "http://127.0.0.1:5173",
       WEB_ORIGIN: "http://127.0.0.1:5173",
-      SIGNUPS_ENABLED: "true",
-      SIGNUP_ALLOWLIST: "",
       SANDBOX_PROVIDER: "fake",
       AGENT_RUNTIME: "pi",
       DATA_DIR: dataDir,
@@ -705,8 +701,6 @@ async function main() {
               composioApiKey: undefined,
               cursorApiKey: undefined,
               cloudAgentProvider: "none",
-              signupsEnabled: "true",
-              signupAllowlist: "",
               // The operator runs evals against the model server they chose, often on loopback.
               mcpAllowPrivateEndpoint: true,
               emailEmulator: true,

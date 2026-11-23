@@ -16,7 +16,6 @@ describe("host command environment", () => {
       NODE_EXTRA_CA_CERTS: "/fake-home/ca.pem",
       DATABASE_URL: "postgres://fake:fake@127.0.0.1/fake",
       ENCRYPTION_KEY: "fake-encryption-key",
-      BETTER_AUTH_SECRET: "fake-auth-secret",
       OPENAI_API_KEY: "fake-provider-key",
     };
     expect(

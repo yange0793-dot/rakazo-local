@@ -24,7 +24,6 @@ vi.mock("expo-secure-store", () => ({
   }),
 }));
 vi.mock("./api-server", () => ({}));
-vi.mock("./api-auth", () => ({}));
 vi.mock("./api-live", () => ({}));
 vi.mock("./api", () => ({
   currentApiBase: () => account.apiBase,
@@ -32,14 +31,14 @@ vi.mock("./api", () => ({
   captureApiRequestContext: async () => ({
     apiBase: account.apiBase,
     sessionGeneration: session.currentSessionGeneration(),
-    headers: { authorization: `Bearer ${await session.loadSessionToken()}` },
+    headers: { "x-rakazo-install-id": await session.loadLocalInstallSessionId() },
   }),
   fetchMobileJson: async () => {
     account.ownerCalls += 1;
     await account.ownerGate;
     return {
       response: new Response(null, { status: account.available ? 200 : 401 }),
-      body: { user: { id: account.userId } },
+      body: { id: account.userId },
     };
   },
 }));
@@ -70,7 +69,6 @@ beforeEach(async () => {
     saved.delete(key);
   });
   await restart();
-  await session.saveSessionToken("session-a");
 });
 afterEach(() => vi.useRealTimers());
 
@@ -150,8 +148,7 @@ describe("last bot ownership", () => {
       });
       if (change === "account") account.userId = "account-b";
       else account.apiBase = "https://other.example.test";
-      await session.saveSessionToken("session-b");
-      expect(saved.get("rakazo.session_token")).toBe("session-b");
+      await session.changeLocalEndpoint(() => {});
       expect(saved.has("rakazo.last_bot_id")).toBe(true);
       vi.useFakeTimers();
       const loaded = vi.fn();

@@ -7,6 +7,7 @@ import type {
 } from "@earendil-works/pi-ai";
 import { DEFAULT_MODEL_MAX_TOKENS } from "@rakazo/contracts";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { CODEX_CLIENT_HEADERS } from "./model-client-headers.js";
 import { DEFAULT_MODEL_STREAM_MAX_RETRIES, MODEL_STREAM_TIMEOUT_MS } from "./pi-runtime-limits.js";
 import { resolveRuntimeModel } from "./pi-runtime-models.js";
 import {
@@ -17,6 +18,7 @@ import {
 } from "./pi-runtime-stream.js";
 
 const streamDefaults = {
+  headers: CODEX_CLIENT_HEADERS,
   timeoutMs: MODEL_STREAM_TIMEOUT_MS,
   maxRetries: DEFAULT_MODEL_STREAM_MAX_RETRIES,
   maxTokens: DEFAULT_MODEL_MAX_TOKENS,
@@ -86,6 +88,7 @@ describe("Pi runtime transport", () => {
     const options = { transport: "auto" as const, maxRetries: 2 };
 
     expect(reliableStreamOptions(model, options)).toEqual({
+      headers: CODEX_CLIENT_HEADERS,
       transport: "auto",
       maxRetries: 2,
       timeoutMs: MODEL_STREAM_TIMEOUT_MS,
@@ -120,9 +123,10 @@ describe("Pi runtime transport", () => {
         sessionId: "thread-1:bot-1",
         transport: "auto",
         headers: {
+          ...CODEX_CLIENT_HEADERS,
           "x-opencode-session": "thread-1:bot-1",
           "x-opencode-client": "rakazo",
-          "X-Custom": "1",
+          "x-custom": "1",
         },
       });
     },
@@ -240,9 +244,13 @@ describe("Pi runtime transport", () => {
     };
 
     const result = reliableStreamOptions(codexModel, options, undefined, token);
-    expect(result.headers).toEqual({ "x-openai-internal-codex-residency": "manual" });
+    expect(result.headers).toEqual({
+      ...CODEX_CLIENT_HEADERS,
+      "x-openai-internal-codex-residency": "manual",
+    });
     // applyAuth merges options.headers before transformHeaders runs.
     expect(await result.transformHeaders?.(result.headers ?? {})).toEqual({
+      ...CODEX_CLIENT_HEADERS,
       "x-openai-internal-codex-residency": "manual",
     });
   });
@@ -257,10 +265,14 @@ describe("Pi runtime transport", () => {
     };
 
     const result = reliableStreamOptions(codexModel, options, undefined, token);
-    expect(result.headers).toEqual({ "X-OPENAI-INTERNAL-CODEX-RESIDENCY": "manual" });
-    // The caller's casing suppresses injection: no duplicate lowercase key.
+    expect(result.headers).toEqual({
+      ...CODEX_CLIENT_HEADERS,
+      "x-openai-internal-codex-residency": "manual",
+    });
+    // Header merging normalizes casing and preserves the caller's value.
     expect(await result.transformHeaders?.(result.headers ?? {})).toEqual({
-      "X-OPENAI-INTERNAL-CODEX-RESIDENCY": "manual",
+      ...CODEX_CLIENT_HEADERS,
+      "x-openai-internal-codex-residency": "manual",
     });
   });
 
@@ -416,7 +428,7 @@ describe("Pi runtime transport", () => {
 
     const result = reliableStreamOptions(model, undefined, undefined, token);
 
-    expect(result.headers).toBeUndefined();
+    expect(result.headers).not.toHaveProperty("x-openai-internal-codex-residency");
     expect(result.transformHeaders).toBeUndefined();
   });
 

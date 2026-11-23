@@ -57,7 +57,6 @@ describe.skipIf(!enabled)("thread writes behind a long read (PostgreSQL)", () =>
       provisionMessagingIdentity(
         prisma,
         { provider: "test", address },
-        { signupsEnabled: undefined, signupAllowlist: undefined },
       ),
     );
     ({ userId, spaceId, botId, threadId } = identity);
@@ -412,7 +411,6 @@ describe.skipIf(!enabled)("thread writes behind a long read (PostgreSQL)", () =>
         provisionMessagingIdentity(
           prisma,
           { provider: "test", address: `${address}-removed` },
-          { signupsEnabled: undefined, signupAllowlist: undefined },
         ),
       );
       try {

@@ -45,9 +45,6 @@ contextBridge.exposeInMainWorld("rakazoDesktop", {
   monitoring: {
     enabled: () => ipcRenderer.invoke("desktop.monitoring.enabled"),
   },
-  passkeys: {
-    rpIds: () => ipcRenderer.invoke("desktop.passkeys.rpIds"),
-  },
   // Only macOS ships a system recognizer helper; elsewhere dictation keeps its provider path.
   ...(process.platform === "darwin"
     ? {

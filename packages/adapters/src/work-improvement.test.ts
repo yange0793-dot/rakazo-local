@@ -17,6 +17,7 @@ import { ScriptedAgentRuntime } from "./scripted-runtime.js";
 import type { WorkImprovementComparison, WorkImprovementInput } from "./work-improvement.js";
 import {
   compareWorkImprovement,
+  evaluateWorkImprovementRevision,
   summarizeWorkImprovementHistory,
   workImprovementOutputJsonSchema,
 } from "./work-improvement.js";
@@ -661,6 +662,40 @@ describe("isolated work improvement comparison", () => {
     );
     expect(partial.summary.candidate.knownTotalTokens).toBe(468);
     expect(partial.summary.candidate.totalTokens).toBeNull();
+  });
+
+  it("uses configured output limits and records large usage without an implicit token budget", async () => {
+    const input = comparisonInput();
+    delete input.execution.budget.maxTotalTokens;
+    input.execution.model.maxTokens = 65_536;
+    const runtime = new DeliveryReplayRuntime();
+    runtime.callbackTools = true;
+    runtime.observeCalls = true;
+    runtime.usageFor = (_arm, _id, event) => ({
+      ...event,
+      inputTokens: 70_000,
+      outputTokens: 10_000,
+      totalTokens: 80_000,
+    });
+    const artifact = await compareWorkImprovement(input, { runtime });
+    expect(artifact.decision).toBe("adopt");
+    expect(artifact.execution.budget).not.toHaveProperty("maxTotalTokens");
+    expect(artifact.execution.model.maxTokens).toBe(65_536);
+    expect(artifact.summary.candidate.totalTokens).toBe(9 * 80_000);
+    expect(runtime.requests.every((request) => request.model.maxTokens === 65_536)).toBe(true);
+  });
+
+  it("leaves an unspecified output limit to the runtime in comparison and single-revision runs", async () => {
+    const input = comparisonInput();
+    delete input.execution.budget.maxTotalTokens;
+    delete input.execution.model.maxTokens;
+    const runtime = new DeliveryReplayRuntime();
+    const artifact = await compareWorkImprovement(input, { runtime });
+    expect(artifact.decision).toBe("adopt");
+    expect(artifact.execution.model.maxTokens).toBeNull();
+    const evaluated = await evaluateWorkImprovementRevision(input, input.candidate, { runtime });
+    expect(evaluated.every(({ run }) => run.score.verdict === "pass")).toBe(true);
+    expect(runtime.requests.every((request) => request.model.maxTokens === undefined)).toBe(true);
   });
 
   it.each(["maxToolCalls", "maxTotalTokens", "timeoutMs"] as const)(

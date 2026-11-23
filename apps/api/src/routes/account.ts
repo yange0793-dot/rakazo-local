@@ -13,6 +13,7 @@ import {
   approvalModeFromPreference,
   approvalPreferenceFromMode,
   callRequestClientNonce,
+  displayName,
 } from "@rakazo/core";
 import { urlSite } from "@rakazo/core/egress";
 import {
@@ -95,6 +96,17 @@ export function accountRoutes(ctx: RouterContext) {
     },
     health: os.health.handler(async () => ({ ok: true as const, version: "0.1.0" })),
     me: authed.me.handler(async ({ context }): Promise<Me> => meDto(deps, context.actor)),
+    profile: {
+      updateName: authed.profile.updateName.handler(async ({ context, input }) => {
+        const name = displayName(input.name, "");
+        if (!name) throw new ORPCError("BAD_REQUEST", { message: "Invalid name" });
+        await deps.prisma.user.update({
+          where: { id: context.actor.userId },
+          data: { name },
+        });
+        return meDto(deps, context.actor);
+      }),
+    },
     billing: {
       selectFunding: authed.billing.selectFunding.handler(async ({ context, input }) => {
         const billing = requireBilling(deps);
@@ -432,9 +444,8 @@ export function accountRoutes(ctx: RouterContext) {
       }),
       unregisterPush: authed.notifications.unregisterPush.handler(async ({ context }) => {
         if (context.sessionId) {
-          // Only the calling session's registration: another device of this account,
-          // which registered from its own session, keeps its notifications.
           await deps.pushTokens.endSession(context.actor.userId, context.sessionId);
+          await deps.workActivities?.endSession(context.actor.userId, context.sessionId);
           return { ok: true as const };
         }
         await deps.pushTokens.remove(context.actor.userId);

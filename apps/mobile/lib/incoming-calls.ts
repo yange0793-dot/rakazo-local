@@ -19,7 +19,7 @@ import { subscribeIncomingCallEvents } from "./api-live";
 import { endCall, getSnapshot, startCall, subscribe as subscribeCall } from "./call-session";
 import { registerCallPushToken } from "./push";
 import { serverHeaders } from "./server-headers";
-import { currentSessionGeneration, loadSessionToken, registerSessionDiskCache } from "./session";
+import { currentSessionGeneration, loadLocalInstallSessionId, registerSessionDiskCache } from "./session";
 
 type Ringing = NonNullable<ReturnType<typeof ringingCall>>;
 export function usesNativeIncomingCallRingtone() {
@@ -183,7 +183,7 @@ function setIncomingCallRoster(navigation: SpaceNavigation) {
 }
 async function fetchRoster() {
   const generation = currentSessionGeneration();
-  if (!(await loadSessionToken())) return;
+  if (!(await loadLocalInstallSessionId())) return;
   const navigation = await rpc("spaces/list");
   if (running && generation === currentSessionGeneration()) setIncomingCallRoster(navigation);
 }
@@ -460,7 +460,7 @@ export function startIncomingCalls() {
       .then(async (context) => {
         // SecureStore may still be locked after a cold PushKit launch. Retry on foreground.
         if (
-          !context.headers.authorization ||
+          !context.headers["x-rakazo-install-id"] ||
           !running ||
           feed !== controller ||
           generation !== currentSessionGeneration()

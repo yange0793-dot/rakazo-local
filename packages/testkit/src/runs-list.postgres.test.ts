@@ -5,7 +5,8 @@ import type { RunActivityRow } from "@rakazo/contracts";
 import type { PrismaClient } from "@rakazo/db";
 import { createThreadMessage } from "@rakazo/db";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import { sessionCookieHeader } from "./index.js";
+import { createTestSpace, testSpaceHeaders } from "./index.js";
+
 import { asSystem } from "./system-db.js";
 
 type App = { request: (input: string, init?: RequestInit) => Response | Promise<Response> };
@@ -42,35 +43,35 @@ describeRunsList("runs.list activity tracker", () => {
   });
 
   it("lists active runs from two bots and keeps completed runs under recent", async () => {
-    const cookie = await signup(app, `runs-${stamp}@rakazo.test`, "Runs User");
-    const alpha = await rpc<{ id: string }>(app, cookie, "bots/create", {
+    const scope = await testSpace(app, "Runs User");
+    const alpha = await rpc<{ id: string }>(app, scope, "bots/create", {
       name: "Alpha",
       title: "Alpha",
       description: "",
       instructions: "",
       notifyOnFinish: true,
     });
-    const beta = await rpc<{ id: string }>(app, cookie, "bots/create", {
+    const beta = await rpc<{ id: string }>(app, scope, "bots/create", {
       name: "Beta",
       title: "Beta",
       description: "",
       instructions: "",
       notifyOnFinish: true,
     });
-    await rpc(app, cookie, "bots/update", { botId: beta.id, notifyOnFinish: false });
+    await rpc(app, scope, "bots/update", { botId: beta.id, notifyOnFinish: false });
 
     await seedRun(prisma, alpha.id, "running", "alpha in flight");
     await seedRun(prisma, beta.id, "queued", "beta in flight");
     await seedRun(prisma, alpha.id, "completed", "alpha done");
 
-    const active = await rpc<{ runs: RunActivityRow[] }>(app, cookie, "runs/list", {
+    const active = await rpc<{ runs: RunActivityRow[] }>(app, scope, "runs/list", {
       filter: "active",
     });
     expect(active.runs.map((run) => run.botName).sort()).toEqual(["Alpha", "Beta"]);
     expect(active.runs.find((run) => run.botName === "Beta")?.notificationsEnabled).toBe(false);
     expect(active.runs.some((run) => run.status === "completed")).toBe(false);
 
-    const recent = await rpc<{ runs: RunActivityRow[] }>(app, cookie, "runs/list", {
+    const recent = await rpc<{ runs: RunActivityRow[] }>(app, scope, "runs/list", {
       filter: "recent",
     });
     expect(recent.runs.some((run) => run.botName === "Alpha" && run.status === "completed")).toBe(
@@ -80,7 +81,7 @@ describeRunsList("runs.list activity tracker", () => {
   });
 
   it("never returns runs from another workspace", async () => {
-    const ownerCookie = await signup(app, `runs-owner-${stamp}@rakazo.test`, "Owner");
+    const ownerCookie = await testSpace(app, "Owner");
     const ownerBot = await rpc<{ id: string }>(app, ownerCookie, "bots/create", {
       name: "OwnerBot",
       title: "OwnerBot",
@@ -90,7 +91,7 @@ describeRunsList("runs.list activity tracker", () => {
     });
     await seedRun(prisma, ownerBot.id, "running", "owner active run");
 
-    const intruderCookie = await signup(app, `runs-intruder-${stamp}@rakazo.test`, "Intruder");
+    const intruderCookie = await testSpace(app, "Intruder");
     const active = await rpc<{ runs: RunActivityRow[] }>(app, intruderCookie, "runs/list", {
       filter: "active",
     });
@@ -98,22 +99,22 @@ describeRunsList("runs.list activity tracker", () => {
   });
 
   it("excludes archived bots from recent before applying the limit", async () => {
-    const cookie = await signup(app, `runs-archived-${stamp}@rakazo.test`, "Archive User");
-    const archivedBot = await rpc<{ id: string }>(app, cookie, "bots/create", {
+    const scope = await testSpace(app, "Archive User");
+    const archivedBot = await rpc<{ id: string }>(app, scope, "bots/create", {
       name: "Archived",
       title: "Archived",
       description: "",
       instructions: "",
       notifyOnFinish: true,
     });
-    const visibleBot = await rpc<{ id: string }>(app, cookie, "bots/create", {
+    const visibleBot = await rpc<{ id: string }>(app, scope, "bots/create", {
       name: "Visible",
       title: "Visible",
       description: "",
       instructions: "",
       notifyOnFinish: true,
     });
-    await rpc(app, cookie, "bots/archive", { botId: archivedBot.id });
+    await rpc(app, scope, "bots/archive", { botId: archivedBot.id });
     const olderVisibleAt = new Date(Date.now() - 86_400_000);
     for (let i = 0; i < 21; i += 1) {
       await seedRun(
@@ -126,7 +127,7 @@ describeRunsList("runs.list activity tracker", () => {
     }
     await seedRun(prisma, visibleBot.id, "completed", "visible run", olderVisibleAt);
 
-    const recent = await rpc<{ runs: RunActivityRow[] }>(app, cookie, "runs/list", {
+    const recent = await rpc<{ runs: RunActivityRow[] }>(app, scope, "runs/list", {
       filter: "recent",
     });
     expect(recent.runs.some((run) => run.botName === "Archived")).toBe(false);
@@ -135,15 +136,15 @@ describeRunsList("runs.list activity tracker", () => {
   });
 
   it("lists each chat's latest finished run, so a busy chat leaves room for the rest", async () => {
-    const cookie = await signup(app, `runs-busy-${stamp}@rakazo.test`, "Busy User");
-    const busy = await rpc<{ id: string }>(app, cookie, "bots/create", {
+    const scope = await testSpace(app, "Busy User");
+    const busy = await rpc<{ id: string }>(app, scope, "bots/create", {
       name: "Busy",
       title: "Busy",
       description: "",
       instructions: "",
       notifyOnFinish: true,
     });
-    const quiet = await rpc<{ id: string }>(app, cookie, "bots/create", {
+    const quiet = await rpc<{ id: string }>(app, scope, "bots/create", {
       name: "Quiet",
       title: "Quiet",
       description: "",
@@ -165,7 +166,7 @@ describeRunsList("runs.list activity tracker", () => {
       );
     }
 
-    const recent = await rpc<{ runs: RunActivityRow[] }>(app, cookie, "runs/list", {
+    const recent = await rpc<{ runs: RunActivityRow[] }>(app, scope, "runs/list", {
       filter: "recent",
     });
     expect(recent.runs.map((run) => [run.botName, run.promptSnippet])).toEqual([
@@ -175,8 +176,8 @@ describeRunsList("runs.list activity tracker", () => {
   });
 
   it("returns legacy labels alongside structured agent messages", async () => {
-    const cookie = await signup(app, `runs-message-${stamp}@rakazo.test`, "Runs User");
-    const bot = await rpc<{ id: string }>(app, cookie, "bots/create", {
+    const scope = await testSpace(app, "Runs User");
+    const bot = await rpc<{ id: string }>(app, scope, "bots/create", {
       name: "Worker",
       title: "Worker",
       description: "",
@@ -214,7 +215,7 @@ describeRunsList("runs.list activity tracker", () => {
         where: { id: run.id },
         data: { trigger: "bot_message", sourceMessageId: message?.id ?? null },
       });
-      const active = await rpc<{ runs: RunActivityRow[] }>(app, cookie, "runs/list", {
+      const active = await rpc<{ runs: RunActivityRow[] }>(app, scope, "runs/list", {
         filter: "active",
       });
       const row = active.runs.find((row) => row.runId === run.id);
@@ -232,22 +233,22 @@ describeRunsList("runs.list activity tracker", () => {
   });
 
   it("returns group runs with groupId for navigation", async () => {
-    const cookie = await signup(app, `runs-group-${stamp}@rakazo.test`, "Group User");
-    const botA = await rpc<{ id: string }>(app, cookie, "bots/create", {
+    const scope = await testSpace(app, "Group User");
+    const botA = await rpc<{ id: string }>(app, scope, "bots/create", {
       name: "Worker",
       title: "Worker",
       description: "",
       instructions: "",
       notifyOnFinish: true,
     });
-    const botB = await rpc<{ id: string }>(app, cookie, "bots/create", {
+    const botB = await rpc<{ id: string }>(app, scope, "bots/create", {
       name: "Helper",
       title: "Helper",
       description: "",
       instructions: "",
       notifyOnFinish: true,
     });
-    const group = await rpc<{ id: string }>(app, cookie, "groups/create", {
+    const group = await rpc<{ id: string }>(app, scope, "groups/create", {
       name: "Ops",
       botIds: [botA.id, botB.id],
     });
@@ -274,7 +275,7 @@ describeRunsList("runs.list activity tracker", () => {
       },
     });
 
-    const active = await rpc<{ runs: RunActivityRow[] }>(app, cookie, "runs/list", {
+    const active = await rpc<{ runs: RunActivityRow[] }>(app, scope, "runs/list", {
       filter: "active",
     });
     const groupRun = active.runs.find((run) => run.groupId === group.id);
@@ -320,18 +321,12 @@ async function seedRun(
   });
 }
 
-async function signup(app: App, email: string, name: string) {
-  const response = await app.request("/api/auth/sign-up/email", {
-    method: "POST",
-    headers: { "content-type": "application/json", origin: "http://127.0.0.1:5173" },
-    body: JSON.stringify({ email, password: "test-password-123", name }),
-  });
-  expect(response.status).toBeLessThan(400);
-  return sessionCookieHeader(response);
+async function testSpace(app: App, name = "Test") {
+  return createTestSpace(app, name);
 }
 
-async function rpc<T>(app: App, cookie: string, proc: string, body: unknown = {}): Promise<T> {
-  const res = await raw(app, cookie, proc, body);
+async function rpc<T>(app: App, scope: string, proc: string, body: unknown = {}): Promise<T> {
+  const res = await raw(app, scope, proc, body);
   const text = await res.text();
   const parsed = JSON.parse(text) as { json?: T; error?: { message?: string } };
   if (res.status >= 400 || parsed.error) {
@@ -340,12 +335,12 @@ async function rpc<T>(app: App, cookie: string, proc: string, body: unknown = {}
   return parsed.json as T;
 }
 
-async function raw(app: App, cookie: string, proc: string, body: unknown) {
+async function raw(app: App, scope: string, proc: string, body: unknown) {
   return app.request(`/rpc/${proc}`, {
     method: "POST",
     headers: {
       "content-type": "application/json",
-      cookie,
+      ...testSpaceHeaders(scope),
       origin: "http://127.0.0.1:5173",
     },
     body: JSON.stringify({ json: body }),

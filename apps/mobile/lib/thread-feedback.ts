@@ -138,7 +138,6 @@ type Config = {
   scope(): OutboxScope | null;
   serverReachable(): boolean;
   /** True while a password change may have revoked the session before replacing it. */
-  passwordChanging(): boolean;
   disk: UnsentDisk;
   errorText(error: unknown): string;
   notDelivered(attempt: SendAttempt): void;
@@ -420,12 +419,7 @@ export function sendWaitingMessages(force = false): Promise<void> {
           const detail = error as { status?: number; cause?: { status?: number } } | null;
           const status = detail?.status;
           const sendStatus = status ?? detail?.cause?.status;
-          // A password change revokes the token before its replacement arrives; the send waits
-          // for the new session. Any other 401 is refused as usual.
-          const offline =
-            isServerUnreachable(error) ||
-            sendStatus === 429 ||
-            (sendStatus === 401 && config.passwordChanging());
+          const offline = isServerUnreachable(error) || sendStatus === 429;
           attempt.state = offline
             ? "queued"
             : !isModelRequiredSendError(error) &&

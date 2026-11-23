@@ -19,7 +19,7 @@ describe("initial bootstrap target", () => {
   });
 
   it("does not prime unrelated routes", () => {
-    expect(initialBootstrapTarget("/sign-in", true)).toBeNull();
+    expect(initialBootstrapTarget("/mcp/oauth/callback", true)).toBeNull();
     expect(initialBootstrapTarget("/onboarding", false)).toBeNull();
   });
 });

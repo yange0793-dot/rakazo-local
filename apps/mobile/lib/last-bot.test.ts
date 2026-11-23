@@ -1,19 +1,14 @@
 import { setImmediate } from "node:timers/promises";
 import * as SecureStore from "expo-secure-store";
-import { openAuthSessionAsync } from "expo-web-browser";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { fetchMobileJson } from "./api";
 import { clearLastBot, loadLastBotId, saveLastBotId } from "./last-bot";
 import {
-  clearSessionToken,
   currentSessionGeneration,
-  loadSessionToken,
+  loadLocalInstallSessionId,
   registerSessionDiskCache,
-  restoreSessionToken,
-  rotateSessionTokenIfCurrent,
-  saveSessionToken,
+  changeLocalEndpoint,
 } from "./session";
-import { continueWithSso } from "./sso";
 
 const { saved, selectedSpace } = vi.hoisted(() => ({
   saved: new Map<string, string>(),
@@ -31,23 +26,21 @@ vi.mock("expo-secure-store", () => ({
 vi.mock("./live-notifications", () => ({ stopLiveNotifications: vi.fn(async () => undefined) }));
 vi.mock("./network-cache", () => ({ clearNetworkCache: vi.fn() }));
 vi.mock("./thread-feedback", () => ({ clearFailedSends: vi.fn() }));
-vi.mock("./api-auth", () => ({}));
 vi.mock("./api-live", () => ({}));
 vi.mock("./api", () => ({
-  authHeaders: async () => ({ authorization: "Bearer session-a" }),
+  authHeaders: async () => ({ "x-rakazo-install-id": "rakazo-local-install:test" }),
   currentApiBase: () => "https://app.example.test",
   selectedSpaceId: () => selectedSpace.id,
   captureApiRequestContext: async () => ({
     apiBase: "https://app.example.test",
     sessionGeneration: currentSessionGeneration(),
-    headers: { authorization: `Bearer ${await loadSessionToken()}` },
+    headers: { "x-rakazo-install-id": await loadLocalInstallSessionId() },
   }),
   fetchMobileJson: vi.fn(),
 }));
 vi.mock("./api-server", () => ({
   clearSpace: async () => true,
 }));
-vi.mock("expo-web-browser", () => ({ openAuthSessionAsync: vi.fn() }));
 
 registerSessionDiskCache((sameAccount?: boolean) => {
   if (!sameAccount) return clearLastBot();
@@ -66,10 +59,9 @@ describe("last bot shortcut target", () => {
     vi.clearAllMocks();
     saved.clear();
     selectedSpace.id = null;
-    await saveSessionToken("session-a");
     vi.mocked(fetchMobileJson)
       .mockReset()
-      .mockResolvedValue({ response: Response.json({}), body: { user: { id: "account-a" } } });
+      .mockResolvedValue({ response: Response.json({}), body: { id: "account-a" } });
   });
 
   it("does not carry an explicit Space into a later default-Space chat", async () => {
@@ -101,7 +93,7 @@ describe("last bot shortcut target", () => {
     vi.mocked(fetchMobileJson).mockImplementationOnce(async () => {
       started.resolve();
       await release.promise;
-      return { response: Response.json({}), body: { user: { id: "account-a" } } };
+      return { response: Response.json({}), body: { id: "account-a" } };
     });
     const researcher = saveLastBotId("researcher", "research-space");
     await started.promise;
@@ -115,41 +107,12 @@ describe("last bot shortcut target", () => {
     expect(JSON.parse(saved.get("rakazo.last_bot_id") ?? "null").spaceId).toBe("writing-space");
   });
 
-  it.each(["sign-in", "sign-out", "server"])("clears the last bot on %s", async (change) => {
+  it("clears the last bot when switching servers", async () => {
     selectedSpace.id = "shared-space";
     await saveLastBotId("researcher", "shared-space");
-    if (change === "sign-in") await saveSessionToken("other-account-session");
-    else if (change === "sign-out") await clearSessionToken();
-    else await restoreSessionToken("other-server-session");
+    await changeLocalEndpoint(() => {});
     expect(await loadLastBotId()).toBe("");
     expect(saved.has("rakazo.last_bot_space_id")).toBe(false);
-  });
-
-  it("keeps the last bot and Space during same-account password token rotation", async () => {
-    selectedSpace.id = "shared-space";
-    await saveLastBotId("researcher", "shared-space");
-    await rotateSessionTokenIfCurrent(currentSessionGeneration(), "session-a", "rotated-session");
-    expect(await loadLastBotId()).toBe("researcher");
-    expect(JSON.parse(saved.get("rakazo.last_bot_id") ?? "null").spaceId).toBe("shared-space");
-  });
-
-  it("keeps the last bot and Space after verified SSO re-authentication", async () => {
-    selectedSpace.id = "shared-space";
-    await saveLastBotId("researcher", "shared-space");
-    vi.mocked(fetchMobileJson)
-      .mockResolvedValueOnce({ response: Response.json({}), body: { user: { id: "account-a" } } })
-      .mockResolvedValueOnce({
-        response: Response.json({}),
-        body: { url: "https://identity.example.test/authorize?state=test-state" },
-      })
-      .mockResolvedValueOnce({ response: Response.json({}), body: { user: { id: "account-a" } } });
-    vi.mocked(openAuthSessionAsync).mockResolvedValue({
-      type: "success",
-      url: `rakazo://account?cookie=${encodeURIComponent("better-auth.session_token=reauthed-session; Path=/; HttpOnly")}`,
-    });
-    expect(await continueWithSso("reauthenticate")).toBe(true);
-    expect(await loadLastBotId()).toBe("researcher");
-    expect(JSON.parse(saved.get("rakazo.last_bot_id") ?? "null").spaceId).toBe("shared-space");
   });
 
   it("clears a delayed old-session write and drops other saves queued by that session", async () => {
@@ -163,7 +126,7 @@ describe("last bot shortcut target", () => {
     const writing = saveLastBotId("researcher", "space-a");
     await started.promise;
     const obsolete = saveLastBotId("obsolete", "space-a");
-    const changing = saveSessionToken("session-b");
+    const changing = changeLocalEndpoint(() => {});
     release.resolve();
     await Promise.all([writing, obsolete, changing]);
     expect(await loadLastBotId()).toBe("");
@@ -193,7 +156,7 @@ describe("last bot shortcut target", () => {
       await remove(key);
     });
     try {
-      const changing = saveSessionToken("session-b");
+      const changing = changeLocalEndpoint(() => {});
       await started.promise;
       const read = loadLastBotId();
       const readFinished = vi.fn();

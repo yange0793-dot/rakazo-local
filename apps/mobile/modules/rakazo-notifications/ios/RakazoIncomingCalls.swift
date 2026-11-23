@@ -205,7 +205,7 @@ final class IncomingCalls: NSObject, PKPushRegistryDelegate, CXProviderDelegate,
     return (base, headers)
   }
   private func hasSession() -> Bool {
-    savedSession()?.headers["authorization"]?.isEmpty == false
+    savedSession()?.headers["x-rakazo-install-id"]?.isEmpty == false
   }
   private func decline(_ call: [String: String]) {
     guard expiry(call) > Date() else { return }

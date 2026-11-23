@@ -1,12 +1,12 @@
 appId: com.rakazo.app
 ---
-# Reuse an already-open server sheet, or open it from authentication.
+# Reuse an already-open server sheet.
 - runFlow:
     when:
       notVisible:
         id: "server-address"
     commands:
-      - tapOn: "Use a custom server|Custom server.*"
+      - openLink: "rakazo:///server"
 - tapOn:
     id: "server-address"
 - eraseText

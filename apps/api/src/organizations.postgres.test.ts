@@ -79,10 +79,6 @@ describePostgres("organizations (PostgreSQL)", () => {
     const { spaceId } = await bootstrapUserSpace(
       system,
       { id: userId },
-      {
-        signupsEnabled: undefined,
-        signupAllowlist: undefined,
-      },
     );
     return { userId, spaceId, email, isDeploymentOwner: false };
   }

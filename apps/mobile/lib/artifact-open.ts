@@ -9,7 +9,7 @@ import { artifactCacheFileName, artifactShareFileName } from "./artifact-file";
 import { ARTIFACT_DOWNLOAD_TIMEOUT_MS } from "./artifacts";
 import type { ImageSize } from "./inline-image";
 import { createKeyedPromiseCache } from "./inline-image";
-import { currentSessionGeneration, loadSessionToken } from "./session";
+import { currentSessionGeneration, loadLocalInstallSessionId } from "./session";
 
 export type MobileArtifactTarget = { botId: string } | { groupId: string };
 
@@ -55,7 +55,7 @@ function artifactScope(): Promise<ArtifactScope> {
   imageArtifactRequests.clear();
   const scope = (async () => {
     const context = await captureApiRequestContext();
-    const token = await loadSessionToken();
+    const token = await loadLocalInstallSessionId();
     if (
       apiBase !== context.apiBase ||
       generation !== currentSessionGeneration() ||

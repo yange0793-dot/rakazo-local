@@ -5,7 +5,7 @@ import type { SearchHit, ThreadSnapshot } from "@rakazo/contracts";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import type { BotIntroHarness } from "./discard-bot-intro.js";
 import { discardBotIntroFromCreate } from "./discard-bot-intro.js";
-import { sessionCookieHeader } from "./index.js";
+import { createTestSpace, testSpaceHeaders } from "./index.js";
 
 type App = { request: (input: string, init?: RequestInit) => Response | Promise<Response> };
 
@@ -41,37 +41,37 @@ describeSearch("workspace search", () => {
   });
 
   it("finds bots, messages, files, links, and routines within the workspace", async () => {
-    const cookie = await signup(app, `search-${stamp}@rakazo.test`, "Search User");
-    const bot = await rpc<{ id: string }>(app, cookie, "bots/create", {
+    const scope = await testSpace(app, "Search User");
+    const bot = await rpc<{ id: string }>(app, scope, "bots/create", {
       name: "Finder",
       title: "Finder",
       description: "search fixture",
       instructions: "",
       notifyOnFinish: true,
     });
-    await sendAndWait(app, cookie, bot.id, {
+    await sendAndWait(app, scope, bot.id, {
       text: "Bookmark https://example.com/spec for later",
     });
-    const artifact = await rpc<{ id: string }>(app, cookie, "artifacts/create", {
+    const artifact = await rpc<{ id: string }>(app, scope, "artifacts/create", {
       botId: bot.id,
       name: "fixture-notes.txt",
       mimeType: "text/plain",
       contentBase64: Buffer.from("fixture file").toString("base64"),
     });
-    const secondArtifact = await rpc<{ id: string }>(app, cookie, "artifacts/create", {
+    const secondArtifact = await rpc<{ id: string }>(app, scope, "artifacts/create", {
       botId: bot.id,
       name: "fixture-second.txt",
       mimeType: "text/plain",
       contentBase64: Buffer.from("second fixture").toString("base64"),
     });
-    await rpc(app, cookie, "artifacts/create", {
+    await rpc(app, scope, "artifacts/create", {
       botId: bot.id,
       name: "fixture-unattached.txt",
       mimeType: "text/plain",
       contentBase64: Buffer.from("unattached fixture").toString("base64"),
     });
-    await sendAndWait(app, cookie, bot.id, { artifactIds: [artifact.id, secondArtifact.id] });
-    const initialFiles = await rpc<{ hits: SearchHit[] }>(app, cookie, "search/query", {
+    await sendAndWait(app, scope, bot.id, { artifactIds: [artifact.id, secondArtifact.id] });
+    const initialFiles = await rpc<{ hits: SearchHit[] }>(app, scope, "search/query", {
       q: "fixture",
     });
     expect(
@@ -81,8 +81,8 @@ describeSearch("workspace search", () => {
     const initialMessageId = initialFiles.hits.find(
       (hit) => hit.artifactId === artifact.id,
     )?.messageId;
-    await sendAndWait(app, cookie, bot.id, { artifactIds: [artifact.id] });
-    const latestFiles = await rpc<{ hits: SearchHit[] }>(app, cookie, "search/query", {
+    await sendAndWait(app, scope, bot.id, { artifactIds: [artifact.id] });
+    const latestFiles = await rpc<{ hits: SearchHit[] }>(app, scope, "search/query", {
       q: "fixture",
     });
     const latestMessageId = latestFiles.hits.find(
@@ -90,7 +90,7 @@ describeSearch("workspace search", () => {
     )?.messageId;
     expect(latestMessageId).toBeDefined();
     expect(latestMessageId).not.toBe(initialMessageId);
-    await rpc(app, cookie, "routines/create", {
+    await rpc(app, scope, "routines/create", {
       botId: bot.id,
       name: "Weekly fixture",
       prompt: "check the fixture",
@@ -100,21 +100,21 @@ describeSearch("workspace search", () => {
       notify: true,
     });
 
-    const hits = await rpc<{ hits: Array<{ kind: string }> }>(app, cookie, "search/query", {
+    const hits = await rpc<{ hits: Array<{ kind: string }> }>(app, scope, "search/query", {
       q: "fixture",
     });
     expect(hits.hits.map((hit) => hit.kind)).toEqual(
       expect.arrayContaining(["conversation", "message", "file", "routine"]),
     );
-    const linkHits = await rpc<{ hits: Array<{ kind: string }> }>(app, cookie, "search/query", {
+    const linkHits = await rpc<{ hits: Array<{ kind: string }> }>(app, scope, "search/query", {
       q: "example.com",
     });
     expect(linkHits.hits.some((hit) => hit.kind === "link")).toBe(true);
   });
 
   it("finds literal message text without widening wildcard queries", async () => {
-    const cookie = await signup(app, `search-literal-${stamp}@rakazo.test`, "Literal Search");
-    const bot = await rpc<{ id: string }>(app, cookie, "bots/create", {
+    const scope = await testSpace(app, "Literal Search");
+    const bot = await rpc<{ id: string }>(app, scope, "bots/create", {
       name: "Literal Finder",
       title: "Literal Finder",
       description: "",
@@ -123,17 +123,17 @@ describeSearch("workspace search", () => {
     });
     const queries = [String.raw`back\slash`, 'say "hi"', "50%_off", "café/東京"];
     for (const text of [...queries, "500 off"]) {
-      await sendAndWait(app, cookie, bot.id, { text });
+      await sendAndWait(app, scope, bot.id, { text });
     }
     for (const q of queries) {
-      const { hits } = await rpc<{ hits: SearchHit[] }>(app, cookie, "search/query", { q });
+      const { hits } = await rpc<{ hits: SearchHit[] }>(app, scope, "search/query", { q });
       expect(hits).toEqual(
         expect.arrayContaining([
           expect.objectContaining({ kind: "message", botId: bot.id, snippet: q }),
         ]),
       );
     }
-    const { hits } = await rpc<{ hits: SearchHit[] }>(app, cookie, "search/query", { q: "50%" });
+    const { hits } = await rpc<{ hits: SearchHit[] }>(app, scope, "search/query", { q: "50%" });
     const messages = hits.filter((hit) => hit.kind === "message");
     expect(messages).toEqual(
       expect.arrayContaining([expect.objectContaining({ botId: bot.id, snippet: "50%_off" })]),
@@ -142,7 +142,7 @@ describeSearch("workspace search", () => {
   });
 
   it("returns no hits for another workspace", async () => {
-    const ownerCookie = await signup(app, `search-owner-${stamp}@rakazo.test`, "Owner");
+    const ownerCookie = await testSpace(app, "Owner");
     const ownerBot = await rpc<{ id: string }>(app, ownerCookie, "bots/create", {
       name: "OwnerOnly",
       title: "OwnerOnly",
@@ -152,7 +152,7 @@ describeSearch("workspace search", () => {
     });
     await sendAndWait(app, ownerCookie, ownerBot.id, { text: "owner-only-token-xyz" });
 
-    const intruderCookie = await signup(app, `search-intruder-${stamp}@rakazo.test`, "Intruder");
+    const intruderCookie = await testSpace(app, "Intruder");
     const hits = await rpc<{ hits: unknown[] }>(app, intruderCookie, "search/query", {
       q: "owner-only-token-xyz",
     });
@@ -160,34 +160,34 @@ describeSearch("workspace search", () => {
   });
 
   it("finds group conversations, messages, and files", async () => {
-    const cookie = await signup(app, `search-group-${stamp}@rakazo.test`, "Group Search User");
-    const botA = await rpc<{ id: string }>(app, cookie, "bots/create", {
+    const scope = await testSpace(app, "Group Search User");
+    const botA = await rpc<{ id: string }>(app, scope, "bots/create", {
       name: "Alpha",
       title: "Alpha",
       description: "",
       instructions: "",
       notifyOnFinish: true,
     });
-    const botB = await rpc<{ id: string }>(app, cookie, "bots/create", {
+    const botB = await rpc<{ id: string }>(app, scope, "bots/create", {
       name: "Beta",
       title: "Beta",
       description: "",
       instructions: "",
       notifyOnFinish: true,
     });
-    const group = await rpc<{ id: string }>(app, cookie, "groups/create", {
+    const group = await rpc<{ id: string }>(app, scope, "groups/create", {
       name: "Squad",
       botIds: [botA.id, botB.id],
     });
     const groupToken = `squad-search-token-${stamp}`;
-    await rpc(app, cookie, "threads/send", { groupId: group.id, text: groupToken });
-    const artifact = await rpc<{ id: string }>(app, cookie, "artifacts/create", {
+    await rpc(app, scope, "threads/send", { groupId: group.id, text: groupToken });
+    const artifact = await rpc<{ id: string }>(app, scope, "artifacts/create", {
       groupId: group.id,
       name: `squad-notes-${stamp}.txt`,
       mimeType: "text/plain",
       contentBase64: Buffer.from("group fixture").toString("base64"),
     });
-    await rpc(app, cookie, "threads/send", {
+    await rpc(app, scope, "threads/send", {
       groupId: group.id,
       text: "see attachment",
       artifactIds: [artifact.id],
@@ -195,19 +195,19 @@ describeSearch("workspace search", () => {
 
     const squadHits = await rpc<{
       hits: Array<{ kind: string; groupId?: string; botId?: string }>;
-    }>(app, cookie, "search/query", { q: "Squad" });
+    }>(app, scope, "search/query", { q: "Squad" });
     expect(
       squadHits.hits.some((hit) => hit.kind === "conversation" && hit.groupId === group.id),
     ).toBe(true);
 
     const messageHits = await rpc<{
       hits: Array<{ kind: string; groupId?: string; botId?: string; messageId?: string }>;
-    }>(app, cookie, "search/query", { q: groupToken });
+    }>(app, scope, "search/query", { q: groupToken });
     const groupMessage = messageHits.hits.find((hit) => hit.kind === "message");
     expect(groupMessage?.groupId).toBe(group.id);
     expect(groupMessage?.botId).toBeUndefined();
     expect(groupMessage?.messageId).toBeDefined();
-    const page = await rpc<{ messages: Array<{ id: string }> }>(app, cookie, "threads/messages", {
+    const page = await rpc<{ messages: Array<{ id: string }> }>(app, scope, "threads/messages", {
       groupId: group.id,
       around: { messageId: groupMessage!.messageId! },
     });
@@ -215,39 +215,33 @@ describeSearch("workspace search", () => {
 
     const fileHits = await rpc<{
       hits: Array<{ kind: string; groupId?: string; artifactId?: string }>;
-    }>(app, cookie, "search/query", { q: `squad-notes-${stamp}` });
+    }>(app, scope, "search/query", { q: `squad-notes-${stamp}` });
     const groupFile = fileHits.hits.find((hit) => hit.kind === "file");
     expect(groupFile?.groupId).toBe(group.id);
     expect(groupFile?.artifactId).toBe(artifact.id);
   });
 });
 
-async function signup(app: App, email: string, name: string) {
-  const response = await app.request("/api/auth/sign-up/email", {
-    method: "POST",
-    headers: { "content-type": "application/json", origin: "http://127.0.0.1:5173" },
-    body: JSON.stringify({ email, password: "test-password-123", name }),
-  });
-  expect(response.status).toBeLessThan(400);
-  return sessionCookieHeader(response);
+async function testSpace(app: App, name = "Test") {
+  return createTestSpace(app, name);
 }
 
-async function rpc<T>(app: App, cookie: string, proc: string, body: unknown = {}): Promise<T> {
-  const res = await raw(app, cookie, proc, body);
+async function rpc<T>(app: App, scope: string, proc: string, body: unknown = {}): Promise<T> {
+  const res = await raw(app, scope, proc, body);
   const text = await res.text();
   const parsed = JSON.parse(text) as { json?: T; error?: { message?: string } };
   if (res.status >= 400 || parsed.error) {
     throw new Error(`${proc} ${res.status}: ${parsed.error?.message ?? text}`);
   }
-  return discardBotIntroFromCreate(botIntroHarness, cookie, proc, parsed.json as T);
+  return discardBotIntroFromCreate(botIntroHarness, scope, proc, parsed.json as T);
 }
 
-async function raw(app: App, cookie: string, proc: string, body: unknown) {
+async function raw(app: App, scope: string, proc: string, body: unknown) {
   return app.request(`/rpc/${proc}`, {
     method: "POST",
     headers: {
       "content-type": "application/json",
-      cookie,
+      ...testSpaceHeaders(scope),
       origin: "http://127.0.0.1:5173",
     },
     body: JSON.stringify({ json: body }),
@@ -256,14 +250,14 @@ async function raw(app: App, cookie: string, proc: string, body: unknown) {
 
 async function sendAndWait(
   app: App,
-  cookie: string,
+  scope: string,
   botId: string,
   input: { text?: string; artifactIds?: string[] },
 ) {
-  await rpc(app, cookie, "threads/send", { botId, ...input });
+  await rpc(app, scope, "threads/send", { botId, ...input });
   await waitFor(
     app,
-    cookie,
+    scope,
     botId,
     (snap) => !snap.run || ["completed", "failed", "cancelled"].includes(snap.run.status),
   );
@@ -271,14 +265,14 @@ async function sendAndWait(
 
 async function waitFor(
   app: App,
-  cookie: string,
+  scope: string,
   botId: string,
   pred: (snap: ThreadSnapshot) => boolean,
 ) {
   const start = Date.now();
   let last: ThreadSnapshot | null = null;
   while (Date.now() - start < 20_000) {
-    last = await rpc<ThreadSnapshot>(app, cookie, "threads/get", { botId });
+    last = await rpc<ThreadSnapshot>(app, scope, "threads/get", { botId });
     if (pred(last)) return last;
     await new Promise((resolve) => setTimeout(resolve, 100));
   }

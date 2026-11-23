@@ -679,6 +679,43 @@ describe("automatic memory archive", () => {
     expect(batch!.throughSeq).toBe(1);
   });
 
+  it("skips one overlarge source and checkpoints later messages instead of blocking", async () => {
+    const overlarge = "x".repeat(512 * 1024 + 1);
+    const withinLimit = "字".repeat(100_000);
+    const f = fixture({
+      thread: threadRow(),
+      progress: {
+        threadId: "thread-a",
+        spaceId: "space-a",
+        botId: "bot-a",
+        userId: "user-a",
+        scope: "isolated",
+        generation: 0,
+        throughSeq: 4,
+        processedUpToSeq: 0,
+        pending: true,
+        availableAt: now,
+      },
+      messages: [
+        message(1, { blocks: [{ kind: "text", text: overlarge }] }),
+        message(2, { blocks: [{ kind: "text", text: withinLimit }] }),
+        message(3, { blocks: [{ kind: "text", text: withinLimit }] }),
+        message(4, { blocks: [{ kind: "text", text: "A later source." }] }),
+      ],
+    });
+    const target = { threadId: "thread-a", botId: "bot-a", userId: "user-a" };
+    const first = await f.store.loadBatch(target, ctx);
+
+    expect(first!.newSources.map((source) => source.id)).toEqual(["m2"]);
+    expect(first!.messages.map((message) => message.id)).toEqual(["m2"]);
+    expect(first!.throughSeq).toBe(2);
+
+    await f.store.applyBatch(first!, [], ctx);
+    const next = await f.store.loadBatch(target, ctx);
+    expect(next!.newSources.map((source) => source.id)).toEqual(["m3", "m4"]);
+    expect(next!.throughSeq).toBe(4);
+  });
+
   it("never advances the cursor past a page it truncated", async () => {
     const f = fixture({
       thread: threadRow(),
@@ -800,7 +837,7 @@ describe("automatic memory archive", () => {
           id: "forgotten",
           status: "forgotten",
           revision: 3,
-          content: "Forget the narrow console.",
+          content: "[forgotten]",
           provenance: JSON.stringify({
             kind: "run",
             messageId: "m1",
@@ -829,12 +866,14 @@ describe("automatic memory archive", () => {
     expect(batch!.retirementEvidence.find((fact) => fact.id === "forgotten")).toMatchObject({
       status: "forgotten",
       revision: 3,
-      // Forgetting erases the stored body; the quoted words are the surviving evidence.
-      content: "narrow",
-      sourceMessageId: "m1",
-      sourceQuote: "narrow",
-      category: "preference",
+      content: "[forgotten]",
     });
+    expect(batch!.retirementEvidence.find((fact) => fact.id === "forgotten")).not.toHaveProperty(
+      "sourceQuote",
+    );
+    expect(batch!.retirementEvidence.find((fact) => fact.id === "forgotten")).not.toHaveProperty(
+      "sourceMessageId",
+    );
   });
 
   it("keeps the stored placeholder as evidence when a forgotten fact had no quote", async () => {

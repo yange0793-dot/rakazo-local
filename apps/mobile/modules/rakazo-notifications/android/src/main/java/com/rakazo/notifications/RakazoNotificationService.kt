@@ -1010,7 +1010,7 @@ internal fun rpc(
     serverHeaders(headers).forEach { (name, value) -> connection.setRequestProperty(name, value) }
     connection.setRequestProperty("Content-Type", "application/json")
     connection.setRequestProperty("Origin", "rakazo://")
-    connection.setRequestProperty("Authorization", "Bearer $token")
+    connection.setRequestProperty("x-rakazo-install-id", token)
     if (spaceId.isNotBlank()) {
       connection.setRequestProperty("x-rakazo-space-id", spaceId)
     }

@@ -32,7 +32,7 @@ test("worktree settings stay private and local", () => {
     setup(worktree);
     assert.equal(existsSync(path.join(worktree, ".env")), false);
 
-    const settings = "RAKAZO_DEV_TAILNET=\nBETTER_AUTH_SECRET=fake-test-secret\n";
+    const settings = "RAKAZO_DEV_TAILNET=\nSCREEN_PROXY_SECRET=fake-test-secret\n";
     writeFileSync(path.join(main, ".env"), settings);
     setup(worktree);
     assert.equal(readFileSync(path.join(worktree, ".env"), "utf8"), settings);

@@ -1,11 +1,11 @@
-import { randomUUID } from "node:crypto";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { ComposioConnector, FakeComposioClient } from "@rakazo/adapters";
 import { describe, expect, it } from "vitest";
 import { discardBotIntroRun } from "./discard-bot-intro.js";
-import { sessionCookieHeader } from "./index.js";
+import { createTestSpace, testSpaceHeaders } from "./index.js";
+
 import type { ModelEmulatorRequest } from "./model-emulator.js";
 import { startModelEmulator } from "./model-emulator.js";
 import { asSystem } from "./system-db.js";
@@ -71,33 +71,22 @@ describe.skipIf(!enabled)("earlier files through history tools", () => {
       const handles = await createApp({
         databaseUrl: process.env.DATABASE_URL!,
         realtimeDatabaseUrl: process.env.DATABASE_URL!,
-        authUrl: origin,
+
         webOrigin: origin,
         dataDir,
         sandboxProvider: "fake",
         agentRuntime: "pi",
         wakeupDriver: "memory",
-        signupsEnabled: "true",
         composio: new ComposioConnector({ client: new FakeComposioClient() }),
         encryptionKey: "history-files-fixture-encryption-key",
       });
       stop = handles.stop;
       const db = asSystem(handles.prisma);
-      const signup = await handles.app.request("/api/auth/sign-up/email", {
-        method: "POST",
-        headers: { "content-type": "application/json", origin },
-        body: JSON.stringify({
-          email: `history-files-${randomUUID()}@rakazo.test`,
-          password: "password12",
-          name: "History files fixture",
-        }),
-      });
-      expect(signup.status).toBeLessThan(400);
-      const cookie = sessionCookieHeader(signup);
+      const scope = await createTestSpace(handles.app, "History files fixture");
       const rpc = async <T>(procedure: string, input: unknown): Promise<T> => {
         const response = await handles.app.request(`/rpc/${procedure}`, {
           method: "POST",
-          headers: { "content-type": "application/json", cookie, origin },
+          headers: { "content-type": "application/json", ...testSpaceHeaders(scope), origin },
           body: JSON.stringify({ json: input }),
         });
         const body = (await response.json()) as { json: T; error?: { message: string } };
@@ -119,7 +108,7 @@ describe.skipIf(!enabled)("earlier files through history tools", () => {
         instructions: "",
         notifyOnFinish: false,
       });
-      await discardBotIntroRun(handles, cookie, bot.id);
+      await discardBotIntroRun(handles, scope, bot.id);
       await handles.awaitIdle?.();
       await rpc("bots/update", {
         botId: bot.id,

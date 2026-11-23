@@ -1,4 +1,4 @@
-import { createHash, randomUUID } from "node:crypto";
+import { createHash } from "node:crypto";
 import { mkdirSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import type {
@@ -16,7 +16,8 @@ import { WORKING_RUN_STATUSES } from "@rakazo/core";
 import type { createDb } from "@rakazo/db";
 import type { EvalJudge, JudgeInput, Judgment } from "../evals/judge.js";
 import { createEvalJudge } from "../evals/judge.js";
-import { sessionCookieHeader } from "../index.js";
+import { createTestSpace, testSpaceHeaders } from "../index.js";
+
 import { asSystem } from "../system-db.js";
 import type { Criterion, Flow, FlowComputer, FlowEvidence, TranscriptEntry } from "./flow.js";
 import { check } from "./flow.js";
@@ -106,7 +107,7 @@ export async function runFlow<World>(
     harnessTokens.output += usage.outputTokens ?? 0;
   };
   let botId = "";
-  let cookie = "";
+  let scope = "";
   let world: World | undefined;
   let endedBy: FlowEvidence<unknown>["endedBy"] = "user-done";
   let wakesRan = 0;
@@ -137,7 +138,11 @@ export async function runFlow<World>(
   const rpc = async <T>(procedure: string, body: unknown): Promise<T> => {
     const response = await handles.app.request(`/rpc/${procedure}`, {
       method: "POST",
-      headers: { "content-type": "application/json", cookie, origin: "http://127.0.0.1:5173" },
+      headers: {
+        "content-type": "application/json",
+        ...testSpaceHeaders(scope),
+        origin: "http://127.0.0.1:5173",
+      },
       body: JSON.stringify({ json: body }),
     });
     const parsed = (await response.json()) as { json?: T; error?: { message?: string } };
@@ -240,17 +245,7 @@ export async function runFlow<World>(
   };
 
   try {
-    const signup = await handles.app.request("/api/auth/sign-up/email", {
-      method: "POST",
-      headers: { "content-type": "application/json", origin: "http://127.0.0.1:5173" },
-      body: JSON.stringify({
-        email: `flow-${randomUUID()}@example.test`,
-        password: "synthetic-flow-password-12",
-        name: "Sam Rivera",
-      }),
-    });
-    if (!signup.ok) throw new Error(`Signup failed (${signup.status})`);
-    cookie = sessionCookieHeader(signup);
+    scope = await createTestSpace(handles.app, "Sam Rivera");
     await rpc("preferences/adoptTimezone", { timezone: flow.timezone });
     // A fresh bot exactly as a new user would create it: no test instructions.
     const bot = await rpc<{ id: string }>("bots/create", { name: "Errands" });
@@ -550,7 +545,7 @@ export async function runFlow<World>(
     result.status = "error";
     result.error = error instanceof Error ? error.message : String(error);
   } finally {
-    if (botId && cookie) await rpc("threads/stop", { botId }).catch(() => undefined);
+    if (botId && scope) await rpc("threads/stop", { botId }).catch(() => undefined);
     clearInterval(recorder);
     await recording;
     abort.abort();

@@ -1,13 +1,19 @@
 import { expect, test } from "@playwright/test";
 import { createDb } from "../../../packages/db/src/index";
-import { captureScreenshot, completeOnboarding, openUserSettings, rpc, signup } from "./helpers";
+import {
+  captureScreenshot,
+  completeOnboarding,
+  openLocalWorkspace,
+  openUserSettings,
+  rpc,
+} from "./helpers";
 import { expectReadableNames } from "./visible-name-guard";
 
 test("legacy opaque names never appear in navigation, account, chats or Activity", async ({
   page,
 }, testInfo) => {
   const email = `names-${Date.now()}@example.test`;
-  await signup(page, email, "password12", "Demo");
+  await openLocalWorkspace(page, "Demo");
   await completeOnboarding(page);
   const bot = await rpc<{ id: string }>(page, "bots/create", {
     name: "Helper",

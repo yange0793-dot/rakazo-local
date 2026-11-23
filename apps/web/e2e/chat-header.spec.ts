@@ -1,9 +1,15 @@
 import { expect, test } from "@playwright/test";
-import { activeBotId, captureScreenshot, completeOnboarding, rpc, signup } from "./helpers";
+import {
+  activeBotId,
+  captureScreenshot,
+  completeOnboarding,
+  openLocalWorkspace,
+  rpc,
+} from "./helpers";
 
 test("the chat header floats over the transcript", async ({ page }, testInfo) => {
   await page.setViewportSize({ width: 1280, height: 720 });
-  await signup(page, `chat-header-${Date.now()}@rakazo.test`, "password12", "Sample");
+  await openLocalWorkspace(page, "Sample");
   await completeOnboarding(page);
   await rpc(page, "onboarding/dismissFocus", { botId: activeBotId(page) });
 

@@ -11,7 +11,7 @@ import {
 } from "@rakazo/adapters";
 import { loadRootEnv } from "@rakazo/core/node/load-root-env";
 import { afterAll, describe, expect, it } from "vitest";
-import { sessionCookieHeader } from "./index.js";
+import { createTestSpace, testSpaceHeaders } from "./index.js";
 
 if (process.env.VERIFY_PROVIDERS) loadRootEnv({ allowInTests: true });
 
@@ -48,24 +48,12 @@ describeLive("live release-watch eval (GPT 5.6 Luna + GitHub emulator)", () => {
       composio,
     });
     stop = handles.stop;
+    const scope = await createTestSpace(handles.app, "Release Watch");
 
-    const stamp = Date.now();
-    const signup = await handles.app.request("/api/auth/sign-up/email", {
-      method: "POST",
-      headers: { "content-type": "application/json", origin: "http://127.0.0.1:5173" },
-      body: JSON.stringify({
-        email: `release-watch-${stamp}@rakazo.test`,
-        password: "password12",
-        name: "Release Watch",
-      }),
-    });
-    expect(signup.status).toBeLessThan(400);
-    const cookie = sessionCookieHeader(signup);
-
-    const me = await rpc<{ spaceId: string; userId: string }>(handles.app, cookie, "me");
+    const me = await rpc<{ spaceId: string; userId: string }>(handles.app, scope, "me");
     const started = await rpc<{ connectionId: string; authorizationUrl: null }>(
       handles.app,
-      cookie,
+      scope,
       "connections/begin",
       { connectorId: "composio", provider: "GITHUB", displayName: "GitHub" },
     );
@@ -90,7 +78,7 @@ describeLive("live release-watch eval (GPT 5.6 Luna + GitHub emulator)", () => {
       expect.arrayContaining([...RELEASE_WATCH_GITHUB_TOOL_NAMES]),
     );
 
-    const bot = await rpc<{ id: string }>(handles.app, cookie, "bots/create", {
+    const bot = await rpc<{ id: string }>(handles.app, scope, "bots/create", {
       name: "Chief",
       title: "Chief of staff",
       description: "Release watch eval",
@@ -100,7 +88,7 @@ describeLive("live release-watch eval (GPT 5.6 Luna + GitHub emulator)", () => {
 
     // Mirror the Discord user ask: no tool names, no Bing/browser coaching.
     // schedule_create + connected-plugin guidance should steer the model.
-    await rpc(handles.app, cookie, "threads/send", {
+    await rpc(handles.app, scope, "threads/send", {
       botId: bot.id,
       text: [
         "Create a daily task to watch for new releases of elie222/rakazo",
@@ -108,11 +96,11 @@ describeLive("live release-watch eval (GPT 5.6 Luna + GitHub emulator)", () => {
       ].join(" "),
     });
 
-    await waitFor(handles.app, cookie, bot.id, 180_000);
+    await waitFor(handles.app, scope, bot.id, 180_000);
 
     const routines = await rpc<Array<{ id: string; name: string; prompt: string }>>(
       handles.app,
-      cookie,
+      scope,
       "routines/list",
       { botId: bot.id },
     );
@@ -137,7 +125,7 @@ describeLive("live release-watch eval (GPT 5.6 Luna + GitHub emulator)", () => {
       payload: { routineId: routine.id, scheduledFor: dueAt.toISOString() },
     });
 
-    const snap = await waitFor(handles.app, cookie, bot.id, 180_000, { requireSeenRun: true });
+    const snap = await waitFor(handles.app, scope, bot.id, 180_000, { requireSeenRun: true });
     const routineRunId = snap.run?.id;
     const toolEvents = await handles.prisma.event.findMany({
       where: {
@@ -203,10 +191,14 @@ type Snap = {
   } | null;
 };
 
-async function rpc<T>(app: App, cookie: string, proc: string, body: unknown = {}): Promise<T> {
+async function rpc<T>(app: App, scope: string, proc: string, body: unknown = {}): Promise<T> {
   const res = await app.request(`/rpc/${proc}`, {
     method: "POST",
-    headers: { "content-type": "application/json", cookie, origin: "http://127.0.0.1:5173" },
+    headers: {
+      "content-type": "application/json",
+      ...testSpaceHeaders(scope),
+      origin: "http://127.0.0.1:5173",
+    },
     body: JSON.stringify({ json: body }),
   });
   const parsed = (await res.json()) as { json?: T; error?: { message?: string } };
@@ -218,7 +210,7 @@ async function rpc<T>(app: App, cookie: string, proc: string, body: unknown = {}
 
 async function waitFor(
   app: App,
-  cookie: string,
+  scope: string,
   botId: string,
   ms: number,
   options?: { requireSeenRun?: boolean },
@@ -228,7 +220,7 @@ async function waitFor(
   let seenRun = false;
   let lastSeenRun: Snap["run"] = null;
   while (Date.now() - start < ms) {
-    last = await rpc<Snap>(app, cookie, "threads/get", { botId });
+    last = await rpc<Snap>(app, scope, "threads/get", { botId });
     if (last.run) {
       seenRun = true;
       lastSeenRun = last.run;

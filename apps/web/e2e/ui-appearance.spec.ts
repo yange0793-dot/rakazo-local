@@ -1,11 +1,11 @@
 import { expect, test } from "@playwright/test";
-import { completeOnboarding, rpc, signup } from "./helpers";
+import { completeOnboarding, openLocalWorkspace, rpc } from "./helpers";
 
 test("sidebar list fades above the transparent footer and keeps the last row reachable", async ({
   page,
 }, testInfo) => {
   await page.setViewportSize({ width: 1280, height: 720 });
-  await signup(page, `footer-scroll-${Date.now()}@rakazo.test`, "password12", "Demo User");
+  await openLocalWorkspace(page, "Demo User");
   await completeOnboarding(page);
   for (let index = 0; index < 20; index++) {
     await rpc(page, "bots/create", {

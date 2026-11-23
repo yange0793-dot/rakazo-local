@@ -27,7 +27,6 @@ describePostgres("agent home storage records (PostgreSQL)", () => {
       provisionMessagingIdentity(
         db.prisma,
         { provider: "email", address },
-        { signupsEnabled: undefined, signupAllowlist: undefined },
       ),
     );
   });

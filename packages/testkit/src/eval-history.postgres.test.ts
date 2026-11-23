@@ -72,13 +72,12 @@ describe.skipIf(!databaseAvailable)("eval history accounting", () => {
               createApp({
                 databaseUrl: process.env.DATABASE_URL!,
                 realtimeDatabaseUrl: process.env.DATABASE_URL!,
-                authUrl: "http://127.0.0.1:5173",
+
                 webOrigin: "http://127.0.0.1:5173",
                 dataDir,
                 sandboxProvider: "fake",
                 agentRuntime: "pi",
                 wakeupDriver: "memory",
-                signupsEnabled: "true",
                 composio,
                 encryptionKey: "offline-eval-history-encryption-key",
               }),

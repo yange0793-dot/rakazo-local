@@ -116,13 +116,13 @@ it("shows no gift when the account cannot invite", () => {
 });
 
 it("shows the gift only in a bot chat, as mobile does", () => {
-  billing.status = { referral: { url: "https://example.test/sign-up?ref=abc", rewards: 0 } };
+  billing.status = { referral: { url: "https://example.test/app?ref=abc", rewards: 0 } };
   renderHeader({ inGroup: true });
   expect(gift()).toBeNull();
 });
 
 it("opens the invite with both rewards and copies the link", async () => {
-  billing.status = { referral: { url: "https://example.test/sign-up?ref=abc", rewards: 2 } };
+  billing.status = { referral: { url: "https://example.test/app?ref=abc", rewards: 2 } };
   renderHeader();
   act(() => gift()!.click());
   const dialog = container.querySelector('[role="dialog"]')!;
@@ -133,13 +133,13 @@ it("opens the invite with both rewards and copies the link", async () => {
   );
   // The link is also shown, so it can be copied by hand.
   expect(dialog.querySelector<HTMLInputElement>('input[aria-label="Invite link"]')?.value).toBe(
-    "https://example.test/sign-up?ref=abc",
+    "https://example.test/app?ref=abc",
   );
   expect(dialog.textContent).toContain("2 free months earned");
   const copy = [...dialog.querySelectorAll("button")].find(
     (button) => button.textContent === "Copy link",
   )!;
   await act(async () => copy.click());
-  expect(writeText).toHaveBeenCalledWith("https://example.test/sign-up?ref=abc");
+  expect(writeText).toHaveBeenCalledWith("https://example.test/app?ref=abc");
   expect(dialog.textContent).toContain("Copied");
 });

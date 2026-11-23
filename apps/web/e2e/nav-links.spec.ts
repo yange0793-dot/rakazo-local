@@ -1,5 +1,5 @@
 import { expect, test } from "@playwright/test";
-import { captureScreenshot, completeOnboarding, signup } from "./helpers";
+import { captureScreenshot, completeOnboarding, openLocalWorkspace } from "./helpers";
 
 test("an operator menu link opens its page sandboxed inside the app", async ({
   page,
@@ -11,7 +11,7 @@ test("an operator menu link opens its page sandboxed inside the app", async ({
       body: "<!doctype html><title>Clients</title><h1>Client list</h1>",
     }),
   );
-  await signup(page, `nav-links-${Date.now()}@rakazo.test`, "password12", "Links QA");
+  await openLocalWorkspace(page, "Links QA");
   await completeOnboarding(page);
 
   await page.getByTestId("user-menu-trigger").click();

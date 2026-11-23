@@ -15,10 +15,8 @@ const native = vi.hoisted(() => ({
 const app = vi.hoisted(() => ({
   appState: undefined as undefined | ((state: string) => void),
   session: undefined as undefined | (() => void),
-  token: "session-token",
   generation: 1,
   ready: 1,
-  readFails: false,
 }));
 const rpc = vi.hoisted(() => vi.fn());
 
@@ -36,8 +34,6 @@ vi.mock("./api", () => ({ rpc }));
 vi.mock("./session", () => ({
   currentSessionGeneration: () => app.generation,
   currentReadySessionGeneration: () => app.ready,
-  snapshotSessionToken: async () =>
-    app.readFails ? { ok: false } : { ok: true, value: app.token },
   subscribeSessionGeneration: (listener: () => void) => {
     app.session = listener;
     return () => undefined;
@@ -50,10 +46,8 @@ const settle = () => new Promise((resolve) => setTimeout(resolve, 0));
 
 beforeEach(() => {
   vi.clearAllMocks();
-  app.token = "session-token";
   app.generation = 1;
   app.ready = 1;
-  app.readFails = false;
 });
 
 it("starts the card for the chat just sent to", () => {
@@ -99,7 +93,7 @@ it("hands the phone's token for starting cards to the server", async () => {
   await settle();
 });
 
-it("asks again on launch and whenever the app opens, and ends the card on sign-out", async () => {
+it("refreshes on launch, foreground, and a completed local endpoint change", async () => {
   startWorkActivities();
   expect(native.refreshWorkActivity).toHaveBeenCalledOnce();
   native.refreshWorkActivity.mockClear();
@@ -111,19 +105,14 @@ it("asks again on launch and whenever the app opens, and ends the card on sign-o
   app.session!();
   await settle();
   expect(native.endWorkActivity).not.toHaveBeenCalled();
-  // A new sign-in hands both tokens to its session.
   expect(native.refreshWorkActivity).toHaveBeenCalledOnce();
-  app.token = "";
-  // A change still landing, or a keychain read that failed, is not a sign-out.
+  native.refreshWorkActivity.mockClear();
   app.ready = 0;
   app.session!();
+  expect(native.refreshWorkActivity).not.toHaveBeenCalled();
   app.ready = 1;
-  app.readFails = true;
   app.session!();
   await settle();
+  expect(native.refreshWorkActivity).toHaveBeenCalledOnce();
   expect(native.endWorkActivity).not.toHaveBeenCalled();
-  app.readFails = false;
-  app.session!();
-  await settle();
-  expect(native.endWorkActivity).toHaveBeenCalledOnce();
 });

@@ -6,7 +6,6 @@ import {
   captureApiRequestContext,
   currentApiBase,
   isServerReachable,
-  passwordChangeInFlight,
   rpc,
   selectedSpaceId,
   subscribeServerReachable,
@@ -18,9 +17,8 @@ import { outboxDisk } from "./outbox-disk";
 import {
   currentReadySessionGeneration,
   currentSessionGeneration,
-  loadSessionToken,
+  loadLocalInstallSessionId,
   loadVerifiedIntegrationsScope,
-  snapshotSessionToken,
   subscribeSessionGeneration,
 } from "./session";
 import type { OutboxScope } from "./thread-feedback";
@@ -51,7 +49,7 @@ async function loadUnsentSends(): Promise<void> {
       saved?.apiBase === apiBase && (spaceId || saved.selectionId === null)
         ? saved
         : await integrationsCacheScope();
-    const cacheSession = await artifactCacheSession(await loadSessionToken());
+    const cacheSession = await artifactCacheSession(await loadLocalInstallSessionId());
     if (
       generation !== currentSessionGeneration() ||
       apiBase !== currentApiBase() ||
@@ -85,12 +83,7 @@ export async function unsentSendsRestored(): Promise<boolean> {
     // A restore that could not read the saved queue leaves it unknown, not empty.
     if (!unsentSendsReadable()) return false;
     if (loaded) return true;
-    // Signed out, the queue was cleared with the session, so a failed restore hides nothing.
-    const signedOut = await snapshotSessionToken().then(
-      (session) => session.ok && !session.value,
-      () => false,
-    );
-    if (attempt === restoreAttempt) return signedOut;
+    return false;
   }
 }
 
@@ -117,7 +110,6 @@ configureUnsentSends({
     );
   },
   serverReachable: isServerReachable,
-  passwordChanging: passwordChangeInFlight,
   scope,
   disk: outboxDisk,
   errorText: (error) => errorText(error, t`Failed to send message`),

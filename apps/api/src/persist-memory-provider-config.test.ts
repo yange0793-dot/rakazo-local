@@ -628,7 +628,7 @@ describe("disconnectMemoryProvider", () => {
 });
 
 describe("updateMemoryProviderDefaultScope", () => {
-  it("accepts owners with additional Better Auth roles", async () => {
+  it("accepts owners with additional membership roles", async () => {
     const { deps, update } = makeDeps({
       existing: { id: "cfg-1", secretId: "secret-existing" },
       memberRole: "owner,admin",

@@ -30,7 +30,6 @@ vi.mock("./api-server", () => ({
   }),
   selectSpace: state.selectSpace,
 }));
-vi.mock("./api-auth", () => ({}));
 vi.mock("./api-live", () => ({}));
 vi.mock("./api", () => ({
   captureApiRequestContext: async () => ({ apiBase: "https://app.example.test", headers: {} }),

@@ -6,7 +6,8 @@ import { ComposioConnector, FakeComposioClient } from "@rakazo/adapters";
 import type { PrismaClient } from "@rakazo/db";
 import { describe, expect, it } from "vitest";
 import { discardBotIntroRun } from "./discard-bot-intro.js";
-import { sessionCookieHeader } from "./index.js";
+import { createTestSpace, testSpaceHeaders } from "./index.js";
+
 import type { ModelEmulatorRequest } from "./model-emulator.js";
 import { startModelEmulator } from "./model-emulator.js";
 import { asSystem } from "./system-db.js";
@@ -213,13 +214,12 @@ describe.skipIf(!enabled)("history retrieval through executor", () => {
       const handles = await createApp({
         databaseUrl: process.env.DATABASE_URL!,
         realtimeDatabaseUrl: process.env.DATABASE_URL!,
-        authUrl: origin,
+
         webOrigin: origin,
         dataDir,
         sandboxProvider: "fake",
         agentRuntime: "pi",
         wakeupDriver: "memory",
-        signupsEnabled: "true",
         composio: new ComposioConnector({ client: new FakeComposioClient() }),
         encryptionKey: "history-fixture-encryption-key",
         deploymentModelKey: fakeSecrets[0],
@@ -229,21 +229,11 @@ describe.skipIf(!enabled)("history retrieval through executor", () => {
       stop = handles.stop;
       const db = asSystem(handles.prisma);
       historyDb = db;
-      const signup = await handles.app.request("/api/auth/sign-up/email", {
-        method: "POST",
-        headers: { "content-type": "application/json", origin },
-        body: JSON.stringify({
-          email: `history-${randomUUID()}@rakazo.test`,
-          password: "password12",
-          name: "History fixture",
-        }),
-      });
-      expect(signup.status).toBeLessThan(400);
-      const cookie = sessionCookieHeader(signup);
+      const scope = await createTestSpace(handles.app, "History fixture");
       const rpc = async <T>(procedure: string, input: unknown): Promise<T> => {
         const response = await handles.app.request(`/rpc/${procedure}`, {
           method: "POST",
-          headers: { "content-type": "application/json", cookie, origin },
+          headers: { "content-type": "application/json", ...testSpaceHeaders(scope), origin },
           body: JSON.stringify({ json: input }),
         });
         const body = (await response.json()) as { json: T; error?: { message: string } };
@@ -267,7 +257,7 @@ describe.skipIf(!enabled)("history retrieval through executor", () => {
         instructions: "Inspect original history without revealing credentials.",
         notifyOnFinish: false,
       });
-      await discardBotIntroRun(handles, cookie, bot.id);
+      await discardBotIntroRun(handles, scope, bot.id);
       await handles.awaitIdle?.();
       await rpc("bots/update", {
         botId: bot.id,
@@ -356,7 +346,7 @@ describe.skipIf(!enabled)("history retrieval through executor", () => {
         instructions: "",
         notifyOnFinish: false,
       });
-      await discardBotIntroRun(handles, cookie, peer.id);
+      await discardBotIntroRun(handles, scope, peer.id);
       const group = await rpc<{ id: string; threadId: string }>("groups/create", {
         name: "History group",
         botIds: [bot.id, peer.id],

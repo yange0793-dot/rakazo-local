@@ -1,5 +1,5 @@
 import { expect, test } from "@playwright/test";
-import { captureScreenshot, chooseOption, signup } from "./helpers";
+import { captureScreenshot, chooseOption, openLocalWorkspace } from "./helpers";
 
 test("new users answer the signup survey before their first chat", async ({ page }, testInfo) => {
   // Local and CI servers do not bill, so stand in for a billing deployment's flag.
@@ -14,7 +14,7 @@ test("new users answer the signup survey before their first chat", async ({ page
     await route.fulfill({ json: { json: { ok: true } } });
   });
 
-  await signup(page, `survey-${Date.now()}@rakazo.test`, "password12", "Survey");
+  await openLocalWorkspace(page, "Survey");
 
   await expect(page.getByRole("heading", { name: "Welcome to Rakazo" })).toBeVisible();
   await expect(page).toHaveURL(/\/onboarding\/survey$/);

@@ -57,9 +57,6 @@ async function render(
           onBoard={onBoard}
           onArtifacts={() => {}}
           onSettings={() => {}}
-          onLogOut={() => {}}
-          signingOut={false}
-          logOutError={null}
         />
         <Toaster />
       </DesktopUpdatesProvider>,
@@ -146,7 +143,6 @@ it("opens integrations and keeps the existing account actions and links", async 
     "Board",
     "Get the mobile app",
     "Docs",
-    "Log out",
   ]);
   expect(host.querySelector('[data-testid="user-menu-trigger"]')?.getAttribute("aria-label")).toBe(
     "Account menu for Demo User",
@@ -276,9 +272,6 @@ async function renderOrganizations(
           onSkills={() => {}}
           onArtifacts={() => {}}
           onSettings={() => {}}
-          onLogOut={() => {}}
-          signingOut={false}
-          logOutError={null}
           organizations={organizations}
           activeOrganizationId="org-personal"
           onSwitchOrganization={onSwitchOrganization}

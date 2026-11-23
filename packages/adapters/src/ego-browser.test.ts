@@ -473,15 +473,12 @@ describe("ego browser provider", () => {
     const { browser, fake } = ego(() => page(), {
       env: {
         WEB_ORIGIN: "http://localhost:5173",
-        BETTER_AUTH_URL: "https://auth.example",
-        RAKAZO_EXTRA_AUTH_ORIGINS: "https://extra.example, https://second.example",
+        API_URL: "http://127.0.0.1:3100",
       },
     });
     for (const url of [
       "http://127.0.0.1:5173/settings/approvals",
-      "https://auth.example/approve",
-      "https://extra.example/x",
-      "https://second.example/y",
+      "http://localhost:3100/rpc/me",
     ]) {
       const result = await browser.navigate(computer, { url }, context);
       expect(result.error).toMatch(/Blocked by policy/);

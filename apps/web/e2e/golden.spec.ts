@@ -6,9 +6,9 @@ import {
   captureScreenshot,
   completeOnboarding,
   openBotPanelTab,
+  openLocalWorkspace,
   realSandboxTimeout,
   rpc,
-  signup,
 } from "./helpers";
 
 function sidebarBotButton(page: Page, name: RegExp | string) {
@@ -20,8 +20,7 @@ function sidebarBotButton(page: Page, name: RegExp | string) {
 test.describe.configure({ mode: "serial" });
 
 test("takeover, routine, plugins, and export are reachable", async ({ page }, testInfo) => {
-  const stamp = Date.now();
-  await signup(page, `flow-${stamp}@rakazo.test`, "password12", "Flow");
+  await openLocalWorkspace(page, "Flow");
   await completeOnboarding(page);
 
   const composer = page.getByPlaceholder(/Message/);
@@ -336,7 +335,7 @@ test("takeover, routine, plugins, and export are reachable", async ({ page }, te
   await captureScreenshot(page, testInfo, "12-bot-settings");
 });
 
-test("sign-in, spawn, and stop work in the shell", async ({ page }, testInfo) => {
+test("local startup, spawn, and stop work in the shell", async ({ page }, testInfo) => {
   const browserErrors: string[] = [];
   const failedRequests: string[] = [];
   page.on("pageerror", (error) => browserErrors.push(error.message));
@@ -349,8 +348,8 @@ test("sign-in, spawn, and stop work in the shell", async ({ page }, testInfo) =>
     );
   });
   const stamp = Date.now();
-  const email = `shell-${stamp}@rakazo.test`;
-  await signup(page, email, "password12", "Shell");
+  const _email = `shell-${stamp}@rakazo.test`;
+  await openLocalWorkspace(page, "Shell");
   await completeOnboarding(page);
   await page.evaluate(() => {
     Object.defineProperty(globalThis.crypto, "randomUUID", {
@@ -429,15 +428,11 @@ test("sign-in, spawn, and stop work in the shell", async ({ page }, testInfo) =>
   });
   await expect(page.getByRole("button", { name: "Send", exact: true })).toBeVisible();
 
-  await page.context().clearCookies();
-  await page.goto("/sign-in");
-  await page.getByPlaceholder("Your email address").fill(email);
-  await page.getByPlaceholder("Password").fill("password12");
-  await page.getByRole("button", { name: "Sign in", exact: true }).click();
+  await page.reload();
   await page.waitForURL(/\/app/, { timeout: 20_000 });
   await expect(sidebarBotButton(page, /^Chief/)).toBeVisible();
   await expect(sidebarBotButton(page, /Scout/)).toBeVisible();
-  await captureScreenshot(page, testInfo, "15-restored-session");
+  await captureScreenshot(page, testInfo, "15-restored-workspace");
 });
 
 async function threadRunStatus(page: Page) {

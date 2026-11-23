@@ -90,7 +90,7 @@ export function createReferrals(deps: {
           where: { referrerOrganizationId: organizationId, rewardedAt: { not: null } },
         }),
       ]);
-      return { url: `${deps.webOrigin}/sign-up?ref=${code}`, rewards };
+      return { url: `${deps.webOrigin}/app?ref=${code}`, rewards };
     },
 
     /** Whether the organization was invited and has not subscribed yet, so its trial is longer. */

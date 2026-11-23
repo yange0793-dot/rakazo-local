@@ -9,11 +9,11 @@ import {
   manageModelConnection,
   modelConnectionDialog,
   openBotPanelTab,
+  openLocalWorkspace,
   openModelConnection,
   openUserSettings,
   pickReopenedModel,
   rpc,
-  signup,
 } from "./helpers";
 
 const LOCAL_MODEL_ID = "rakazo-e2e-local";
@@ -27,8 +27,7 @@ test.afterEach(async ({ page }) => {
 
 test("model settings cleanup frames", { tag: "@nightly" }, async ({ page }, testInfo) => {
   await page.setViewportSize({ width: 1440, height: 1000 });
-  const stamp = Date.now();
-  await signup(page, `model-cleanup-${stamp}@rakazo.test`, "password12", "Model Preview");
+  await openLocalWorkspace(page, "Model Preview");
   await completeOnboarding(page);
 
   // Keep account persistence real; the harness supplies offline provider verification.
@@ -87,7 +86,12 @@ test("model settings cleanup frames", { tag: "@nightly" }, async ({ page }, test
   const search = page.getByRole("combobox", { name: "Search models" });
   await expect(search).toBeFocused();
   await search.fill("gpt");
-  const firstModel = await options.getByRole("option").first().locator("span").first().innerText();
+  const firstModel = await options
+    .getByRole("option")
+    .first()
+    .locator("span")
+    .first()
+    .innerText();
   await search.press("Home");
   await search.press("Enter");
   await expect(popup).toBeHidden();
@@ -236,7 +240,7 @@ test("connects, lists, and uses an OpenAI-compatible endpoint", async ({ page },
     // the fake endpoint from settings instead, so skip that step on the client.
     const skipModelStep = process.env.AGENT_RUNTIME === "pi";
     if (skipModelStep) await page.route("**/rpc/me", fulfillWithoutModelStep);
-    await signup(page, `local-model-${stamp}@rakazo.test`, "password12", userName);
+    await openLocalWorkspace(page, userName);
     await completeOnboarding(page);
     if (skipModelStep) await page.unroute("**/rpc/me", fulfillWithoutModelStep);
 
@@ -387,8 +391,7 @@ test("connects, lists, and uses an OpenAI-compatible endpoint", async ({ page },
 });
 
 test("a rejected subscription sign-in asks to sign in again", async ({ page }, testInfo) => {
-  const stamp = Date.now();
-  await signup(page, `reconnect-${stamp}@rakazo.test`, "password12", "Reconnect Preview");
+  await openLocalWorkspace(page, "Reconnect Preview");
   await completeOnboarding(page);
   await page.route("**/rpc/models/credentials", (route) =>
     route.fulfill({
@@ -416,8 +419,7 @@ test("a rejected subscription sign-in asks to sign in again", async ({ page }, t
 test("a refused private model server names the setting that allows it", async ({
   page,
 }, testInfo) => {
-  const stamp = Date.now();
-  await signup(page, `private-model-${stamp}@rakazo.test`, "password12", "Private Model Preview");
+  await openLocalWorkspace(page, "Private Model Preview");
   await completeOnboarding(page);
   // The e2e server allows private endpoints, so replay the refusal a default install sends.
   const message =

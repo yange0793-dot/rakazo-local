@@ -7,8 +7,8 @@ import { IDLE_TIMEOUT_MS, subscribeIncomingCallEvents, subscribeThread } from ".
 
 vi.mock("expo-secure-store", () => ({
   getItemAsync: vi.fn(),
-  setItemAsync: vi.fn(),
-  deleteItemAsync: vi.fn(),
+  setItemAsync: vi.fn(async () => undefined),
+  deleteItemAsync: vi.fn(async () => undefined),
 }));
 vi.mock("./live-notifications.js", () => ({
   resumeLiveNotifications: vi.fn(async () => undefined),

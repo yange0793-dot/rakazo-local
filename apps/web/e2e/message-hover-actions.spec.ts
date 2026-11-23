@@ -1,6 +1,6 @@
 import type { Locator, Page, TestInfo } from "@playwright/test";
 import { expect, test } from "@playwright/test";
-import { activeBotId, captureScreenshot, completeOnboarding, signup } from "./helpers";
+import { activeBotId, captureScreenshot, completeOnboarding, openLocalWorkspace } from "./helpers";
 
 /** Submit from the Send control so an in-flight prior send cannot swallow Enter. */
 async function sendComposerMessage(page: Page, composer: Locator, text: string) {
@@ -135,7 +135,7 @@ test("message hover shows beside-bubble actions; reply links to parent", async (
   page,
 }, testInfo) => {
   const stamp = Date.now();
-  await signup(page, `hover-actions-${stamp}@rakazo.test`, "password12", "Hover Actions");
+  await openLocalWorkspace(page, "Hover Actions");
   await completeOnboarding(page);
   await page.context().grantPermissions(["clipboard-read", "clipboard-write"]);
 
@@ -362,7 +362,7 @@ test("a message with an attachment centers hover actions on its text bubble", as
   page,
 }, testInfo) => {
   const stamp = Date.now();
-  await signup(page, `hover-attach-${stamp}@rakazo.test`, "password12", "Hover Attach");
+  await openLocalWorkspace(page, "Hover Attach");
   await completeOnboarding(page);
   const composer = page.getByRole("combobox", { name: /^Message/ });
   await expect(composer).toBeVisible();
@@ -410,7 +410,7 @@ test.describe("touch message actions", () => {
   test.use({ hasTouch: true, isMobile: true, viewport: { width: 390, height: 844 } });
 
   test("More exposes actions without simulated hover", async ({ page }, testInfo) => {
-    await signup(page, `touch-actions-${Date.now()}@rakazo.test`, "password12", "Touch Actions");
+    await openLocalWorkspace(page, "Touch Actions");
     await completeOnboarding(page);
     expect(
       await page.evaluate(() => matchMedia("(hover: hover) and (pointer: fine)").matches),
@@ -464,7 +464,7 @@ test.describe("touch message actions", () => {
 });
 
 test("a reaction receipt refreshes live work and exposes Stop", async ({ page }, testInfo) => {
-  await signup(page, `reaction-work-${Date.now()}@rakazo.test`, "password12", "Reaction Work");
+  await openLocalWorkspace(page, "Reaction Work");
   await completeOnboarding(page);
   await expect(page.getByText("What do you want me on first?", { exact: true })).toBeVisible({
     timeout: 20_000,

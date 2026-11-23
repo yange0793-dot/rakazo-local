@@ -40,10 +40,6 @@ describePostgres("bounded routine reconciliation (PostgreSQL contract)", () => {
         provisionMessagingIdentity(
           db.prisma,
           { provider: "email", address },
-          {
-            signupsEnabled: undefined,
-            signupAllowlist: undefined,
-          },
         ),
       );
       const nextRunAt = new Date(Date.now() - 1_000);

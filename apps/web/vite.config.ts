@@ -126,14 +126,14 @@ export default defineConfig(({ command, mode }) => {
       },
     ],
     server: {
-      host: process.env.RAKAZO_DEV_HOST ?? rootEnv.RAKAZO_DEV_HOST ?? "127.0.0.1",
+      host: "127.0.0.1",
       port: webPort,
       strictPort: true,
       allowedHosts,
       proxy,
     },
     preview: {
-      host: "0.0.0.0",
+      host: "127.0.0.1",
       port: Number(process.env.WEB_PORT ?? 5173),
       allowedHosts,
       proxy,

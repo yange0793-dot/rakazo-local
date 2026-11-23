@@ -44,7 +44,6 @@ import { IncomingCall } from "../components/call/IncomingCall";
 import { PageLoading } from "../components/PageLoading";
 import { PageViewHost } from "../components/pages/PageViewHost";
 import type { ArtifactTarget } from "../lib/artifact-open";
-import { authClient } from "../lib/auth";
 import { peekBootstrapSeed } from "../lib/bootstrap";
 import { botsSidebarDensityPreference } from "../lib/bots-sidebar-density-pref";
 import { readBotsSidebarCollapsed, writeBotsSidebarCollapsed } from "../lib/bots-sidebar-pref";
@@ -53,6 +52,7 @@ import { composerEnterToSendPreference } from "../lib/composer-enter-to-send-pre
 import { computersAreUnavailable } from "../lib/computer-sandbox";
 import { desktopBridge } from "../lib/desktop";
 import { hasOpenDialog } from "../lib/has-open-dialog";
+import { useLocalIdentity } from "../lib/local-identity";
 import { PagesProvider, usePagesForChat } from "../lib/pages";
 import { markAfterPaint, markOnce } from "../lib/performance";
 import { usePreloadRecoveryState } from "../lib/preload-recovery";
@@ -125,8 +125,8 @@ function SpaceShell() {
   const { botId, groupId } = useParams();
   const [shellSpaceId] = useState(selectedSpaceId);
   const [rpc] = useState(() => createSpaceRpc(shellSpaceId));
-  const session = authClient.useSession();
-  const userId = session.data?.user.id;
+  const { user, refresh: refreshUser } = useLocalIdentity();
+  const userId = user.id;
   // Held from the first render, so Cmd/Ctrl+N works before the sidebar has data.
   const [createMenuOpen, setCreateMenuOpen] = useState(false);
   // A revisited space, or the shell reopened from another page, starts from what it showed
@@ -216,7 +216,7 @@ function SpaceShell() {
 
   const messagingStatus = useQuery({
     ...queries.messaging.status.queryOptions(),
-    enabled: Boolean(session.data?.user),
+    enabled: Boolean(user.id),
   }).data;
   const messagingSurfaceEnabled = messagingStatus?.enabled ?? false;
   const messagingProviders = messagingStatus?.providers ?? NO_PROVIDERS;
@@ -1011,7 +1011,7 @@ function SpaceShell() {
           </>
         }
         footerLogos={footerLogos}
-        user={session.data?.user}
+        user={user}
         ticketBoardEnabled={Boolean(bootstrapMe?.ticketBoardEnabled)}
         navLinks={desktopBridge() ? [] : (bootstrapMe?.navLinks ?? [])}
         openSettings={openSettings}
@@ -1304,8 +1304,8 @@ function SpaceShell() {
           refreshSpaces={() => refreshBots()}
           openAgentImport={() => setPanel("import-agent")}
           alive={alive}
-          user={session.data?.user}
-          refetchSession={() => session.refetch({ query: { disableCookieCache: true } })}
+          user={user}
+          refetchSession={refreshUser}
           bootstrapMe={bootstrapMe}
           setBootstrapMe={setBootstrapMe}
           messagingEnabled={messagingSurfaceEnabled}

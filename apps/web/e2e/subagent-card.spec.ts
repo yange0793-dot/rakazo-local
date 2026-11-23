@@ -1,10 +1,15 @@
 import { expect, test } from "@playwright/test";
-import { captureScreenshot, completeOnboarding, expectCardWidth, signup } from "./helpers";
+import {
+  captureScreenshot,
+  completeOnboarding,
+  expectCardWidth,
+  openLocalWorkspace,
+} from "./helpers";
 
 test("a completed subagent card folds, opens from its header, and fills its width", async ({
   page,
 }, testInfo) => {
-  await signup(page, `subagent-card-${Date.now()}@rakazo.test`, "password12", "Subagent Card");
+  await openLocalWorkspace(page, "Subagent Card");
   await completeOnboarding(page);
 
   const composer = page.getByPlaceholder(/Message/);
@@ -39,7 +44,7 @@ test("a completed subagent card folds, opens from its header, and fills its widt
 test("a background helper's card can be stopped while the chat stays free", async ({
   page,
 }, testInfo) => {
-  await signup(page, `background-card-${Date.now()}@rakazo.test`, "password12", "Background Card");
+  await openLocalWorkspace(page, "Background Card");
   await completeOnboarding(page);
 
   const composer = page.getByPlaceholder(/Message/);

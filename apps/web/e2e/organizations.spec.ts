@@ -1,6 +1,12 @@
 import type { Page } from "@playwright/test";
 import { expect, test } from "@playwright/test";
-import { captureScreenshot, completeOnboarding, openUserSettings, rpc, signup } from "./helpers";
+import {
+  captureScreenshot,
+  completeOnboarding,
+  openLocalWorkspace,
+  openUserSettings,
+  rpc,
+} from "./helpers";
 
 type OrganizationList = {
   organizations: Array<{ id: string; name: string; defaultSpaceId: string }>;
@@ -42,8 +48,7 @@ async function switchFromAvatarMenu(page: Page, name: string, spaceId: string) {
 }
 
 test("create, switch, rename and delete an organization", async ({ page }, testInfo) => {
-  const stamp = Date.now();
-  await signup(page, `organizations-${stamp}@rakazo.test`, "password12", "Org Owner");
+  await openLocalWorkspace(page, "Org Owner");
   await completeOnboarding(page);
 
   // One organization: the menu lists none, and creating one lives in settings.

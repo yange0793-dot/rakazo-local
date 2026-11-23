@@ -3,7 +3,6 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { expect, it } from "vitest";
 import { discardBotIntroRun } from "../../../packages/testkit/src/discard-bot-intro.js";
-import { sessionCookieHeader } from "../../../packages/testkit/src/index.js";
 import { createApp } from "./app.js";
 
 const databaseUrl = process.env.VERIFY_DATABASE === "1" ? process.env.DATABASE_URL : undefined;
@@ -22,29 +21,9 @@ it.skipIf(!databaseUrl)(
       sandboxProvider: "fake",
       agentRuntime: "scripted",
       wakeupDriver: "memory",
-      signupsEnabled: "true",
       webOrigin: origin,
-      authUrl: origin,
     });
     try {
-      const signup = await handles.app.request("/api/auth/sign-up/email", {
-        method: "POST",
-        headers: { "content-type": "application/json", origin },
-        body: JSON.stringify({
-          email: `upload-limit-${Date.now()}@example.test`,
-          password: "test-password-123",
-          name: "Upload tester",
-        }),
-      });
-      expect(signup.status).toBeLessThan(400);
-      const cookie = sessionCookieHeader(signup);
-      // Signed out, only `health` is callable, so a large body is discarded unread.
-      const signedOut = await handles.app.request("/rpc/me", {
-        method: "POST",
-        headers: { "content-type": "application/json", origin, cookie: "session=forged" },
-        body: JSON.stringify({ json: { padding: "a".repeat(1024 * 1024) } }),
-      });
-      expect(signedOut.status).toBe(401);
       const health = await handles.app.request("/rpc/health", {
         method: "POST",
         headers: { "content-type": "application/json", origin },
@@ -54,7 +33,7 @@ it.skipIf(!databaseUrl)(
       const call = (procedure: string, json: unknown = {}) =>
         handles.app.request(`/rpc/${procedure}`, {
           method: "POST",
-          headers: { "content-type": "application/json", cookie, origin },
+          headers: { "content-type": "application/json", origin },
           body: JSON.stringify({ json }),
         });
 
@@ -73,7 +52,7 @@ it.skipIf(!databaseUrl)(
       });
       expect(bot.status).toBe(200);
       const botId = ((await bot.json()) as { json: { id: string } }).json.id;
-      await discardBotIntroRun(handles, cookie, botId);
+      await discardBotIntroRun(handles, "", botId);
       // Above the 10 MiB default, within the configured limit.
       const upload = await call("artifacts/create", {
         botId,

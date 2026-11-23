@@ -23,7 +23,7 @@ import type { MobileBot } from "../lib/mobile-types";
 import { native, useMobileTokens, useThemedStyles } from "../lib/native";
 import { createQueuedSave } from "../lib/queued-save";
 import { useBotRoutines } from "../lib/routine-store";
-import { loadSessionToken } from "../lib/session";
+import { loadLocalInstallSessionId } from "../lib/session";
 import { useSideInsets } from "../lib/side-insets";
 import { errorText } from "../lib/user-error";
 
@@ -91,7 +91,7 @@ export default function BotProfile() {
         try {
           await afterChatNotifyChange(
             currentApiBase(),
-            await loadSessionToken(),
+            await loadLocalInstallSessionId(),
             selectedSpaceId() ?? "",
             { botId, threadId: bot.threadId, notify },
           );

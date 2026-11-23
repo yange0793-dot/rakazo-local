@@ -12,6 +12,7 @@ import type { Duplex } from "node:stream";
 import { pipeline } from "node:stream/promises";
 import tls from "node:tls";
 import { pathToFileURL } from "node:url";
+import { isLocalhostOrLoopbackIp, localRequestAllowed } from "@rakazo/contracts";
 import { createServiceLogger } from "@rakazo/logging";
 import { forwardsToApi, hostAllowed } from "./api-proxy.js";
 import { appendForwardedFor } from "./forwarded-for.js";
@@ -195,14 +196,16 @@ export function createWebServer(root: string, env: NodeJS.ProcessEnv): http.Serv
     httpServer: server,
   };
 
+  const localRequest = (req: IncomingMessage) =>
+    localRequestAllowed(req.headers.host ?? "", (name) => req.headers[name]?.toString());
   chain.push((req, res, next) => {
-    if (hostAllowed(req.headers.host, settings.allowedHosts)) return next();
+    if (localRequest(req) && hostAllowed(req.headers.host, settings.allowedHosts)) return next();
     res
       .writeHead(403, { "content-type": "text/plain" })
       .end("Blocked request. This host is not allowed.");
   });
   server.on("upgrade", (req, socket, head) => {
-    if (!hostAllowed(req.headers.host, settings.allowedHosts)) {
+    if (!localRequest(req) || !hostAllowed(req.headers.host, settings.allowedHosts)) {
       socket.end("HTTP/1.1 404 Not Found\r\n\r\n");
       return;
     }
@@ -228,6 +231,7 @@ export function createWebServer(root: string, env: NodeJS.ProcessEnv): http.Serv
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
   const server = createWebServer(path.resolve(import.meta.dirname, ".."), process.env);
   const host = process.env.WEB_HOST || "127.0.0.1";
+  if (!isLocalhostOrLoopbackIp(host)) throw new Error("WEB_HOST must be loopback");
   const port = Number(process.env.WEB_PORT || 5173);
   server.listen(port, host, () => process.stdout.write(`Web listening on ${host}:${port}\n`));
   for (const signal of ["SIGTERM", "SIGINT"] as const) {

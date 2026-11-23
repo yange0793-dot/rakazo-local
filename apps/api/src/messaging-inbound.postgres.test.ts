@@ -61,7 +61,6 @@ describe.skipIf(!enabled)("group roster versioning under concurrency (PostgreSQL
       } as never,
       provision: vi.fn(),
       openSignup: false,
-      signupPolicy: { signupsEnabled: undefined, signupAllowlist: undefined },
     });
     handle = (event) => runAsSystem("test inbound", () => inbound(event));
     sideDb = createDb(databaseUrl!, { poolMax: 4 });

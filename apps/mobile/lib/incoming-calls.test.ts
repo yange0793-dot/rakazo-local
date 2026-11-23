@@ -38,13 +38,12 @@ vi.mock("react-native", () => ({
   },
 }));
 vi.mock("./api-server", () => ({}));
-vi.mock("./api-auth", () => ({}));
 vi.mock("./api", () => ({
   captureApiRequestContext: async (spaceId: string) => ({
     apiBase: "https://example.invalid",
     headers: {
       "x-rakazo-space-id": spaceId,
-      ...(fake.locked ? {} : { authorization: "Bearer fake-session" }),
+      ...(fake.locked ? {} : { "x-rakazo-install-id": "rakazo-local-install:fixture" }),
     },
     sessionGeneration: fake.generation,
   }),
@@ -68,7 +67,7 @@ vi.mock("./call-session", () => ({
 vi.mock("./push", () => ({ registerCallPushToken: vi.fn() }));
 vi.mock("./server-headers", () => ({ serverHeaders: () => ({}) }));
 vi.mock("./session", () => ({
-  loadSessionToken: async () => "fake-session",
+  loadLocalInstallSessionId: async () => "rakazo-local-install:fixture",
 
   currentSessionGeneration: () => fake.generation,
   registerSessionDiskCache: vi.fn(),

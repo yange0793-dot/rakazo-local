@@ -156,7 +156,7 @@ Optional connectors can attach Slack, WhatsApp, Telegram, iMessage via Sendblue,
 
 Use the same installer on a VPS when bots should keep running after you close a laptop. Images Compose binds the web app to loopback `127.0.0.1:5173`. Terminate TLS on the host and proxy there. Do not publish port 3100. The web server proxies `/api`.
 
-Set `RAKAZO_HOST` to the hostname. Set `BETTER_AUTH_URL`, `WEB_ORIGIN`, and `API_URL` to that same `https://` origin. For a remote computer instead of local Docker, set `SANDBOX_PROVIDER` to `e2b`, `daytona`, `createos`, or `boat` and add that provider's key.
+Set `RAKAZO_HOST` to the hostname. Set `WEB_ORIGIN`, and `API_URL` to that same `https://` origin. For a remote computer instead of local Docker, set `SANDBOX_PROVIDER` to `e2b`, `daytona`, `createos`, or `boat` and add that provider's key.
 
 A minimal Caddy site is a reverse proxy to `127.0.0.1:5173`. Replace the example host with yours. Desktop clients should use **Existing instance** with the `https://` address. HTTP is accepted only for loopback and private LAN addresses. **This computer** in the desktop app installs the published images with Docker Compose on that machine, on port 45173 by default so it can sit next to a dev server.
 
@@ -166,7 +166,7 @@ This server path is why a public install is not the same job as the local script
 
 ## Install from source only if you are developing
 
-Clone the repository, copy `.env.example` to `.env`, and set `POSTGRES_PASSWORD` and `POSTGRES_APP_PASSWORD` to URI-safe random values that also appear in `DATABASE_MIGRATION_URL` and `DATABASE_URL`. Set `BETTER_AUTH_SECRET`, `ENCRYPTION_KEY`, and `SCREEN_PROXY_SECRET` to independent long random values. Docker sandboxes need their own `SANDBOX_SUPERVISOR_TOKEN`. Keep these in `.env`, not in git.
+Clone the repository, copy `.env.example` to `.env`, and set `POSTGRES_PASSWORD` and `POSTGRES_APP_PASSWORD` to URI-safe random values that also appear in `DATABASE_MIGRATION_URL` and `DATABASE_URL`. Set `ENCRYPTION_KEY`, and `SCREEN_PROXY_SECRET` to independent long random values. Docker sandboxes need their own `SANDBOX_SUPERVISOR_TOKEN`. Keep these in `.env`, not in git.
 
 For host-side development with Docker Desktop, set `SANDBOX_CONTROL_VIA_LOOPBACK=true` so the supervisor publishes its control service on a loopback port. Leave that unset when the supervisor runs inside Compose. `docker compose down -v` deletes Postgres data.
 

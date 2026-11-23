@@ -45,7 +45,6 @@ describe.skipIf(!enabled)("a linked owner's stop command (PostgreSQL)", () => {
       provisionMessagingIdentity(
         prisma,
         { provider: "test", address: `stop-${randomUUID()}` },
-        { signupsEnabled: undefined, signupAllowlist: undefined },
       ),
     );
     transaction = vi.fn((...args: unknown[]) => Reflect.apply(prisma.$transaction, prisma, args));
@@ -58,7 +57,6 @@ describe.skipIf(!enabled)("a linked owner's stop command (PostgreSQL)", () => {
       sandbox: sandbox as never,
       provision: vi.fn(),
       openSignup: false,
-      signupPolicy: { signupsEnabled: undefined, signupAllowlist: undefined },
     });
     handle = (event) => runAsSystem("test inbound", () => inbound(event));
   });
@@ -153,7 +151,6 @@ describe.skipIf(!enabled)("a linked owner's stop command (PostgreSQL)", () => {
       provisionMessagingIdentity(
         prisma,
         { provider: "test", address: `friend-${randomUUID()}` },
-        { signupsEnabled: undefined, signupAllowlist: undefined },
       ),
     );
     try {

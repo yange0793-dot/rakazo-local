@@ -4,7 +4,6 @@ import { useLingui } from "@lingui/react/macro";
 import type { BotSecretMetadata, VaultKind, VaultRevealed } from "@rakazo/contracts";
 import {
   cardExpiry,
-  isIdentityConfirmationRequired,
   VAULT_KINDS,
   vaultKind,
 } from "@rakazo/contracts";
@@ -15,7 +14,6 @@ import { useCallback, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { Alert, ScrollView, StyleSheet, Text, View } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
 import { BotEmailAddressesGroup } from "../../components/bot-email";
-import { useIdentityConfirmation } from "../../components/confirm-identity";
 import { ListSearchInput } from "../../components/list-search-input";
 import { LoadFailure } from "../../components/load-failure";
 import { LongPressMenu } from "../../components/long-press-menu";
@@ -77,7 +75,6 @@ export default function Vault() {
   const changes = useRef(0);
   // A value that arrives after the screen lost focus is dropped instead of shown.
   const focused = useRef(false);
-  const { withIdentityConfirmation, identityDialog } = useIdentityConfirmation();
 
   useFocusEffect(
     useCallback(() => {
@@ -168,15 +165,11 @@ export default function Vault() {
     setPending(true);
     setError(null);
     try {
-      const revealed = await withIdentityConfirmation(() =>
-        rpc("vault/reveal", { scope, name: item.name }),
-      );
+      const revealed = await rpc("vault/reveal", { scope, name: item.name });
       if (focused.current) showRevealed(item.title, revealed);
     } catch (err) {
-      // Dismissing the confirmation prompt is the person's choice, not a failure.
-      if (!isIdentityConfirmationRequired(err)) {
         setError(errorText(err, t`Could not show the item`));
-      }
+
     } finally {
       setPending(false);
     }
@@ -229,14 +222,10 @@ export default function Vault() {
       setPending(true);
       setError(null);
       try {
-        revealed = await withIdentityConfirmation(() =>
-          rpc("vault/reveal", { scope, name: readable.name }),
-        );
+        revealed = await rpc("vault/reveal", { scope, name: readable.name });
       } catch (err) {
-        // Dismissing the confirmation prompt is the person's choice, not a failure.
-        if (!isIdentityConfirmationRequired(err)) {
           setError(errorText(err, t`Could not show the item`));
-        }
+
         return;
       } finally {
         setPending(false);
@@ -401,7 +390,6 @@ export default function Vault() {
           onSave={save}
         />
       ) : null}
-      {identityDialog}
     </SafeAreaView>
   );
 

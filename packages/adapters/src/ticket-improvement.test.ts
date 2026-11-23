@@ -29,6 +29,7 @@ import {
   badDeliveryPlaybook,
   baselineDeliveryPlaybook,
   goodDeliveryPlaybook,
+  manifestOnlyDeliveryPlaybook,
   OfflineTicketImprovementRuntime,
 } from "./ticket-improvement.test-fixtures.js";
 
@@ -429,6 +430,30 @@ describe("ticket improvement proposal boundary", () => {
     });
     expect(unreported.runtime.comparisonCalls).toBe(0);
   });
+  it("keeps the configured proposal output and accepts reported usage above the former ceiling", async () => {
+    const h = harness();
+    h.runtime.proposalUsage = { inputTokens: 40_000, outputTokens: 5_000, totalTokens: 45_000 };
+    const run = h.runtime.run.bind(h.runtime);
+    h.runtime.run = async function* (request, context) {
+      if (request.runId.endsWith(":proposal")) {
+        const observer = request.model.callObserver!;
+        const reservation = await observer.beforeCall({
+          provider: request.model.provider,
+          modelId: request.model.id,
+          inputTokensEstimate: 40_000,
+          maxOutputTokens: request.model.maxTokens!,
+        });
+        await observer.afterCall(reservation, null);
+      }
+      yield* run(request, context);
+    };
+    await reflectTicketImprovement(h.deps, { runId: h.run.id, auto: true });
+    expect(h.result()).toMatchObject({
+      status: "adopted",
+      proposal: { totalTokens: 45_000, error: null },
+    });
+    expect(h.runtime.requests.every((request) => request.model.maxTokens === 32_768)).toBe(true);
+  });
   it.each(["bad-quote", "missing-usage", "provider-error"])(
     "saves an unknown result for %s",
     async (kind) => {
@@ -464,12 +489,12 @@ describe("ticket improvement actual isolated comparison", () => {
         decision: "adopt",
         summary: {
           improvements: ["stale", "selected"],
-          candidate: { passed: 6, falsePositiveCompletions: 0 },
+          candidate: { passed: 7, falsePositiveCompletions: 0 },
         },
       },
     });
     expect(h.runtime.proposalCalls).toBe(1);
-    expect(h.runtime.comparisonCalls).toBe(12);
+    expect(h.runtime.comparisonCalls).toBe(14);
     expect(h.current().snapshot.trial).toMatchObject({
       improvedCases: 2,
       protectedCasesPassed: true,
@@ -511,16 +536,17 @@ describe("ticket improvement actual isolated comparison", () => {
       request.runId.endsWith(":proposal"),
     )!;
     expect(proposalRequest.tools).toEqual([]);
-    expect(proposalRequest.model.maxTokens).toBe(3_072);
+    expect(proposalRequest.model.maxTokens).toBe(32_768);
     expect(
       h.runtime.requests
         .filter((request) => request.tools.length > 0)
-        .every((request) => request.model.maxTokens === 4_096),
+        .every((request) => request.model.maxTokens === 32_768),
     ).toBe(true);
+    expect(result.comparison.execution.budget).not.toHaveProperty("maxTotalTokens");
     expect(proposalRequest.history).toEqual([]);
     expect(proposalRequest.prompt).not.toContain('"expected"');
     expect(proposalRequest.prompt).not.toContain("package-stale");
-    expect(vi.mocked(recordUsage).mock.calls).toHaveLength(13);
+    expect(vi.mocked(recordUsage).mock.calls).toHaveLength(15);
     expect(
       vi
         .mocked(recordUsage)
@@ -531,7 +557,7 @@ describe("ticket improvement actual isolated comparison", () => {
     ).toBe(true);
     await reflectTicketImprovement(h.deps, { runId: h.run.id, auto: true });
     expect(h.runtime.proposalCalls).toBe(1);
-    expect(h.runtime.comparisonCalls).toBe(12);
+    expect(h.runtime.comparisonCalls).toBe(14);
     expect(snapshotTaughtSkillRevision).toHaveBeenCalledTimes(1);
     expect(h.posted).toHaveLength(1);
     expect(appendEventInTransaction).toHaveBeenCalledTimes(1);
@@ -554,6 +580,34 @@ describe("ticket improvement actual isolated comparison", () => {
     });
     expect(activateTaughtSkillRevision).not.toHaveBeenCalled();
     expect(h.current().id).toBe(BASELINE.id);
+  });
+  it("retains the current revision when a candidate calls a manifest-only snapshot clean", async () => {
+    const h = harness();
+    h.runtime.proposal = {
+      kind: "candidate",
+      quote: CORRECTION,
+      playbook: manifestOnlyDeliveryPlaybook,
+    };
+    await reflectTicketImprovement(h.deps, { runId: h.run.id, auto: true });
+    expect(h.result()).toMatchObject({
+      status: "retained",
+      comparison: {
+        decision: "reject",
+        reasons: expect.arrayContaining(["false_positive_completion", "protected_case_failed"]),
+        cases: expect.arrayContaining([
+          expect.objectContaining({
+            id: "manifest-only",
+            expected: expect.objectContaining({
+              checks: { installation: "pass", directory: "unknown", upload: "pass" },
+            }),
+            candidate: expect.objectContaining({
+              score: expect.objectContaining({ falsePositiveCompletion: true }),
+            }),
+          }),
+        ]),
+      },
+    });
+    expect(activateTaughtSkillRevision).not.toHaveBeenCalled();
   });
   it("keeps a tie and a CAS conflict on the current revision", async () => {
     const h = harness();
@@ -582,7 +636,7 @@ describe("ticket improvement actual isolated comparison", () => {
     await reflectTicketImprovement(h.deps, { runId: h.run.id, auto: true });
     expect(h.result().status).toBe("adopted");
     expect(h.runtime.proposalCalls).toBe(1);
-    expect(h.runtime.comparisonCalls).toBe(12);
+    expect(h.runtime.comparisonCalls).toBe(14);
     expect(snapshotTaughtSkillRevision).toHaveBeenCalledTimes(1);
     expect(activateTaughtSkillRevision).toHaveBeenCalledTimes(1);
   });
@@ -601,7 +655,7 @@ describe("ticket improvement actual isolated comparison", () => {
     await reflectTicketImprovement(h.deps, { runId: h.run.id, auto: true });
     expect(h.result().status).toBe("adopted");
     expect(h.runtime.proposalCalls).toBe(1);
-    expect(h.runtime.comparisonCalls).toBe(12);
+    expect(h.runtime.comparisonCalls).toBe(14);
     expect(snapshotTaughtSkillRevision).toHaveBeenCalledTimes(1);
   });
   it("honors a rollback after activation when the result checkpoint was interrupted", async () => {
@@ -616,7 +670,7 @@ describe("ticket improvement actual isolated comparison", () => {
     expect(h.current().id).toBe(BASELINE.id);
     expect(getCurrentTaughtSkillRevisionState).toHaveBeenCalledTimes(1);
     expect(h.runtime.proposalCalls).toBe(1);
-    expect(h.runtime.comparisonCalls).toBe(12);
+    expect(h.runtime.comparisonCalls).toBe(14);
   });
   it("saves unqualified runs as unknown without activating the candidate", async () => {
     const h = harness();
@@ -626,7 +680,7 @@ describe("ticket improvement actual isolated comparison", () => {
       status: "unknown",
       comparison: {
         decision: "inconclusive",
-        summary: { baseline: { unknown: 6 }, candidate: { unknown: 6 } },
+        summary: { baseline: { unknown: 7 }, candidate: { unknown: 7 } },
       },
     });
     expect(h.revisions[0]!.snapshot.trial).toMatchObject({

@@ -1,17 +1,15 @@
 import { ORPCError } from "@orpc/server";
 import type { RouterDeps } from "./router.js";
 
-type AdminDeps = Pick<RouterDeps, "prisma"> & { env: Pick<RouterDeps["env"], "adminEmails"> };
+type AdminDeps = Pick<RouterDeps, "prisma">;
 
-/** Accounts listed in RAKAZO_ADMIN_EMAILS, once their email is verified. */
+/** The local deployment owner, not an arbitrary messaging or space member. */
 export async function isAdmin(deps: AdminDeps, userId: string): Promise<boolean> {
-  const admins = deps.env.adminEmails ?? [];
-  if (admins.length === 0) return false;
-  const user = await deps.prisma.user.findUnique({
-    where: { id: userId },
-    select: { email: true, emailVerified: true },
+  const settings = await deps.prisma.deploymentSettings.findUnique({
+    where: { id: "default" },
+    select: { ownerUserId: true },
   });
-  return Boolean(user?.emailVerified && admins.includes(user.email.toLowerCase()));
+  return settings?.ownerUserId === userId;
 }
 
 export async function requireAdmin(deps: AdminDeps, userId: string): Promise<void> {

@@ -145,7 +145,7 @@ internal object IncomingCalls {
         connection.doOutput = true
         val custom = runCatching { JSONObject(headers) }.getOrDefault(JSONObject())
         for (key in custom.keys()) connection.setRequestProperty(key, custom.getString(key))
-        connection.setRequestProperty("Authorization", "Bearer $token")
+        connection.setRequestProperty("x-rakazo-install-id", token)
         connection.setRequestProperty("Origin", "rakazo://")
         connection.setRequestProperty("Content-Type", "application/json")
         try {

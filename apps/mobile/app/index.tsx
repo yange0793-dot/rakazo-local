@@ -4,8 +4,6 @@ import type { SpaceBot, SpaceGroup } from "@rakazo/contracts";
 import { accountDisplay, chatSnoozed } from "@rakazo/core";
 import type { Href } from "expo-router";
 import {
-  Redirect,
-  useFocusEffect,
   useGlobalSearchParams,
   useIsFocused,
   usePathname,
@@ -40,11 +38,9 @@ import { useUnreadJumpPills } from "../components/unread-jump-overlay";
 import { loadActivityMode, saveActivityMode } from "../lib/activity-mode";
 import { readableGutters } from "../lib/adaptive-layout";
 import { currentApiBase } from "../lib/api";
-import { signOut } from "../lib/api-auth";
 import { selectSpace } from "../lib/api-server";
 import { forgetAppBadge, syncInboxAppBadge, unreadChatCount } from "../lib/app-badge";
 import { mobileTokens, resolveMobileAppearance } from "../lib/appearance";
-import { explicitSignInRoute } from "../lib/auth-routing";
 import { AvatarViewportScope, createAvatarViewport } from "../lib/avatar-life";
 import type { CreateAction } from "../lib/create-chooser";
 import { useHeaderHeightIfAny } from "../lib/floating-header";
@@ -79,20 +75,16 @@ import {
 } from "../lib/organizations";
 import type { OrganizeTarget } from "../lib/organize-target";
 import { findOrganizeTarget } from "../lib/organize-target";
-import { offerPasskeyOnce } from "../lib/passkey";
 import { INBOX_POLL_INTERVAL_MS, INBOX_SIGNALLED_POLL_INTERVAL_MS } from "../lib/poll-cadence";
 import { registerPushToken } from "../lib/push";
-import { hasSignedInBefore, rememberSignedIn } from "../lib/returning-user";
 import { useRosterSignals } from "../lib/roster-signals";
 import { loadSavedInbox } from "../lib/saved-chats";
 import {
   currentReadySessionGeneration,
   currentSessionGeneration,
-  loadSessionToken,
   subscribeSessionGeneration,
 } from "../lib/session";
 import { useSplitView } from "../lib/split-view";
-import { confirmUnsentSendLoss } from "../lib/unsent-send-warning";
 import { useArchivedCount } from "../lib/use-archived-count";
 import { useCollapsedSections } from "../lib/use-collapsed-sections";
 import { useHomeHeader } from "../lib/use-home-header";
@@ -187,9 +179,6 @@ function Home({ embedded, onSelectSpace, onShareSelect }: InboxPaneProps & { emb
     loadBots,
     refreshBots,
   } = useHomeInbox(spaceActionRef);
-  const [sessionLoaded, setSessionLoaded] = useState(false);
-  const [hasSession, setHasSession] = useState(false);
-  const [returningUser, setReturningUser] = useState(false);
   const [organizeTarget, setOrganizeTarget] = useState<OrganizeTarget | null>(null);
   const organizeRequestId = useRef(0);
   const [activityMode, setActivityMode] = useState(false);
@@ -199,7 +188,7 @@ function Home({ embedded, onSelectSpace, onShareSelect }: InboxPaneProps & { emb
   const userId = me?.userId;
   const { collapsed, toggleCollapsed, loaded: collapsedLoaded } = useCollapsedSections(userId);
   // Collapsed sections and the view load before the inbox first renders, so neither jumps on launch.
-  const ready = sessionLoaded && collapsedLoaded && activityModeLoaded;
+  const ready = collapsedLoaded && activityModeLoaded;
 
   useEffect(() => {
     void loadActivityMode().then((on) => {
@@ -207,18 +196,6 @@ function Home({ embedded, onSelectSpace, onShareSelect }: InboxPaneProps & { emb
       setActivityModeLoaded(true);
     });
   }, []);
-
-  // Only while the inbox is in front, so the offer waits until signup setup is done.
-  useFocusEffect(
-    useCallback(() => {
-      if (!userId) return;
-      let active = true;
-      void offerPasskeyOnce(userId, () => active);
-      return () => {
-        active = false;
-      };
-    }, [userId]),
-  );
 
   const toggleActivityMode = useCallback(() => {
     hapticSelection();
@@ -237,23 +214,12 @@ function Home({ embedded, onSelectSpace, onShareSelect }: InboxPaneProps & { emb
   }, []);
 
   useEffect(() => {
-    void Promise.all([loadSessionToken(), hasSignedInBefore()]).then(([token, before]) => {
-      // Sessions saved before this mark existed are recorded on their first open.
-      if (token) void rememberSignedIn();
-      setHasSession(Boolean(token));
-      setReturningUser(before);
-      setSessionLoaded(true);
-    });
-  }, []);
-
-  useEffect(() => {
-    if (!hasSession || onShareSelect) return;
+    if (!userId || onShareSelect) return;
     void registerPushToken().catch(() => undefined);
-  }, [hasSession, onShareSelect]);
+  }, [userId, onShareSelect]);
 
   // Show the inbox saved on this device until the first live load replaces it.
   useEffect(() => {
-    if (!hasSession) return;
     let cancelled = false;
     void loadSavedInbox().then((saved) => {
       if (cancelled || !saved || inboxLoaded.current) return;
@@ -266,11 +232,11 @@ function Home({ embedded, onSelectSpace, onShareSelect }: InboxPaneProps & { emb
     return () => {
       cancelled = true;
     };
-  }, [hasSession]);
+  }, []);
 
   // The embedded pane is visible beside the chat, so it keeps polling even when
   // the chat route owns focus.
-  const inboxShown = hasSession && (embedded || isFocused);
+  const inboxShown = embedded || isFocused;
   const rosterSignalsLive = useRosterSignals(loadBots, inboxShown);
   useForegroundPoll(
     loadBots,
@@ -279,7 +245,7 @@ function Home({ embedded, onSelectSpace, onShareSelect }: InboxPaneProps & { emb
   );
   useEffect(() => onInboxChanged(() => void refreshBots().catch(() => undefined)), [refreshBots]);
 
-  const archivedCount = useArchivedCount(me?.spaceId, hasSession);
+  const archivedCount = useArchivedCount(me?.spaceId, Boolean(userId));
   const {
     unreadOverrides,
     archiving,
@@ -296,7 +262,7 @@ function Home({ embedded, onSelectSpace, onShareSelect }: InboxPaneProps & { emb
 
   const { activity, activityStatus, clearActivity, activityRequestId, loadActivity } =
     useSpaceActivity({
-      hasSession,
+      hasSession: Boolean(userId),
       activityMode,
       inSight: embedded || isFocused,
       spaceActionRef,
@@ -492,22 +458,6 @@ function Home({ embedded, onSelectSpace, onShareSelect }: InboxPaneProps & { emb
     () => (onShareSelect ? undefined : onOpenChatFromInbox(openChat)),
     [openChat, onShareSelect],
   );
-  // Held from the tap, so a second tap while the unsent-message check runs starts nothing.
-  const signingInAgain = useRef(false);
-  const signInAgain = useCallback(async () => {
-    if (signingInAgain.current) return;
-    signingInAgain.current = true;
-    try {
-      // Signing out deletes the unsent queue, which an expired session is most likely to hold.
-      if (!(await confirmUnsentSendLoss("sign-out"))) return;
-      // A rejected session cannot sign out on the server; clearing it here is what matters.
-      await signOut().catch(() => undefined);
-      router.replace("/sign-in");
-    } finally {
-      signingInAgain.current = false;
-    }
-  }, [router]);
-
   const chooseInboxSpace = useCallback(
     async (spaceId: string) => {
       if (spaceActionRef.current.busy) return;
@@ -638,7 +588,7 @@ function Home({ embedded, onSelectSpace, onShareSelect }: InboxPaneProps & { emb
     [newBot, openCreate],
   );
 
-  const organizations = useOrganizations(hasSession && !onShareSelect).data;
+  const organizations = useOrganizations(!onShareSelect).data;
   const hasOrganizationMenu = organizationSwitchActions(organizations).length > 0;
   const headerTitle = useMemo(
     () => (hasOrganizationMenu ? () => <OrganizationTitleMenu list={organizations} /> : undefined),
@@ -648,7 +598,7 @@ function Home({ embedded, onSelectSpace, onShareSelect }: InboxPaneProps & { emb
   useHomeHeader({
     nativeHeader,
     ready,
-    hasSession,
+    hasSession: Boolean(userId),
     initials,
     activityMode,
     toggleActivityMode,
@@ -752,7 +702,6 @@ function Home({ embedded, onSelectSpace, onShareSelect }: InboxPaneProps & { emb
       </View>
     );
   }
-  if (!hasSession) return <Redirect href={returningUser ? explicitSignInRoute : "/sign-in"} />;
   // With nothing to show, the failure takes the screen; over saved chats it stays one line.
   // Headings of empty saved Spaces are not chats, so they do not hide the failure.
   const showLoadFailure = Boolean(loadFailure) && inboxHasNoChats(listData);
@@ -808,7 +757,6 @@ function Home({ embedded, onSelectSpace, onShareSelect }: InboxPaneProps & { emb
         message={loadFailure.message}
         loading={inboxLoading && !refreshing}
         onRetry={() => void refreshBots()}
-        onSignIn={() => void signInAgain()}
       />
     ) : activityView ? undefined : (
       <Text style={styles.empty}>{me && !onShareSelect ? t`Tap + to create a bot` : null}</Text>

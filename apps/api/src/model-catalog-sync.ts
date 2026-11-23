@@ -5,7 +5,7 @@ import type {
   ModelCatalogSourceAdapter,
   StoredModelSecret,
 } from "@rakazo/adapters";
-import { parseModelSecret, serializeModelSecret } from "@rakazo/adapters";
+import { holdSecretNotifications, parseModelSecret, serializeModelSecret } from "@rakazo/adapters";
 import type { Actor, ManagedModelCatalog, ModelCatalogSourceStatus } from "@rakazo/contracts";
 import { OPENAI_COMPATIBLE_PROVIDER_ID } from "@rakazo/contracts";
 import type { PrismaClient } from "@rakazo/db";
@@ -246,25 +246,27 @@ export class ModelCatalogSync {
       try {
         const channels = await adapter.read(signal);
         const fingerprint = createHash("sha256").update(JSON.stringify(channels)).digest("hex");
-        await withTransactionRetry(() =>
-          this.prisma.$transaction(
-            async (tx) => {
-              const [current] = await tx.$queryRaw<SourceRow[]>`
-              SELECT * FROM model_catalog_sources WHERE id = ${source.id} FOR UPDATE`;
-              if (current?.lastAttemptAt?.getTime() !== attemptedAt.getTime()) return;
-              if (current.fingerprint !== fingerprint)
-                await this.apply(tx, actor, source, adapter, channels, signal);
-              await tx.modelCatalogSource.update({
-                where: { id: source.id },
-                data: {
-                  label: adapter.label,
-                  fingerprint,
-                  lastSyncedAt: new Date(),
-                  error: null,
-                },
-              });
-            },
-            { timeout: 30_000, isolationLevel: Prisma.TransactionIsolationLevel.Serializable },
+        await holdSecretNotifications(() =>
+          withTransactionRetry(() =>
+            this.prisma.$transaction(
+              async (tx) => {
+                const [current] = await tx.$queryRaw<SourceRow[]>`
+                SELECT * FROM model_catalog_sources WHERE id = ${source.id} FOR UPDATE`;
+                if (current?.lastAttemptAt?.getTime() !== attemptedAt.getTime()) return;
+                if (current.fingerprint !== fingerprint)
+                  await this.apply(tx, actor, source, adapter, channels, signal);
+                await tx.modelCatalogSource.update({
+                  where: { id: source.id },
+                  data: {
+                    label: adapter.label,
+                    fingerprint,
+                    lastSyncedAt: new Date(),
+                    error: null,
+                  },
+                });
+              },
+              { timeout: 30_000, isolationLevel: Prisma.TransactionIsolationLevel.Serializable },
+            ),
           ),
         );
       } catch (error) {

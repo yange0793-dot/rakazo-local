@@ -1,7 +1,5 @@
 // @vitest-environment jsdom
 
-import type { AccountSecurity } from "@rakazo/contracts";
-import * as SecureStore from "expo-secure-store";
 import type { ReactNode } from "react";
 import { act, createElement, useEffect } from "react";
 import type { Root } from "react-dom/client";
@@ -13,21 +11,10 @@ import General from "../app/(settings)/general";
 import Profile from "../app/(settings)/profile";
 import type * as Api from "./api";
 import { rpc } from "./api";
-import type * as ApiAuth from "./api-auth";
-import {
-  deleteAccount,
-  fetchAccountSecurity,
-  requestAccountDeletionCode,
-  signOut,
-} from "./api-auth";
 import type * as ApiServer from "./api-server";
-import { replaceWithSignIn } from "./auth-routing";
-import { endCallBeforeSessionEnd } from "./call-session";
-import { promptAccountDeletion } from "./delete-account-prompt";
 import type * as Session from "./session";
 import { registerSettingsSheet } from "./settings-sheet";
 import type * as ThreadFeedback from "./thread-feedback";
-import { hasUnsentSends } from "./thread-feedback";
 
 type Pressed = {
   children?: ReactNode;
@@ -272,17 +259,9 @@ vi.mock("./api", async (importOriginal) => ({
   ),
   selectedSpaceId: () => "space-1",
 }));
-vi.mock("./api-auth", () => ({
-  deleteAccount: vi.fn(),
-  fetchAccountSecurity: vi.fn(async () => ({ hasPassword: true })),
-  passwordResetCapabilities: vi.fn(async () => ({})),
-  requestAccountDeletionCode: vi.fn(),
-  signOut: vi.fn(),
-  updateAccountName: vi.fn(),
-}));
 vi.mock("./session", async (importOriginal) => ({
   ...(await importOriginal<typeof Session>()),
-  loadSessionToken: vi.fn(async () => "token"),
+  loadLocalInstallSessionId: vi.fn(async () => "token"),
 }));
 vi.mock("./app-version", () => ({
   formatUpdateLabel: () => "",
@@ -302,9 +281,7 @@ vi.mock("./archived-chats", () => ({
   archivedChatCounts: () => ({ bots: 0, groups: 0 }),
   loadArchivedChats: vi.fn(async () => ({ bots: [], groups: [] })),
 }));
-vi.mock("./auth-routing", () => ({ replaceWithSignIn: vi.fn() }));
 vi.mock("./call-session", () => ({ endCallBeforeSessionEnd: vi.fn(async () => undefined) }));
-vi.mock("./delete-account-prompt", () => ({ promptAccountDeletion: vi.fn() }));
 const haptics = vi.hoisted(() => ({
   enabled: true,
   listeners: new Set<() => void>(),
@@ -342,19 +319,11 @@ vi.mock("./native", () => ({
   useResolvedAppearance: () => "light",
   useThemedStyles: () => styles,
 }));
-vi.mock("./passkey", () => ({
-  addPasskey: vi.fn(),
-  deletePasskey: vi.fn(),
-  listPasskeys: vi.fn(async () => []),
-  passkeysAvailable: vi.fn(async () => false),
-  renamePasskey: vi.fn(),
-}));
 vi.mock("./organizations", () => ({
   activeOrganization: () => undefined,
   useOrganizations: () => ({ data: undefined }),
 }));
 vi.mock("./push", () => ({ registerPushToken: vi.fn() }));
-vi.mock("./returning-user", () => ({ forgetSignedIn: vi.fn() }));
 vi.mock("./queued-save", () => ({ createQueuedSave: () => ({ save: vi.fn() }) }));
 vi.mock("./remote-images-preference", () => ({
   getCachedRemoteImagesEnabled: () => true,
@@ -367,7 +336,6 @@ vi.mock("./response-streaming", () => ({
   subscribeResponseStreaming: () => () => undefined,
 }));
 vi.mock("./section-name-prompt", () => ({ promptSectionName: vi.fn() }));
-vi.mock("./sso", () => ({ continueWithSso: vi.fn() }));
 const trusted = vi.hoisted(() => ({
   sites: [] as string[],
   remove: vi.fn(async (_site: string) => undefined),
@@ -378,17 +346,6 @@ vi.mock("./trusted-link-sites", () => ({
   useTrustedLinkSites: () => trusted.sites,
 }));
 vi.mock("./user-error", () => ({ errorText: (_: unknown, fallback: string) => fallback }));
-
-function security(overrides: Partial<AccountSecurity> = {}): AccountSecurity {
-  return {
-    hasPassword: true,
-    freshOidcAuth: false,
-    ssoLinked: false,
-    emailDeletion: false,
-    sso: null,
-    ...overrides,
-  };
-}
 
 let root: Root | undefined;
 let container: HTMLDivElement | undefined;
@@ -405,7 +362,6 @@ beforeEach(() => {
   haptics.listeners.clear();
   haptics.save.mockReset().mockResolvedValue(undefined);
   haptics.load.mockReset().mockResolvedValue(undefined);
-  vi.mocked(fetchAccountSecurity).mockResolvedValue(security());
 });
 
 afterEach(() => {
@@ -473,44 +429,6 @@ async function renderAccount(Screen: () => ReactNode = Account) {
     alert: () => screen.querySelector('[role="alert"]')?.textContent ?? null,
   };
 }
-
-it("navigates to sign-in while a silent server still owes the sign-out delivery", async () => {
-  const actual = await vi.importActual<typeof ApiAuth>("./api-auth");
-  const store = new Map<string, string>([["rakazo.session_token", "session-token"]]);
-  vi.mocked(SecureStore.getItemAsync).mockImplementation(async (key) => store.get(key) ?? null);
-  vi.mocked(SecureStore.setItemAsync).mockImplementation(async (key, value) => {
-    store.set(key, value);
-  });
-  vi.mocked(SecureStore.deleteItemAsync).mockImplementation(async (key) => {
-    store.delete(key);
-  });
-  vi.mocked(signOut).mockImplementation(actual.signOut);
-  vi.stubGlobal(
-    "fetch",
-    vi.fn((_input: string) => new Promise<Response>(() => undefined)),
-  );
-
-  const view = await renderAccount();
-  try {
-    vi.useFakeTimers();
-    await view.press("Sign out");
-
-    // The screen leaves before the request timeout fires; the device is signed out.
-    expect(replaceWithSignIn).toHaveBeenCalled();
-    expect(store.has("rakazo.session_token")).toBe(false);
-    expect(JSON.parse(store.get("rakazo.pending_sign_out") ?? "[]")).toHaveLength(1);
-
-    // The delivery still runs: it times out and the record waits for retry.
-    await vi.advanceTimersByTimeAsync(8_000);
-    expect(fetch).toHaveBeenCalledWith(
-      "http://127.0.0.1:3100/api/auth/sign-out",
-      expect.anything(),
-    );
-    expect(JSON.parse(store.get("rakazo.pending_sign_out") ?? "[]")).toHaveLength(1);
-  } finally {
-    vi.useRealTimers();
-  }
-});
 
 it("offers a store update beside the version only when one is available", async () => {
   const view = await renderAccount();
@@ -655,111 +573,6 @@ it("keeps a late failure from an earlier settings visit silent after a newer sam
   expect(Alert.alert).not.toHaveBeenCalled();
 });
 
-it("asks for the current password, shows a failed delete, and signs out after a successful one", async () => {
-  const view = await renderAccount(Profile);
-  await view.press("Delete account");
-  const input = view.screen.querySelector<HTMLInputElement>('input[aria-label="Current password"]');
-  expect(input?.type).toBe("password");
-  expect(view.button("Delete")?.disabled).toBe(true);
-
-  vi.mocked(deleteAccount).mockRejectedValueOnce(new Error("wrong password"));
-  await view.type("Current password", "hunter2");
-  await view.press("Delete");
-  expect(deleteAccount).toHaveBeenCalledWith("hunter2");
-  expect(view.alert()).toBe("Could not delete account");
-  expect(replaceWithSignIn).not.toHaveBeenCalled();
-
-  await view.type("Current password", "correct horse");
-  expect(view.alert()).toBeNull();
-  await view.press("Delete");
-  expect(deleteAccount).toHaveBeenLastCalledWith("correct horse");
-  expect(replaceWithSignIn).toHaveBeenCalledWith("/sign-in");
-  expect(view.screen.querySelector("section")).toBeNull();
-});
-
-it("deletes with the password from the native prompt when one is shown", async () => {
-  vi.mocked(promptAccountDeletion).mockReturnValueOnce(true);
-  const view = await renderAccount(Profile);
-  await view.press("Delete account");
-  expect(view.screen.querySelector("section")).toBeNull();
-  const [{ onSubmit }] = vi.mocked(promptAccountDeletion).mock.calls[0]!;
-  await act(async () => onSubmit("hunter2"));
-  expect(deleteAccount).toHaveBeenCalledWith("hunter2");
-  expect(replaceWithSignIn).toHaveBeenCalledWith("/sign-in");
-});
-
-it("refreshes an expired sign-in proof and keeps the deletion dialog open", async () => {
-  vi.mocked(fetchAccountSecurity).mockResolvedValue(
-    security({ hasPassword: false, freshOidcAuth: true, sso: { name: "Example SSO" } }),
-  );
-  const view = await renderAccount(Profile);
-  await view.press("Delete account");
-  // The proof expires while the dialog is open.
-  vi.mocked(fetchAccountSecurity).mockResolvedValue(
-    security({ hasPassword: false, freshOidcAuth: false, sso: { name: "Example SSO" } }),
-  );
-  await view.press("Delete");
-  expect(deleteAccount).not.toHaveBeenCalled();
-  expect(replaceWithSignIn).not.toHaveBeenCalled();
-  expect(view.screen.querySelector("section")).not.toBeNull();
-  expect(view.button("Sign in again")?.disabled).toBe(false);
-  expect(view.button("Delete")?.disabled).toBe(true);
-});
-
-it("deletes with a still-fresh sign-in proof", async () => {
-  vi.mocked(fetchAccountSecurity).mockResolvedValue(
-    security({ hasPassword: false, freshOidcAuth: true }),
-  );
-  const view = await renderAccount(Profile);
-  await view.press("Delete account");
-  await view.press("Delete");
-  expect(deleteAccount).toHaveBeenCalledWith(undefined, undefined);
-  expect(replaceWithSignIn).toHaveBeenCalledWith("/sign-in");
-});
-
-it("submits only a trimmed deletion code, never whitespace", async () => {
-  vi.mocked(fetchAccountSecurity).mockResolvedValue(
-    security({ hasPassword: false, emailDeletion: true }),
-  );
-  const view = await renderAccount(Profile);
-  await view.press("Delete account");
-  await view.press("Send deletion code");
-  expect(requestAccountDeletionCode).toHaveBeenCalledOnce();
-  const input = view.screen.querySelector<HTMLInputElement>('input[aria-label="Deletion code"]');
-  expect(input?.type).toBe("text");
-
-  await view.type("Deletion code", "   ");
-  expect(view.button("Delete")?.disabled).toBe(true);
-  await view.press("Delete");
-  expect(deleteAccount).not.toHaveBeenCalled();
-
-  await view.type("Deletion code", " 123456 ");
-  await view.press("Delete");
-  expect(deleteAccount).toHaveBeenCalledWith(undefined, "123456");
-  expect(replaceWithSignIn).toHaveBeenCalledWith("/sign-in");
-});
-
-it.each([undefined, true, false])(
-  "respects the password-change policy (%s) while keeping password deletion",
-  async (passwordChangeEnabled) => {
-    vi.mocked(fetchAccountSecurity).mockResolvedValue(security({ passwordChangeEnabled }));
-    const view = await renderAccount(Profile);
-    expect(Boolean(view.button("Change password"))).toBe(passwordChangeEnabled !== false);
-    await view.press("Delete account");
-    await view.type("Current password", "hunter2");
-    await view.press("Delete");
-    expect(deleteAccount).toHaveBeenCalledWith("hunter2");
-  },
-);
-
-it("hides password change from an account without a password", async () => {
-  vi.mocked(fetchAccountSecurity).mockResolvedValue(
-    security({ hasPassword: false, passwordChangeEnabled: true }),
-  );
-  const view = await renderAccount(Profile);
-  expect(view.button("Change password")).toBeUndefined();
-});
-
 it.each([false, true])(
   "lists the settings in order, free of server controls (stored owner: %s)",
   async (isDeploymentOwner) => {
@@ -807,10 +620,7 @@ it.each([false, true])(
         expect(events).toEqual([href]);
       }
 
-      // The links wait while signing out.
-      vi.mocked(signOut).mockReturnValueOnce(new Promise(() => undefined));
-      await view.press("Sign out");
-      expect(view.button("Artifacts")!.disabled).toBe(true);
+      expect(view.button("Sign out")).toBeUndefined();
     } finally {
       unregister();
     }
@@ -868,59 +678,6 @@ it("hides Messaging when no chat app is connected to the server", async () => {
   const titles = Array.from(view.screen.querySelectorAll("[data-row]"), (row) => row.textContent);
   expect(titles).toContain("Skills");
   expect(titles).not.toContain("Messaging");
-});
-
-it("starts one sign-out when Sign out is tapped again while the warning is open", async () => {
-  vi.mocked(hasUnsentSends).mockReturnValue(true);
-  try {
-    const view = await renderAccount();
-    await view.press("Sign out");
-    await view.press("Sign out");
-    expect(Alert.alert).toHaveBeenCalledOnce();
-    const buttons = vi.mocked(Alert.alert).mock.calls[0]![2]!;
-    await act(async () => buttons[1]!.onPress?.());
-    expect(signOut).toHaveBeenCalledOnce();
-  } finally {
-    vi.mocked(hasUnsentSends).mockReturnValue(false);
-  }
-});
-
-it("warns before sign-out deletes unsent messages and keeps them on cancel", async () => {
-  vi.mocked(hasUnsentSends).mockReturnValue(true);
-  try {
-    const view = await renderAccount();
-    await view.press("Sign out");
-    expect(Alert.alert).toHaveBeenCalledOnce();
-    const buttons = vi.mocked(Alert.alert).mock.calls[0]![2]!;
-    expect(buttons[0]!.text).toBe("Cancel");
-    expect(buttons[1]!.text).toBe("Sign out anyway");
-    // Nothing is cleared while the alert is open or after Cancel.
-    expect(signOut).not.toHaveBeenCalled();
-    await act(async () => buttons[0]!.onPress?.());
-    expect(signOut).not.toHaveBeenCalled();
-    expect(replaceWithSignIn).not.toHaveBeenCalled();
-
-    await view.press("Sign out");
-    const confirm = vi.mocked(Alert.alert).mock.calls[1]![2]!;
-    await act(async () => confirm[1]!.onPress?.());
-    expect(signOut).toHaveBeenCalledOnce();
-    expect(replaceWithSignIn).toHaveBeenCalled();
-  } finally {
-    vi.mocked(hasUnsentSends).mockReturnValue(false);
-  }
-});
-
-it("hangs up the active call before signing out", async () => {
-  const view = await renderAccount();
-  const order: string[] = [];
-  vi.mocked(endCallBeforeSessionEnd).mockImplementationOnce(async () => {
-    order.push("hang-up");
-  });
-  vi.mocked(signOut).mockImplementationOnce(async () => {
-    order.push("sign-out");
-  });
-  await view.press("Sign out");
-  expect(order).toEqual(["hang-up", "sign-out"]);
 });
 
 it("shows subscription allowances and credits only for members who have them", async () => {

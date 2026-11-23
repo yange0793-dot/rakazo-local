@@ -59,7 +59,6 @@ describePostgres("thread row before run rows for clear and control release (Post
       provisionMessagingIdentity(
         prisma,
         { provider: "sendblue", address },
-        { signupsEnabled: undefined, signupAllowlist: undefined },
       ),
     ));
     provisioned = true;

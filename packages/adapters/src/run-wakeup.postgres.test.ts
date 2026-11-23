@@ -36,7 +36,6 @@ describePostgres("direct run dispatch (PostgreSQL)", () => {
       provisionMessagingIdentity(
         db.prisma,
         { provider: "email", address },
-        { signupsEnabled: undefined, signupAllowlist: undefined },
       ),
     );
   });

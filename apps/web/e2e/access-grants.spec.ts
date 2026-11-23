@@ -1,11 +1,11 @@
 import { expect, test } from "@playwright/test";
 import type { AccessGrant } from "@rakazo/contracts";
-import { captureScreenshot, completeOnboarding, makeAdmin, signup } from "./helpers";
+import { captureScreenshot, completeOnboarding, makeAdmin, openLocalWorkspace } from "./helpers";
 
 test("an admin grants free access to an email", async ({ page }, testInfo) => {
   const stamp = Date.now();
   const admin = `access-admin-${stamp}@rakazo.test`;
-  await signup(page, admin, "password12", `Access Admin ${stamp}`);
+  await openLocalWorkspace(page, `Access Admin ${stamp}`);
   await completeOnboarding(page);
 
   let grants: AccessGrant[] = [

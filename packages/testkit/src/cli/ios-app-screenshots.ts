@@ -32,7 +32,6 @@ const METRO_PORT = 8081;
 const METRO_URL = `http://localhost:${METRO_PORT}`;
 // The local API names this as the web origin, which computer screens load through, as in production.
 const SCREEN_RELAY_PORT = 5180;
-const LOCAL_PASSWORD = "ios-screenshot-password-1234";
 
 async function main() {
   const { sections: requested, publish } = parseArgs(process.argv.slice(2));
@@ -54,13 +53,8 @@ async function main() {
 
   const serverUrl = requiredEnv("DATABASE_URL");
   // The seeder writes encrypted messages, so it shares the local API's keys.
-  process.env.BETTER_AUTH_SECRET = "ios-screenshot-auth-secret-32-chars";
   process.env.ENCRYPTION_KEY = "ios-screenshot-encryption-key-32-chars";
   process.env.SCREEN_PROXY_SECRET = "ios-screenshot-screen-secret-32-chars";
-  const email = "ios-screenshots@example.test";
-  const emptyEmail = "ios-screenshots-empty@example.test";
-  const freeEmail = "ios-screenshots-free@example.test";
-  const password = LOCAL_PASSWORD;
   const outDir = path.resolve(
     process.env.IOS_SCREENSHOT_OUT || path.join(ROOT, "test-report", "ios-screenshots"),
   );
@@ -88,10 +82,6 @@ async function main() {
     const fixture = await seedIosScreenshotFixture({
       apiUrl,
       databaseUrl,
-      email,
-      emptyEmail,
-      freeEmail,
-      password,
       completeCheckout: backend.completeCheckout,
     });
     await captureSections({
@@ -100,10 +90,6 @@ async function main() {
       outDir,
       databaseUrl,
       env: {
-        RAKAZO_SCREENSHOT_EMAIL: email,
-        RAKAZO_SCREENSHOT_EMPTY_EMAIL: emptyEmail,
-        RAKAZO_SCREENSHOT_FREE_EMAIL: freeEmail,
-        RAKAZO_SCREENSHOT_PASSWORD: password,
         RAKAZO_SCREENSHOT_BOT_ID: fixture.botId,
         RAKAZO_SCREENSHOT_PEER_BOT_ID: fixture.peerBotId,
         RAKAZO_SCREENSHOT_GROUP_ID: fixture.groupId,
@@ -298,7 +284,6 @@ function startScreenRelay(apiUrl: string, outDir: string) {
       WEB_PORT: String(SCREEN_RELAY_PORT),
       RAKAZO_DEV_HOST: "127.0.0.1",
       SCREEN_PROXY_SECRET: process.env.SCREEN_PROXY_SECRET ?? "",
-      BETTER_AUTH_SECRET: process.env.BETTER_AUTH_SECRET ?? "",
     },
     ready: () =>
       fetch(`http://127.0.0.1:${SCREEN_RELAY_PORT}/`).then(

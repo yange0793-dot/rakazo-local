@@ -22,6 +22,7 @@ model AiDataConsent {
 }
 
 model User {
+  localExportGrants LocalExportGrant[]
   aiDataConsents AiDataConsent[]
   pages          Page[]
   id                          String                       @id
@@ -53,13 +54,6 @@ model User {
   deactivatedAt               DateTime?
   /// Operator-set recorded hosted model usage ceiling, including pending reservations.
   modelCreditCapMicros        BigInt?
-  sessions                    Session[]
-  accounts                    Account[]
-  scimSubject                 ScimSubject?
-  scimUsers                   ScimUser[]
-  scimIdentityTombstones      ScimIdentityTombstone[]
-  scimProjectionGrants        ScimProjectionGrant[]
-  passkeys                    Passkey[]
   members                     Member[]
   accessGrants                AccessGrant[]
   invitations                 Invitation[]
@@ -92,7 +86,6 @@ model User {
   workActivityStartTokens     WorkActivityStartToken[]
   trustedLinkSites            TrustedLinkSite[]
   feedbackReports             FeedbackReport[]
-  emailSends                  EmailSend[]
   botEmailSends               BotEmailSend[]
   signupSurvey                SignupSurvey?
   computerRuns                ComputerRun[]
@@ -117,25 +110,16 @@ model SignupSurvey {
   @@map("signup_surveys")
 }
 
-model Session {
-  id                   String   @id
-  expiresAt            DateTime
-  token                String
-  createdAt            DateTime @default(now())
-  updatedAt            DateTime @updatedAt
-  ipAddress            String?
-  userAgent            String?
-  userId               String
-  user                 User     @relation(fields: [userId], references: [id], onDelete: Cascade)
-  activeOrganizationId String?
+model LocalExportGrant {
+  digest    String   @id
+  userId    String
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  expiresAt DateTime
 
-  @@unique([token])
-  @@index([userId])
-  @@map("session")
+  @@map("local_export_grants")
 }
 
-/// One current device registration per account, matching the notification API contract.
-/// No session FK: password changes delete a session before the replacement is created.
+/// One current device registration per local owner, identified by its installation.
 model PushToken {
   userId String @id
   user User @relation(fields: [userId], references: [id], onDelete: Cascade)
@@ -169,7 +153,7 @@ model WorkActivityToken {
   tokenDigest String @id
   userId String
   user User @relation(fields: [userId], references: [id], onDelete: Cascade)
-  /// The session that registered the card; the card ends with it. No FK, as for push tokens.
+  /// The installation that registered the card.
   sessionId String
   ciphertext String
   /// A keyed digest of the last state sent, so unchanged work sends nothing.
@@ -188,7 +172,7 @@ model WorkActivityStartToken {
   tokenDigest String @id
   userId String
   user User @relation(fields: [userId], references: [id], onDelete: Cascade)
-  /// The session that registered the phone; it starts no cards once that session ends. No FK, as for push tokens.
+  /// The installation that registered the phone.
   sessionId String
   ciphertext String
   /// The last card started on this phone, so each stretch of work starts at most one.
@@ -200,16 +184,6 @@ model WorkActivityStartToken {
   @@map("work_activity_start_tokens")
 }
 
-model EmailSend {
-  userId String
-  user   User     @relation(fields: [userId], references: [id], onDelete: Cascade)
-  kind   String
-  sentAt DateTime @default(now())
-
-  @@id([userId, kind])
-  @@map("email_sends")
-}
-
 model UserDevice {
   id          String                 @id @default(cuid())
   userId      String
@@ -217,12 +191,12 @@ model UserDevice {
   name        String
   platform    String
   tokenHash   String                 @unique
-  /// The session that paired it. Ending that session revokes the device.
+  /// The local installation that paired it.
   sessionId   String?
   createdAt   DateTime               @default(now())
   lastSeenAt  DateTime?
   revokedAt   DateTime?
-  /// Who revoked it: "owner", "device" or "session" (its sign-in ended). Null when unknown.
+  /// Who revoked it: "owner", "device" or "session" (its installation was detached).
   revokedBy   String?
   connections UserDeviceConnection[]
 
@@ -240,212 +214,6 @@ model UserDeviceConnection {
 
   @@index([heartbeatAt])
   @@map("user_device_connections")
-}
-
-model Account {
-  id                    String    @id
-  accountId             String
-  providerId            String
-  userId                String
-  user                  User      @relation(fields: [userId], references: [id], onDelete: Cascade)
-  accessToken           String?
-  refreshToken          String?
-  idToken               String?
-  accessTokenExpiresAt  DateTime?
-  refreshTokenExpiresAt DateTime?
-  scope                 String?
-  password              String?
-  createdAt             DateTime  @default(now())
-  updatedAt             DateTime  @updatedAt
-
-  @@index([userId])
-  @@map("account")
-}
-
-model Verification {
-  id         String    @id
-  identifier String
-  value      String
-  expiresAt  DateTime
-  createdAt  DateTime? @default(now())
-  updatedAt  DateTime? @updatedAt
-
-  @@index([identifier])
-  @@map("verification")
-}
-
-/// Better Auth WebAuthn credentials. `publicKey` is the base64 COSE key.
-model Passkey {
-  id           String    @id
-  name         String?
-  publicKey    String
-  userId       String
-  user         User      @relation(fields: [userId], references: [id], onDelete: Cascade)
-  credentialID String
-  counter      Int
-  deviceType   String
-  backedUp     Boolean
-  transports   String?
-  createdAt    DateTime? @default(now())
-  aaguid       String?
-
-  @@unique([credentialID])
-  @@index([userId])
-  @@map("passkey")
-}
-
-// Directory provisioning (SCIM 2.0), owned by the auth library's SCIM plugin. Field names and
-// types must match the plugin's schema; the plugin reads and writes these tables directly.
-
-model ScimConnectionBinding {
-  id                              String    @id
-  connectionId                    String
-  connectionKey                   String    @unique
-  provisioningDomainId            String
-  createdAt                       DateTime
-  decommissionedAt                DateTime?
-  decommissionStatus              String    @default("active")
-  decommissionCursorUserId        String?
-  decommissionReconciledUserCount Int       @default(0)
-  decommissionBatchCount          Int       @default(0)
-  decommissionRevision            Int       @default(0)
-  decommissionCompletedAt         DateTime?
-  decommissionLeaseId             String?
-  decommissionLeaseExpiresAt      DateTime?
-
-  @@index([connectionId])
-  @@map("scim_connection_bindings")
-}
-
-model ScimIdentityTombstone {
-  id                   String   @id
-  connectionId         String
-  provisioningDomainId String
-  externalId           String
-  externalIdKey        String   @unique
-  userId               String
-  user                 User     @relation(fields: [userId], references: [id], onDelete: Cascade)
-  profile              String
-  deletedAt            DateTime
-
-  @@index([connectionId])
-  @@index([provisioningDomainId])
-  @@index([userId])
-  @@map("scim_identity_tombstones")
-}
-
-model ScimSubject {
-  id              String   @id
-  userId          String   @unique
-  user            User     @relation(fields: [userId], references: [id], onDelete: Cascade)
-  profileSourceId String?
-  revision        Int
-  createdAt       DateTime
-  updatedAt       DateTime
-
-  @@index([profileSourceId])
-  @@map("scim_subjects")
-}
-
-model ScimUser {
-  id                   String                @id
-  connectionId         String
-  provisioningDomainId String
-  userId               String
-  user                 User                  @relation(fields: [userId], references: [id], onDelete: Cascade)
-  connectionUserKey    String                @unique
-  userName             String
-  userNameKey          String                @unique
-  primaryEmail         String
-  workEmailValueIndex  String
-  emailValueIndex      String
-  displayName          String
-  formattedName        String
-  givenName            String?
-  familyName           String?
-  serializedEmails     String
-  serializedAttributes String?
-  externalId           String?
-  externalIdKey        String?               @unique
-  active               Boolean
-  orderKey             String                @unique
-  createdAt            DateTime
-  updatedAt            DateTime
-  projectionGrants     ScimProjectionGrant[]
-  groupMemberships     ScimGroupMember[]
-
-  @@index([connectionId])
-  @@index([provisioningDomainId])
-  @@index([userId])
-  @@map("scim_users")
-}
-
-model ScimProjectionGrant {
-  id                   String   @id
-  connectionId         String
-  provisioningDomainId String
-  scimUserId           String
-  scimUser             ScimUser @relation(fields: [scimUserId], references: [id], onDelete: Cascade)
-  userId               String
-  user                 User     @relation(fields: [userId], references: [id], onDelete: Cascade)
-  sourceKind           String
-  sourceId             String
-  sourceValue          String?
-  role                 String
-  grantKey             String   @unique
-  createdAt            DateTime
-  updatedAt            DateTime
-
-  @@index([connectionId])
-  @@index([provisioningDomainId])
-  @@index([scimUserId])
-  @@index([userId])
-  @@map("scim_projection_grants")
-}
-
-model ScimGroup {
-  id                   String            @id
-  connectionId         String
-  provisioningDomainId String
-  revision             Int               @default(0)
-  displayName          String
-  displayNameKey       String            @unique
-  externalId           String?
-  externalIdKey        String?           @unique
-  orderKey             String            @unique
-  createdAt            DateTime
-  updatedAt            DateTime
-  members              ScimGroupMember[]
-
-  @@index([connectionId])
-  @@index([provisioningDomainId])
-  @@map("scim_groups")
-}
-
-model ScimGroupMember {
-  id            String    @id
-  connectionId  String
-  groupId       String
-  group         ScimGroup @relation(fields: [groupId], references: [id], onDelete: Cascade)
-  scimUserId    String
-  scimUser      ScimUser  @relation(fields: [scimUserId], references: [id], onDelete: Cascade)
-  membershipKey String    @unique
-  createdAt     DateTime
-
-  @@index([connectionId])
-  @@index([groupId])
-  @@index([scimUserId])
-  @@map("scim_group_members")
-}
-
-/// Better Auth credential rate limits. `lastRequest` is epoch milliseconds.
-model RateLimit {
-  id          String @id
-  key         String @unique
-  count       Int
-  lastRequest BigInt
-
-  @@map("rateLimit")
 }
 
 model Organization {
@@ -771,9 +539,6 @@ model DeploymentSettings {
   id                              String   @id @default("default")
   /// Deprecated: retained for rolling-release compatibility; never authorizes app users.
   ownerUserId                     String?
-  signupsEnabled                  Boolean  @default(true)
-  signupAllowlist                 String   @default("")
-  signupPolicyInitialized         Boolean  @default(false)
   defaultModelProvider            String?
   defaultModelId                  String?
   deploymentModelCredentialCipher String?

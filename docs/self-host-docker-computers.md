@@ -7,7 +7,7 @@ The Docker supervisor is not published as its own image and is not exposed on th
 the app image, stays on the internal Compose network, and holds the Docker socket because access to
 it is equivalent to control of the Docker host. Docker sandboxes require `SANDBOX_SUPERVISOR_TOKEN`
 (API, worker, supervisor). `SCREEN_PROXY_SECRET` signs browser-screen capabilities (API and web
-proxy). Keep both distinct from `BETTER_AUTH_SECRET`.
+proxy). Keep the two credentials distinct.
 
 ## Resource ceilings
 

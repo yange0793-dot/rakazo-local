@@ -29,6 +29,11 @@ export const badDeliveryPlaybook: SkillPlaybook = {
   ...goodDeliveryPlaybook,
   howToCheck: "Reject every extra file including allowed runtime files.",
 };
+export const manifestOnlyDeliveryPlaybook: SkillPlaybook = {
+  ...goodDeliveryPlaybook,
+  howToCheck:
+    "Treat a matching list as a clean directory even if only manifest members were listed.",
+};
 
 /** Offline API-shaped runtime: answers depend on actual isolated file-tool results, never truth. */
 export class OfflineTicketImprovementRuntime implements AgentRuntime {
@@ -112,6 +117,7 @@ export class OfflineTicketImprovementRuntime implements AgentRuntime {
       } else {
         const installation = (await file("installation.json")) as {
           checked: Array<{ matches: boolean }>;
+          directoryCapture: "manifest_members_only" | "full_directory";
         };
         const upload = (await file("upload.json")) as { state: string; receiptId?: string };
         const directory = (await read("list_files", "installed")) as {
@@ -144,6 +150,11 @@ export class OfflineTicketImprovementRuntime implements AgentRuntime {
           output.observations.unexpected_files!.length
         )
           output.checks.directory = "fail";
+        else if (
+          installation.directoryCapture === "manifest_members_only" &&
+          playbook.howToCheck !== manifestOnlyDeliveryPlaybook.howToCheck
+        )
+          output.checks.directory = "unknown";
         if (!baseline && !(upload.state === "uploaded" && upload.receiptId))
           output.checks.upload = "unknown";
         output.outcome = Object.values(output.checks).includes("fail")

@@ -7,15 +7,15 @@ import {
   completeOnboarding,
   createNamedBot,
   openBotPanelTab,
+  openLocalWorkspace,
   openUserSettings,
   rpc,
-  signup,
 } from "./helpers";
 
 test("memory and skills are readable and editable in the app", async ({ page }, testInfo) => {
   const stamp = Date.now();
   const userName = `Knowledge ${stamp}`;
-  await signup(page, `knowledge-${stamp}@rakazo.test`, "password12", userName);
+  await openLocalWorkspace(page, userName);
   await completeOnboarding(page);
   await page.goto("/app");
   await page.waitForURL(/\/app\/[^/]+$/);
@@ -288,7 +288,7 @@ test("memory and skills are readable and editable in the app", async ({ page }, 
 });
 
 test("a new bot hides its untouched memory index", async ({ page }, testInfo) => {
-  await signup(page, `empty-memory-${Date.now()}@example.test`, "password12", "Sample");
+  await openLocalWorkspace(page, "Sample");
   await completeOnboarding(page);
   const botId = await createNamedBot(page, "Researcher");
   const docs = await rpc<MemoryDocument[]>(page, "memory/list", { botId, scope: "bot" });

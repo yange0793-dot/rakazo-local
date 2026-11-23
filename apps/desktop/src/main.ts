@@ -88,7 +88,6 @@ import {
   reportDesktopError,
 } from "./monitoring.js";
 import { NativeStackController } from "./native-stack.js";
-import { associatedPasskeyRpIds } from "./passkeys.js";
 import { revealSecondInstanceWindow, secondInstanceWindow } from "./second-instance.js";
 import { installServerHeaders } from "./server-request-headers.js";
 import { installSessionPermissions } from "./session-permissions.js";
@@ -139,14 +138,6 @@ app.once("will-finish-launching", () => markOnce("rk:main:will-finish-launching"
 app.once("ready", () => markOnce("rk:main:ready"));
 // Includes fresh partitions and popup-created sessions, before they load remote content.
 app.on("session-created", (value) => installSessionPermissions(value, permissionTarget));
-const passkeyRpIds = associatedPasskeyRpIds({
-  platform: process.platform,
-  packaged: app.isPackaged,
-  resourcesPath: process.resourcesPath,
-  exists: existsSync,
-});
-// Routes WebAuthn to the system passkey sheet (iCloud Keychain and other providers).
-if (passkeyRpIds.length > 0) app.configureWebAuthn({ platformPasskeys: true });
 async function saveHostChoice(computerHost: "docker" | "this-mac") {
   const origin = new URL(desktop.localStack.webUrl()).origin;
   const token = await readStackToken(stackDir(app.getPath("userData")));
@@ -871,7 +862,6 @@ app.whenReady().then(async () => {
     );
   }
   ipcMain.handle("desktop.platform", () => process.platform);
-  ipcMain.handle("desktop.passkeys.rpIds", () => passkeyRpIds);
   ipcMain.handle("desktop.monitoring.enabled", () => reportsErrors);
   handleOnlyFrom(fromMainWindow, "desktop.server.change", () => {
     showSetupWindow();

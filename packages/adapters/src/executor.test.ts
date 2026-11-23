@@ -2078,20 +2078,21 @@ describe("createRunExecutor", () => {
     expect(tools).not.toContain("save_shared_memory");
   });
 
-  it("keeps remember and offers forget_memory only when the memory provider can forget", () => {
-    const names = (semanticMemoryForgets: boolean) =>
+  it("offers forget_memory only for revisioned providers that can forget", () => {
+    const names = (semanticMemoryForgets: boolean, managedFacts: boolean) =>
       selectBuiltinToolsForRun({
         graphicalToolsAllowed: false,
         groupId: null,
         trigger: "message",
         semanticMemoryEnabled: true,
-        semanticMemoryForgets,
+        semanticMemoryForgets: semanticMemoryForgets && managedFacts,
         messagingChannelRun: false,
       }).map((tool) => tool.name);
-    expect(names(false)).toEqual(expect.arrayContaining(["recall_memory", "save_memory"]));
-    expect(names(false)).not.toContain("forget_memory");
-    expect(names(true)).toContain("forget_memory");
-    expect(names(false)).toContain("remember");
+    expect(names(false, false)).toEqual(expect.arrayContaining(["recall_memory", "save_memory"]));
+    expect(names(false, false)).not.toContain("forget_memory");
+    expect(names(true, false)).not.toContain("forget_memory");
+    expect(names(true, true)).toContain("forget_memory");
+    expect(names(false, false)).toContain("remember");
   });
 
   it("gives a creation intro only its question and its own profile, and normal turns everything", () => {

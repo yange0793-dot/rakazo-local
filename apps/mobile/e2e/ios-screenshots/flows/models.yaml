@@ -2,31 +2,31 @@ appId: com.rakazo.app
 name: Models
 ---
 - runFlow:
-    file: ../subflows/sign-in.yaml
+    file: ../subflows/open-workspace.yaml
     env:
-      RAKAZO_ACTIVE_EMAIL: ${RAKAZO_SCREENSHOT_EMAIL}
-- openLink: "rakazo:///models"
+      RAKAZO_SCREENSHOT_WORKSPACE: Screenshot User
+- openLink: rakazo:///models
 - extendedWaitUntil:
-    visible: ".*Claude Fable 5.1.*"
+    visible: .*Claude Fable 5.1.*
     timeout: 15000
 - waitForAnimationToEnd:
     timeout: 3000
 - takeScreenshot: 01-models
-- tapOn: ".*Claude Fable 5.1.*"
+- tapOn: .*Claude Fable 5.1.*
 - waitForAnimationToEnd:
     timeout: 3000
 - takeScreenshot: 02-model-picker
-- openLink: "rakazo:///models"
+- openLink: rakazo:///models
 - extendedWaitUntil:
-    visible: "Add provider"
+    visible: Add provider
     timeout: 15000
-- tapOn: "Add provider"
+- tapOn: Add provider
 - waitForAnimationToEnd:
     timeout: 3000
 - takeScreenshot: 03-add-provider
-- tapOn: ".*OpenRouter.*"
+- tapOn: .*OpenRouter.*
 - extendedWaitUntil:
-    visible: "API key"
+    visible: API key
     timeout: 15000
 - waitForAnimationToEnd:
     timeout: 3000

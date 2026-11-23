@@ -31,7 +31,6 @@ describePostgres("messaging outbound drain order (PostgreSQL)", () => {
       provisionMessagingIdentity(
         db.prisma,
         { provider: "telegram", address },
-        { signupsEnabled: undefined, signupAllowlist: undefined },
       ),
     );
     identity = {

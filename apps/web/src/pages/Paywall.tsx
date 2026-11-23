@@ -3,12 +3,10 @@ import type { BillingStatus } from "@rakazo/contracts";
 import { Button } from "@rakazo/ui-web";
 import { Check } from "lucide-react";
 import { useState } from "react";
-import { AccountMenu } from "../components/AccountMenu";
 import { CreditChoice } from "../components/ModelCredits";
 import { formatBillingPrice } from "../lib/billing";
 import type { RpcClient } from "../lib/rpc";
-import { useSignOut } from "../lib/sign-out";
-import { AuthFrame, submitClass } from "./Auth";
+import { FormFrame, submitClass } from "./FormFrame";
 
 export function PaywallPage({
   status,
@@ -32,7 +30,6 @@ function LegacyPaywallPage({ status, client }: { status: BillingStatus; client: 
   const { t, i18n } = useLingui();
   const [pending, setPending] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const { signingOut, logOut } = useSignOut("/sign-in", setError);
   // An unpaid or paused subscription resumes from the portal; a new checkout would bill twice.
   const resumable = status.state === "unpaid" || status.state === "paused";
   const showCheckout = status.canManage && !resumable;
@@ -45,7 +42,7 @@ function LegacyPaywallPage({ status, client }: { status: BillingStatus; client: 
       status.state === "canceled");
 
   async function open(target: "checkout" | "portal") {
-    if (pending || signingOut) return;
+    if (pending) return;
     setPending(true);
     setError(null);
     try {
@@ -74,7 +71,7 @@ function LegacyPaywallPage({ status, client }: { status: BillingStatus; client: 
       : t`Subscription required`;
 
   return (
-    <AuthFrame
+    <FormFrame
       title={title}
       onSubmit={(event) => {
         event.preventDefault();
@@ -99,7 +96,7 @@ function LegacyPaywallPage({ status, client }: { status: BillingStatus; client: 
           </ul>
         ) : null}
         {showCheckout ? (
-          <Button type="submit" size="lg" disabled={pending || signingOut} className={submitClass}>
+        <Button type="submit" size="lg" disabled={pending} className={submitClass}>
             {status.trialAvailable ? (
               <Trans>Start {trialDays}-day free trial</Trans>
             ) : (
@@ -112,15 +109,14 @@ function LegacyPaywallPage({ status, client }: { status: BillingStatus; client: 
             type="button"
             size="lg"
             variant={showCheckout ? "secondary" : "default"}
-            disabled={pending || signingOut}
+            disabled={pending}
             className={submitClass}
             onClick={() => void open("portal")}
           >
             <Trans>Manage billing</Trans>
           </Button>
         ) : null}
-        <AccountMenu disabled={pending} signingOut={signingOut} onLogOut={() => void logOut()} />
       </div>
-    </AuthFrame>
+    </FormFrame>
   );
 }

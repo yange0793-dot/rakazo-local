@@ -1,11 +1,11 @@
-import { randomUUID } from "node:crypto";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { ComposioConnector, FakeComposioClient } from "@rakazo/adapters";
 import { describe, expect, it } from "vitest";
 import { discardBotIntroRun } from "./discard-bot-intro.js";
-import { sessionCookieHeader } from "./index.js";
+import { createTestSpace, testSpaceHeaders } from "./index.js";
+
 import { startModelEmulator } from "./model-emulator.js";
 import { asSystem } from "./system-db.js";
 
@@ -67,29 +67,18 @@ describe.skipIf(!databaseAvailable)("offline Pi product journey", () => {
       const handles = await createApp({
         databaseUrl: process.env.DATABASE_URL!,
         realtimeDatabaseUrl: process.env.DATABASE_URL!,
-        authUrl: fixtureOrigin,
+
         webOrigin: fixtureOrigin,
         dataDir,
         sandboxProvider: "fake",
         agentRuntime: "pi",
         wakeupDriver: "memory",
-        signupsEnabled: "true",
         composio: new ComposioConnector({ client: new FakeComposioClient() }),
         encryptionKey: "offline-model-fixture-encryption-key",
       });
       stop = handles.stop;
-      const signup = await handles.app.request("/api/auth/sign-up/email", {
-        method: "POST",
-        headers: { "content-type": "application/json", origin: fixtureOrigin },
-        body: JSON.stringify({
-          email: `offline-pi-${randomUUID()}@rakazo.test`,
-          password: "password12",
-          name: "Offline fixture",
-        }),
-      });
-      expect(signup.status).toBeLessThan(400);
-      const cookie = sessionCookieHeader(signup);
-      await rpc(handles.app, cookie, "models/connect", {
+      const scope = await createTestSpace(handles.app, "Offline fixture");
+      await rpc(handles.app, scope, "models/connect", {
         provider: model.model.provider,
         modelId: model.model.id,
         baseUrl: model.baseUrl,
@@ -97,20 +86,20 @@ describe.skipIf(!databaseAvailable)("offline Pi product journey", () => {
         contextWindow: 160_000,
         maxTokens: 4096,
       });
-      const bot = await rpc<{ id: string }>(handles.app, cookie, "bots/create", {
+      const bot = await rpc<{ id: string }>(handles.app, scope, "bots/create", {
         name: "File fixture",
         title: "",
         description: "",
         instructions: "Complete the task.",
         notifyOnFinish: false,
       });
-      await discardBotIntroRun(handles, cookie, bot.id);
-      await rpc(handles.app, cookie, "bots/update", {
+      await discardBotIntroRun(handles, scope, bot.id);
+      await rpc(handles.app, scope, "bots/update", {
         botId: bot.id,
         modelProvider: model.model.provider,
         modelId: model.model.id,
       });
-      const sent = await rpc<{ runId: string }>(handles.app, cookie, "threads/send", {
+      const sent = await rpc<{ runId: string }>(handles.app, scope, "threads/send", {
         botId: bot.id,
         text: "Save hello to notes/result.txt.",
       });
@@ -128,14 +117,14 @@ describe.skipIf(!databaseAvailable)("offline Pi product journey", () => {
         )
         .toBe("completed");
       model.assertComplete();
-      const file = await rpc<{ content: string }>(handles.app, cookie, "computer/readFile", {
+      const file = await rpc<{ content: string }>(handles.app, scope, "computer/readFile", {
         botId: bot.id,
         path: "notes/result.txt",
       });
       expect(file.content).toBe("hello");
       const thread = await rpc<{ messages: Array<{ role: string; blocks: unknown[] }> }>(
         handles.app,
-        cookie,
+        scope,
         "threads/get",
         { botId: bot.id },
       );
@@ -150,7 +139,7 @@ describe.skipIf(!databaseAvailable)("offline Pi product journey", () => {
       expect(JSON.stringify(tools[0])).toContain("write_file");
       const commands = await rpc<Array<Record<string, unknown>>>(
         handles.app,
-        cookie,
+        scope,
         "computer/commands",
         { botId: bot.id },
       );
@@ -182,15 +171,14 @@ describe.skipIf(!databaseAvailable)("offline Pi product journey", () => {
   }, 30_000);
 });
 
-async function rpc<T>(
-  app: App,
-  cookie: string,
-  procedure: string,
-  input: unknown = {},
-): Promise<T> {
+async function rpc<T>(app: App, scope: string, procedure: string, input: unknown = {}): Promise<T> {
   const response = await app.request(`/rpc/${procedure}`, {
     method: "POST",
-    headers: { "content-type": "application/json", cookie, origin: fixtureOrigin },
+    headers: {
+      "content-type": "application/json",
+      ...testSpaceHeaders(scope),
+      origin: fixtureOrigin,
+    },
     body: JSON.stringify({ json: input }),
   });
   const body = (await response.json()) as { json?: T; error?: { message?: string } };

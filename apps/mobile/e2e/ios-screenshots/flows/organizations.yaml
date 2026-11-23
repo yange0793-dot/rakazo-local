@@ -1,77 +1,73 @@
 appId: com.rakazo.app
 name: Organizations
 ---
-# Last in the catalog: it leaves a second organization in the populated account.
 - runFlow:
-    file: ../subflows/sign-in.yaml
+    file: ../subflows/open-workspace.yaml
     env:
-      RAKAZO_ACTIVE_EMAIL: ${RAKAZO_SCREENSHOT_EMAIL}
-- openLink: "rakazo:///account"
+      RAKAZO_SCREENSHOT_WORKSPACE: Screenshot User
+- openLink: rakazo:///account
 - scrollUntilVisible:
-    element: "Organization.*"
+    element: Organization.*
     direction: DOWN
     timeout: 15000
-- tapOn: "Organization.*"
+- tapOn: Organization.*
 - extendedWaitUntil:
-    visible: "Create organization"
+    visible: Create organization
     timeout: 15000
 - waitForAnimationToEnd:
     timeout: 3000
 - takeScreenshot: 01-account-organization
-- tapOn: "Create organization"
+- tapOn: Create organization
 - extendedWaitUntil:
-    visible: "Name"
+    visible: Name
     timeout: 15000
-# The name field opens focused.
-- inputText: "Work"
+- inputText: Work
 - waitForAnimationToEnd:
     timeout: 3000
 - takeScreenshot: 02-new-organization
-- tapOn: "Create"
-# Billing belongs to each organization, so the new one starts on the paywall.
+- tapOn: Create
 - extendedWaitUntil:
-    visible: ".*Put your bots to work.*"
+    visible: .*Put your bots to work.*
     timeout: 20000
 - waitForAnimationToEnd:
     timeout: 3000
 - takeScreenshot: 03-organization-paywall
-- tapOn: "Account"
+- tapOn: Account
 - extendedWaitUntil:
-    visible: "Personal"
+    visible: Personal
     timeout: 10000
 - waitForAnimationToEnd:
     timeout: 3000
 - takeScreenshot: 04-organization-paywall-menu
-- tapOn: "Personal"
+- tapOn: Personal
 - extendedWaitUntil:
     visible:
-      id: "organization-menu"
+      id: organization-menu
     timeout: 20000
 - waitForAnimationToEnd:
     timeout: 3000
 - takeScreenshot: 05-organization-inbox
-- openLink: "rakazo:///account"
+- openLink: rakazo:///account
 - extendedWaitUntil:
-    visible: "Organization.*"
+    visible: Organization.*
     timeout: 15000
-- tapOn: "Organization.*"
+- tapOn: Organization.*
 - extendedWaitUntil:
-    visible: ".*Delete organization.*"
+    visible: .*Delete organization.*
     timeout: 15000
 - waitForAnimationToEnd:
     timeout: 3000
 - takeScreenshot: 06-organization
-- tapOn: "Delete organization"
-# The confirmation field opens focused. Delete stays untapped: this is the fixture's main organization.
-- inputText: "Personal"
+- tapOn: Delete organization
+- inputText: Personal
 - waitForAnimationToEnd:
     timeout: 3000
 - takeScreenshot: 07-organization-delete-confirm
-- openLink: "rakazo:///"
+- openLink: rakazo:///
 - tapOn:
-    id: "organization-menu"
+    id: organization-menu
 - extendedWaitUntil:
-    visible: "Work"
+    visible: Work
     timeout: 10000
 - waitForAnimationToEnd:
     timeout: 3000

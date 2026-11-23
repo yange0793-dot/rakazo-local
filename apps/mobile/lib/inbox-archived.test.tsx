@@ -87,7 +87,6 @@ vi.mock("expo-router", () => ({
   Stack: { Screen: () => null },
 }));
 vi.mock("./api-server", () => ({}));
-vi.mock("./api-auth", () => ({}));
 vi.mock("./api-live", () => ({}));
 vi.mock("./api", () => ({ rpc: mocks.rpc }));
 vi.mock("./native", () => ({

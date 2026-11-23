@@ -2,73 +2,73 @@ appId: com.rakazo.app
 name: Workspace
 ---
 - runFlow:
-    file: ../subflows/sign-in.yaml
+    file: ../subflows/open-workspace.yaml
     env:
-      RAKAZO_ACTIVE_EMAIL: ${RAKAZO_SCREENSHOT_EMAIL}
-- openLink: "rakazo:///board"
+      RAKAZO_SCREENSHOT_WORKSPACE: Screenshot User
+- openLink: rakazo:///board
 - extendedWaitUntil:
-    visible: ".*Draft the launch announcement.*"
+    visible: .*Draft the launch announcement.*
     timeout: 15000
 - waitForAnimationToEnd:
     timeout: 3000
 - takeScreenshot: 01-board
-- openLink: "rakazo:///approvals"
+- openLink: rakazo:///approvals
 - extendedWaitUntil:
-    visible: ".*example.com.*"
+    visible: .*example.com.*
     timeout: 15000
 - waitForAnimationToEnd:
     timeout: 3000
 - takeScreenshot: 02-approval-rules
-- openLink: "rakazo:///approval-rule-add"
+- openLink: rakazo:///approval-rule-add
 - extendedWaitUntil:
-    visible: "Browser act"
+    visible: Browser act
     timeout: 15000
 - waitForAnimationToEnd:
     timeout: 3000
 - takeScreenshot: 02b-add-approval-rule
-- openLink: "rakazo:///vault"
+- openLink: rakazo:///vault
 - extendedWaitUntil:
-    visible: ".*deploy_token.*"
+    visible: .*deploy_token.*
     timeout: 15000
 - waitForAnimationToEnd:
     timeout: 3000
 - takeScreenshot: 03-vault
-- tapOn: "Help desk"
+- tapOn: Help desk
 - waitForAnimationToEnd:
     timeout: 3000
 - takeScreenshot: 04-vault-item
-- tapOn: "Remove"
+- tapOn: Remove
 - waitForAnimationToEnd:
     timeout: 3000
 - takeScreenshot: 05-vault-remove
-- tapOn: "Cancel"
-- tapOn: "Done"
-- tapOn: "New item"
+- tapOn: Cancel
+- tapOn: Done
+- tapOn: New item
 - waitForAnimationToEnd:
     timeout: 3000
 - takeScreenshot: 06-vault-new
-- tapOn: "Card"
+- tapOn: Card
 - waitForAnimationToEnd:
     timeout: 3000
 - takeScreenshot: 07-vault-new-card
-- tapOn: "Cancel"
-- openLink: "rakazo:///archived-bots"
+- tapOn: Cancel
+- openLink: rakazo:///archived-bots
 - extendedWaitUntil:
-    visible: ".*Archived fixture.*"
+    visible: .*Archived fixture.*
     timeout: 15000
 - waitForAnimationToEnd:
     timeout: 3000
 - takeScreenshot: 08-archived-bots
-- openLink: "rakazo:///space?spaceId=${RAKAZO_SCREENSHOT_TEAM_SPACE_ID}"
+- openLink: rakazo:///space?spaceId=${RAKAZO_SCREENSHOT_TEAM_SPACE_ID}
 - extendedWaitUntil:
-    visible: ".*Customize.*"
+    visible: .*Customize.*
     timeout: 15000
 - waitForAnimationToEnd:
     timeout: 3000
 - takeScreenshot: 09-space-settings
-- openLink: "rakazo:///space-members?spaceId=${RAKAZO_SCREENSHOT_TEAM_SPACE_ID}"
+- openLink: rakazo:///space-members?spaceId=${RAKAZO_SCREENSHOT_TEAM_SPACE_ID}
 - extendedWaitUntil:
-    visible: "Owner"
+    visible: Owner
     timeout: 15000
 - waitForAnimationToEnd:
     timeout: 3000

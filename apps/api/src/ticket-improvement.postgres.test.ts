@@ -62,7 +62,6 @@ pg("ticket improvement through chat and background jobs (PostgreSQL)", () => {
           provisionMessagingIdentity(
             prisma,
             { provider: "email", address },
-            { signupsEnabled: undefined, signupAllowlist: undefined },
           ),
         );
         const { spaceId, userId, botId } = identity;
@@ -218,7 +217,7 @@ pg("ticket improvement through chat and background jobs (PostgreSQL)", () => {
                     handlers["harness.reflect"]({ runId: assignedRunId, auto: true }),
                   ).rejects.toThrow("Offline checkpoint write interrupted");
                   expect(runtime.proposalCalls).toBe(1);
-                  expect(runtime.comparisonCalls).toBe(12);
+                  expect(runtime.comparisonCalls).toBe(14);
                   await handlers["harness.reflect"]({ runId: assignedRunId, auto: true });
                 } finally {
                   injected.mockRestore();
@@ -408,7 +407,7 @@ pg("ticket improvement through chat and background jobs (PostgreSQL)", () => {
           const artifactCount = await prisma.artifact.count({ where: { runId: assignedRunId } });
           await handlers["harness.reflect"]({ runId: assignedRunId, auto: true });
           expect(runtime.proposalCalls).toBe(1);
-          expect(runtime.comparisonCalls).toBe(12);
+          expect(runtime.comparisonCalls).toBe(14);
           expect(await prisma.artifact.count({ where: { runId: assignedRunId } })).toBe(
             artifactCount,
           );
@@ -424,7 +423,7 @@ pg("ticket improvement through chat and background jobs (PostgreSQL)", () => {
           const costs = await prisma.usageRecord.findMany({
             where: { spaceId, userId, parentRunId: assignedRunId, operationKind: "learning" },
           });
-          expect(costs).toHaveLength(13);
+          expect(costs).toHaveLength(runtime.proposalCalls + runtime.comparisonCalls);
           expect(costs.every((cost) => cost.totalTokens === 30 && cost.costUsd === 0)).toBe(true);
         });
       } finally {

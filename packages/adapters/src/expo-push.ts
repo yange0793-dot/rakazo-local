@@ -8,6 +8,7 @@ import type {
   NotificationProvider,
 } from "@rakazo/adapter-kit";
 import { pushReceiptJob } from "@rakazo/adapter-kit";
+import { isLocalInstallSessionId } from "@rakazo/contracts";
 import { getLogger } from "@rakazo/logging";
 import type { IncomingCallPush, VoipPushProvider } from "./apns-voip.js";
 import { combineSignals } from "./connector-safety.js";
@@ -221,8 +222,10 @@ export class ExpoPushProvider implements NotificationProvider {
         if (device.userId !== userId || !(Date.parse(call.expiresAt) > Date.now())) return;
         // PushKit makes every VoIP push ring, so only Android's data push can stop a ring.
         if (call.ended && device.platform !== "android") return;
-        const expires = await this.sessionExpiresAt?.(device.sessionId);
-        if (!expires || expires.getTime() <= Date.now()) return;
+        if (!isLocalInstallSessionId(device.sessionId)) {
+          const expires = await this.sessionExpiresAt?.(device.sessionId);
+          if (!expires || expires.getTime() <= Date.now()) return;
+        }
         // Re-read after the session lookup: sign-out or device handover may have won.
         const current = await this.tokens.devices?.(userId);
         if (
@@ -439,7 +442,7 @@ export class ExpoPushProvider implements NotificationProvider {
   private async deliverableToken(userId: string): Promise<PushRecord | undefined> {
     const saved = await this.tokens.load(userId);
     if (!saved?.token) return undefined;
-    if (!saved.sessionId) return saved;
+    if (!saved.sessionId || isLocalInstallSessionId(saved.sessionId)) return saved;
     if (!this.sessionExpiresAt) return undefined;
     let expiresAt: Date | null;
     try {

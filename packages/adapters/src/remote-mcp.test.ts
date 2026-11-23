@@ -152,7 +152,7 @@ describe("remote MCP URL policy", () => {
   });
 
   it.each([
-    "http://127.0.0.1:3100/api/auth/get-session",
+    "http://127.0.0.1:3100/api/local-identity",
     "http://localhost:3100/mcp",
     "http://[::1]:3100/mcp",
     "https://localhost:3100/mcp",

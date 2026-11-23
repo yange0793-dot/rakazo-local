@@ -1,10 +1,16 @@
 import { expect, test } from "@playwright/test";
-import { captureScreenshot, completeOnboarding, openUserSettings, rpc, signup } from "./helpers";
+import {
+  captureScreenshot,
+  completeOnboarding,
+  openLocalWorkspace,
+  openUserSettings,
+  rpc,
+} from "./helpers";
 
 test("shows the spending limit once a card is saved, sets a monthly limit, and lists a payment", async ({
   page,
 }, testInfo) => {
-  await signup(page, `spending-limit-${Date.now()}@rakazo.test`, "password12", "Spender");
+  await openLocalWorkspace(page, "Spender");
   await completeOnboarding(page);
   const settings = await openUserSettings(page);
   await settings.getByTestId("settings-nav-confirmations").click();

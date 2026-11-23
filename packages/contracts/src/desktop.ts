@@ -108,11 +108,6 @@ export interface RakazoDesktop {
     /** The language the page shows, so the app's own menus, dialogs and setup window follow it. */
     set: (locale: string) => Promise<void>;
   };
-  /** Optional for compatibility with older desktop releases. */
-  passkeys?: {
-    /** Relying parties this build is associated with for system passkeys (macOS); others fail. */
-    rpIds: () => Promise<string[]>;
-  };
   /** Absent on older desktop releases. */
   server?: {
     /** Opens the desktop setup window to pick another Rakazo server. */

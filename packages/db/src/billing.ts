@@ -585,7 +585,7 @@ export async function organizationOwnerHadTrial(
   return false;
 }
 
-/** Better Auth stores roles as a comma-separated list. */
+/** Membership roles are stored as a comma-separated list. */
 export function isOwnerRole(role: string): boolean {
   return role
     .split(",")

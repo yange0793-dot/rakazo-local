@@ -10,18 +10,17 @@ vi.mock("expo-secure-store", () => ({
   deleteItemAsync: vi.fn(),
 }));
 vi.mock("./api-server", () => ({}));
-vi.mock("./api-auth", () => ({}));
 vi.mock("./api-live", () => ({}));
 vi.mock("./api", () => ({
   currentApiBase: () => "https://app.example.test",
   captureApiRequestContext: async () => ({
     apiBase: "https://app.example.test",
     sessionGeneration: session.currentSessionGeneration(),
-    headers: { authorization: `Bearer ${await session.loadSessionToken()}` },
+    headers: { "x-rakazo-install-id": await session.loadLocalInstallSessionId() },
   }),
   fetchMobileJson: async () => ({
     response: Response.json({}),
-    body: { user: { id: "account-a" } },
+    body: { id: "account-a" },
   }),
   selectedSpaceId: () => "space-a",
 }));
@@ -54,7 +53,6 @@ beforeEach(async () => {
   session.registerSessionDiskCache((sameAccount) => {
     if (!sameAccount) return lastBot.clearLastBot();
   });
-  await session.saveSessionToken("session-a");
   await lastBot.saveLastBotId("researcher", "space-a");
 });
 
@@ -85,20 +83,19 @@ async function stall(operation: "write" | "delete") {
 
 describe("stalled last-bot storage", () => {
   it.each(["write", "delete"] as const)(
-    "does not block credentials on a never-settling %s",
+    "does not block an endpoint switch on a never-settling %s",
     async (operation) => {
       await stall(operation);
       const signedOut = vi.fn();
-      void session.clearSessionToken().then(signedOut);
+      void session.changeLocalEndpoint(() => {}).then(signedOut);
       await vi.advanceTimersByTimeAsync(1_000);
-      expect(saved.has("rakazo.session_token")).toBe(false);
-      expect(signedOut).toHaveBeenCalledExactlyOnceWith(true);
+      expect(signedOut).toHaveBeenCalledOnce();
 
       const signedIn = vi.fn();
-      void session.saveSessionToken("session-b").then(signedIn);
+      void session.changeLocalEndpoint(() => {}).then(signedIn);
       await vi.advanceTimersByTimeAsync(1_000);
       expect(signedIn).toHaveBeenCalledOnce();
-      expect(await session.loadSessionToken()).toBe("session-b");
+      expect(await session.loadLocalInstallSessionId()).toMatch(/^rakazo-local-install:/);
     },
   );
 
@@ -106,7 +103,7 @@ describe("stalled last-bot storage", () => {
     "returns no target on a never-settling %s",
     async (operation) => {
       await stall(operation);
-      void session.clearSessionToken();
+      void session.changeLocalEndpoint(() => {});
       const loaded = vi.fn();
       void lastBot.loadLastBotId().then(loaded);
       await vi.advanceTimersByTimeAsync(1_000);

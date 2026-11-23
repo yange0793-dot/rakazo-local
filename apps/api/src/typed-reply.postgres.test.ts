@@ -56,7 +56,6 @@ describe.skipIf(!enabled)("typed replies to waiting cards (PostgreSQL)", () => {
       provisionMessagingIdentity(
         prisma,
         { provider: "test", address: `typed-reply-${randomUUID()}` },
-        { signupsEnabled: undefined, signupAllowlist: undefined },
       ),
     );
     ({ botId, threadId } = identity);

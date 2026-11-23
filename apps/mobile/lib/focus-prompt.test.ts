@@ -9,7 +9,6 @@ import {
 } from "./focus-prompt";
 
 vi.mock("./api-server", () => ({}));
-vi.mock("./api-auth", () => ({}));
 vi.mock("./api-live", () => ({}));
 vi.mock("./api", () => ({ rpc: vi.fn().mockResolvedValue({}) }));
 

@@ -1,6 +1,5 @@
 import type { AdapterContext, AgentHomeStore, ArtifactStore } from "@rakazo/adapter-kit";
 import { resolveBotWorkspacePath } from "@rakazo/adapters";
-import type { Auth } from "@rakazo/auth";
 import type {
   AccountExportExecutables,
   AccountExportManifest,
@@ -24,6 +23,7 @@ import {
 import { getLogger } from "@rakazo/logging";
 import { Zip, ZipDeflate } from "fflate";
 import type { Hono } from "hono";
+import { consumeLocalAccountExportToken } from "./local-export-token.js";
 
 export type AccountExportStores = {
   artifacts: Pick<ArtifactStore, "get">;
@@ -222,11 +222,10 @@ export function mountAccountExportRoute(
   app: Hono,
   deps: AccountExportStores & {
     prisma: PrismaClient;
-    auth: Pick<Auth, "consumeAccountExportToken">;
   },
 ): void {
   app.get("/api/account/export", async (c) => {
-    const userId = await deps.auth.consumeAccountExportToken(c.req.query("token") ?? "");
+    const userId = await consumeLocalAccountExportToken(deps.prisma, c.req.query("token") ?? "");
     // A link issued just before the account was deactivated no longer downloads it.
     if (!userId || (await accountDeactivated(deps.prisma, userId)))
       return c.text("Export link expired", 410, { "cache-control": "no-store" });

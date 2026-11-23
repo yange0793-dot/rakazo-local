@@ -8,6 +8,7 @@ This process returns only candidate ids/revisions/scores, never indexed content.
 from __future__ import annotations
 
 import argparse
+from concurrent.futures import Future
 import hashlib
 import hmac
 import ipaddress
@@ -224,16 +225,36 @@ class LocalIndex:
         self.embedder = embedder
         # One local inference resource; backend writes use the backend's own SQLite locks.
         self.embedding_lock = threading.Lock()
+        self.pending_embeddings: dict[str, Future] = {}
+        self.pending_lock = threading.Lock()
 
     def vector(self, text: str) -> list[float]:
-        with self.embedding_lock:
-            output = self.embedder(input=[text])
-        if len(output) != 1:
-            raise RuntimeError("Embedding returned an unexpected row count.")
-        vector = [float(value) for value in output[0]]
-        if not vector or not all(math.isfinite(value) for value in vector) or not any(vector):
-            raise RuntimeError("Embedding returned an invalid vector.")
-        return vector
+        # Facts and lessons search different namespaces with the same query. Share only
+        # overlapping inference; each caller still performs its own scoped, current search.
+        with self.pending_lock:
+            pending = self.pending_embeddings.get(text)
+            owner = pending is None
+            if owner:
+                pending = Future()
+                self.pending_embeddings[text] = pending
+        if not owner:
+            return pending.result()
+        try:
+            with self.embedding_lock:
+                output = self.embedder(input=[text])
+            if len(output) != 1:
+                raise RuntimeError("Embedding returned an unexpected row count.")
+            vector = [float(value) for value in output[0]]
+            if not vector or not all(math.isfinite(value) for value in vector) or not any(vector):
+                raise RuntimeError("Embedding returned an invalid vector.")
+            pending.set_result(vector)
+            return vector
+        except BaseException as exc:
+            pending.set_exception(exc)
+            raise
+        finally:
+            with self.pending_lock:
+                del self.pending_embeddings[text]
 
     @staticmethod
     def storage_id(namespace: str, index_id: str) -> str:

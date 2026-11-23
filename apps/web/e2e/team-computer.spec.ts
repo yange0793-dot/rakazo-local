@@ -5,15 +5,15 @@ import {
   captureScreenshot,
   completeOnboarding,
   openBotPanelTab,
+  openLocalWorkspace,
   realSandboxTimeout,
   rpc,
-  signup,
 } from "./helpers";
 
 test("opening and releasing the computer keep a view-only stream; a failed release can be retried", async ({
   page,
 }, testInfo) => {
-  await signup(page, `view-only-${Date.now()}@rakazo.test`, "password12", "Computer");
+  await openLocalWorkspace(page, "Computer");
   await completeOnboarding(page);
   let takeovers = 0;
   page.on("request", (request) => {
@@ -82,14 +82,8 @@ test("opening and releasing the computer keep a view-only stream; a failed relea
 });
 
 test("an active Team bot must be stopped before user takeover", async ({ page }, testInfo) => {
-  const stamp = Date.now();
 
-  await signup(
-    page,
-    `active-team-control-${stamp}@rakazo.test`,
-    "password12",
-    "Active Team Control",
-  );
+  await openLocalWorkspace(page, "Active Team Control");
   await completeOnboarding(page);
   const chiefId = activeBotId(page);
 

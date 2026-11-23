@@ -1,6 +1,6 @@
 import type { Locator, Page } from "@playwright/test";
 import { expect, test } from "@playwright/test";
-import { captureScreenshot, completeOnboarding, openNewSpace, signup } from "./helpers";
+import { captureScreenshot, completeOnboarding, openLocalWorkspace, openNewSpace } from "./helpers";
 
 function isPresented(error: Locator) {
   return error.evaluate((element) => {
@@ -24,8 +24,7 @@ function seenRunErrorCount(page: Page) {
 }
 
 test("a failed run is visible once without returning after reload", async ({ page }, testInfo) => {
-  const stamp = Date.now();
-  await signup(page, `run-failure-${stamp}@rakazo.test`, "password12", "Run Failure");
+  await openLocalWorkspace(page, "Run Failure");
   await completeOnboarding(page);
 
   // "fail this run" makes the scripted runtime throw, so the run fails the same way a
@@ -69,8 +68,7 @@ test("a failed run is visible once without returning after reload", async ({ pag
 });
 
 test("a covered run error is not remembered until it is presented", async ({ page }, testInfo) => {
-  const stamp = Date.now();
-  await signup(page, `covered-run-failure-${stamp}@rakazo.test`, "password12", "Covered Failure");
+  await openLocalWorkspace(page, "Covered Failure");
   await completeOnboarding(page);
   await page.setViewportSize({ width: 390, height: 844 });
 
@@ -142,7 +140,7 @@ test("a covered run error is not remembered until it is presented", async ({ pag
 test("an operator usage cap explains the pause without offering a billing upgrade", async ({
   page,
 }, testInfo) => {
-  await signup(page, `usage-cap-${Date.now()}@rakazo.test`, "password12", "Usage Limit");
+  await openLocalWorkspace(page, "Usage Limit");
   await completeOnboarding(page);
   // Use the normal failure fixture and replace only the server's error message.
   await page.route("**/rpc/threads/get", async (route) => {

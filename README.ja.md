@@ -157,7 +157,7 @@ cp .env.example .env
 `POSTGRES_PASSWORD` と `POSTGRES_APP_PASSWORD` に `openssl rand -hex 16` で生成した 2 つの値を設定し、
 それらを `DATABASE_MIGRATION_URL` と `DATABASE_URL` に記入します。アプリは専用の
 `rakazo_app` ログインで接続し、行レベルセキュリティが適用されます。マイグレーションはオーナーとして実行されます
-（[データベースロール](docs/self-host-configuration.md#database-roles)）。`BETTER_AUTH_SECRET`、`ENCRYPTION_KEY`、`SCREEN_PROXY_SECRET` には
+（[データベースロール](docs/self-host-configuration.md#database-roles)）。`ENCRYPTION_KEY`、`SCREEN_PROXY_SECRET` には
 それぞれ独立した長いランダム値を設定します。Docker サンドボックスには専用の
 `SANDBOX_SUPERVISOR_TOKEN` も必要です。`OPENROUTER_API_KEY` を設定するか、オンボーディング中に
 対応するモデルプロバイダーを接続することもできます。
@@ -337,7 +337,6 @@ pnpm test:e2e
 - Electron、Expo
 - Hono、oRPC
 - PostgreSQL、Prisma
-- Better Auth
 - Graphile Worker
 - Pi
 - Docker、E2B、Daytona、CreateOS、Boat

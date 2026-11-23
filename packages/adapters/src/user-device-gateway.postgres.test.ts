@@ -60,14 +60,7 @@ describePostgres("user devices (PostgreSQL)", () => {
   afterAll(async () => close?.());
 
   it("routes a user's request through the connection row and forgets revoked devices", async () => {
-    const session = await prisma.session.create({
-      data: {
-        id: `${suffix}-route-session`,
-        token: `${suffix}-route-session-token`,
-        userId,
-        expiresAt: new Date(Date.now() + 60_000),
-      },
-    });
+    const installId = `rakazo-local-install:${suffix}-route-session`;
     const token = createUserDeviceToken();
     const device = await prisma.userDevice.create({
       data: {
@@ -75,7 +68,7 @@ describePostgres("user devices (PostgreSQL)", () => {
         name: "Laptop",
         platform: "linux",
         tokenHash: hashUserDeviceToken(token),
-        sessionId: session.id,
+        sessionId: installId,
       },
     });
     const hub = new UserDeviceHub({ prisma: raw, address: "http://127.0.0.1:1" });
@@ -124,15 +117,8 @@ describePostgres("user devices (PostgreSQL)", () => {
     await expect(hub.authenticate(`Bearer ${token}`)).resolves.toBeNull();
   });
 
-  it("revokes a connected device once the sign-in that paired it is gone", async () => {
-    const session = await prisma.session.create({
-      data: {
-        id: `${suffix}-session`,
-        token: `${suffix}-session-token`,
-        userId,
-        expiresAt: new Date(Date.now() + 60_000),
-      },
-    });
+  it("retires an obsolete pairing on the next connection check", async () => {
+    const installId = `rakazo-local-install:${suffix}-session`;
     const token = createUserDeviceToken();
     const device = await prisma.userDevice.create({
       data: {
@@ -140,7 +126,7 @@ describePostgres("user devices (PostgreSQL)", () => {
         name: "Desktop",
         platform: "darwin",
         tokenHash: hashUserDeviceToken(token),
-        sessionId: session.id,
+        sessionId: installId,
       },
     });
     const hub = new UserDeviceHub({
@@ -157,7 +143,7 @@ describePostgres("user devices (PostgreSQL)", () => {
 
     installSecurityEventStore(raw);
     // Deleted without the sign-out hook, as if its cleanup had failed.
-    await prisma.session.delete({ where: { id: session.id } });
+    await prisma.userDevice.update({where:{id:device.id},data:{sessionId:"retired-account-session"}});
     await vi.waitFor(() =>
       expect(socket.sent).toContainEqual({ type: "revoked", reason: "session-ended" }),
     );
@@ -180,15 +166,8 @@ describePostgres("user devices (PostgreSQL)", () => {
     await expect(hub.authenticate(`Bearer ${token}`)).resolves.toBeNull();
   });
 
-  it("closes a device whose sign-out landed while it was connecting", async () => {
-    const session = await prisma.session.create({
-      data: {
-        id: `${suffix}-racing`,
-        token: `${suffix}-racing-token`,
-        userId,
-        expiresAt: new Date(Date.now() + 60_000),
-      },
-    });
+  it("closes a device revoked while it was connecting", async () => {
+    const installId = `rakazo-local-install:${suffix}-racing`;
     const token = createUserDeviceToken();
     const device = await prisma.userDevice.create({
       data: {
@@ -196,7 +175,7 @@ describePostgres("user devices (PostgreSQL)", () => {
         name: "Desktop",
         platform: "darwin",
         tokenHash: hashUserDeviceToken(token),
-        sessionId: session.id,
+        sessionId: installId,
       },
     });
     const hub = new UserDeviceHub({ prisma: raw, address: "http://127.0.0.1:1" });
@@ -205,7 +184,6 @@ describePostgres("user devices (PostgreSQL)", () => {
     expect(authenticated).toMatchObject({ id: device.id });
 
     // Sign-out revokes it after authentication but before the socket is attached.
-    await prisma.session.delete({ where: { id: session.id } });
     await prisma.userDevice.update({
       where: { id: device.id },
       data: { revokedAt: new Date(), revokedBy: "session" },

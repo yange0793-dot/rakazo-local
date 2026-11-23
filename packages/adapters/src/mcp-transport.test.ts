@@ -500,14 +500,14 @@ describe("MCP transport seam", () => {
       const origin = `http://${host}:3100`;
       const fetchImpl = vi.fn(async () => Response.json({ ok: true }));
       const safeFetch = secureFetch(
-        new URL(`${origin}/api/auth/get-session`),
+        new URL(`${origin}/api/local-identity`),
         { allowHttpLocalhost: true, allowLocalHttpCredentials: true },
         {},
         { fetch: fetchImpl, resolveHostname: vi.fn() },
       );
       try {
         await expect(
-          safeFetch(`${origin}/api/auth/get-session`, { method: "POST", body: "{}" }),
+          safeFetch(`${origin}/api/local-identity`, { method: "POST", body: "{}" }),
         ).rejects.toThrow("HTTPS");
         expect(fetchImpl).not.toHaveBeenCalled();
       } finally {

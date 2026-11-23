@@ -1,5 +1,5 @@
 import { expect, test } from "@playwright/test";
-import { captureScreenshot, signup } from "./helpers";
+import { captureScreenshot, openLocalWorkspace } from "./helpers";
 
 test.afterEach(async ({ page }) => {
   // Not "wait": a handler whose fulfill() lost a race to the route teardown never settles,
@@ -22,8 +22,7 @@ test("onboarding cannot continue with an empty or failed model catalog", async (
   await page.route("**/rpc/models/list", (route) =>
     unavailable === "failed" ? route.abort() : route.fulfill({ json: { json: [] } }),
   );
-  const stamp = Date.now();
-  await signup(page, `catalog-${stamp}@rakazo.test`, "password12", "Model setup");
+  await openLocalWorkspace(page, "Model setup");
 
   for (const next of ["empty", "failed"] as const) {
     if (next === "failed") {
@@ -43,8 +42,7 @@ test("Ollama Cloud onboarding requires a key before continuing", async ({ page }
     const body = (await response.json()) as { json: Record<string, unknown> };
     await route.fulfill({ response, json: { json: { ...body.json, needsModel: true } } });
   });
-  const stamp = Date.now();
-  await signup(page, `ollama-${stamp}@rakazo.test`, "password12", "Model setup");
+  await openLocalWorkspace(page, "Model setup");
   await expect(page.getByRole("heading", { name: "Connect a model" })).toBeVisible();
   await page.getByRole("combobox", { name: "Provider" }).click();
   await page.getByRole("option", { name: "Ollama Cloud", exact: true }).click();
@@ -76,7 +74,7 @@ test("Rakazo credits are chosen like a provider, with nothing else to fill in", 
     funding = route.request().postDataJSON().json;
     await route.fulfill({ json: { json: { ok: true } } });
   });
-  await signup(page, `credits-${Date.now()}@rakazo.test`, "password12", "Credits");
+  await openLocalWorkspace(page, "Credits");
   await expect(page.getByRole("heading", { name: "Connect a model" })).toBeVisible({
     timeout: 20_000,
   });

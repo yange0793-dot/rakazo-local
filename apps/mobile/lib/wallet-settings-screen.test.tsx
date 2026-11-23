@@ -23,7 +23,6 @@ vi.mock("expo-router", () => ({
   },
 }));
 vi.mock("./api-server", () => ({}));
-vi.mock("./api-auth", () => ({}));
 vi.mock("./api-live", () => ({}));
 vi.mock("./api", () => ({
   rpc: (method: string) => {

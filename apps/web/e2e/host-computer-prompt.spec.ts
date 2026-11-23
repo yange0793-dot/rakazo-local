@@ -1,15 +1,15 @@
 import { expect, test } from "@playwright/test";
-import { captureScreenshot, completeOnboarding, openUserSettings, signup } from "./helpers";
+import {
+  captureScreenshot,
+  completeOnboarding,
+  openLocalWorkspace,
+  openUserSettings,
+} from "./helpers";
 
 // win32 shares the non-darwin "this computer" branch with linux.
 for (const platform of ["darwin", "linux"]) {
   test(`host computer choice explains file access on ${platform}`, async ({ page }, testInfo) => {
-    await signup(
-      page,
-      `host-choice-${platform}-${Date.now()}@rakazo.test`,
-      "password12",
-      "Host Tester",
-    );
+    await openLocalWorkspace(page, "Host Tester");
     await completeOnboarding(page);
     await page.addInitScript((platform) => {
       Object.defineProperty(window, "rakazoDesktop", {
@@ -106,7 +106,7 @@ for (const platform of ["darwin", "linux"]) {
 }
 
 test("a saved host choice closes when refreshing the profile fails", async ({ page }) => {
-  await signup(page, `host-choice-refresh-${Date.now()}@rakazo.test`, "password12", "Host Tester");
+  await openLocalWorkspace(page, "Host Tester");
   await completeOnboarding(page);
   await page.addInitScript(() => {
     Object.defineProperty(window, "rakazoDesktop", {

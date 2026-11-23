@@ -14,7 +14,6 @@ import { useThreadLiveSubscription } from "./thread-live";
 import type { PinnedThreadWindow } from "./thread-window";
 
 vi.mock("./api-server", () => ({}));
-vi.mock("./api-auth", () => ({}));
 vi.mock("./api", () => ({
   rpc: vi.fn(),
 }));

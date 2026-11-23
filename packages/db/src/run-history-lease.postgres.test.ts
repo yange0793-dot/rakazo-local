@@ -39,7 +39,6 @@ describePostgres("run history writes under a lease (PostgreSQL)", () => {
       provisionMessagingIdentity(
         prisma,
         { provider: "sendblue", address },
-        { signupsEnabled: undefined, signupAllowlist: undefined },
       ),
     ));
     provisioned = true;

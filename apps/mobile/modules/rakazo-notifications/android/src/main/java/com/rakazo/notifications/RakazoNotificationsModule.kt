@@ -33,8 +33,8 @@ class RakazoNotificationsModule : Module() {
       if (!isAllowedNotificationEndpoint(endpoint)) throw IllegalArgumentException("Invalid notification endpoint")
       val storage = NotificationStorage(context())
       storage.endpoint = endpoint
-      storage.token = headers["authorization"]?.removePrefix("Bearer ") ?: ""
-      storage.headers = org.json.JSONObject(headers.filterKeys { it.lowercase() != "authorization" && it.lowercase() != "x-rakazo-space-id" }).toString()
+      storage.token = headers["x-rakazo-install-id"] ?: ""
+      storage.headers = org.json.JSONObject(headers.filterKeys { it.lowercase() != "x-rakazo-install-id" && it.lowercase() != "x-rakazo-space-id" }).toString()
     }
     AsyncFunction("reportIncomingCall") { call: Map<String, String> ->
       IncomingCalls.report(context(), org.json.JSONObject(call), fromApp = true)

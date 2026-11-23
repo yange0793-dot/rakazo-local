@@ -9,7 +9,7 @@ import { getSnapshot as getCallSnapshot, startCall } from "./call-session";
 import { loadCallGreetingEnabled } from "./call-sounds";
 import type { MobileBot, MobileMessage, MobileSnapshot } from "./mobile-types";
 import { blockText } from "./mobile-types";
-import { clearSessionToken, currentSessionGeneration, saveSessionToken } from "./session";
+import {changeLocalEndpoint, currentSessionGeneration} from "./session";
 import { useAutoSpeakReply, useSpeakMessages, useThreadVoiceCall } from "./thread-voice";
 import { speakQueue, speakText } from "./voice";
 import { takeShortcutVoiceChat } from "./voice-chat-intent";
@@ -35,7 +35,6 @@ vi.mock("./mobile-types", () => ({
   blockText: vi.fn(),
 }));
 vi.mock("./api-server", () => ({}));
-vi.mock("./api-auth", () => ({}));
 vi.mock("./api-live", () => ({}));
 vi.mock("./api", () => ({
   captureApiRequestContext: vi.fn(async () => ({
@@ -101,7 +100,6 @@ describe("useThreadVoiceCall hand-over", () => {
     vi.mocked(startCall).mockClear();
     vi.mocked(takeShortcutVoiceChat).mockReset().mockReturnValue(false);
     vi.mocked(loadCallGreetingEnabled).mockReset().mockResolvedValue(true);
-    await saveSessionToken("fake-token-a");
     root = createRoot(document.createElement("div"));
   });
 
@@ -172,10 +170,10 @@ describe("useThreadVoiceCall hand-over", () => {
     );
   });
 
-  it("drops a hand-over queued before a sign-out", async () => {
+  it("drops a hand-over queued before a server switch", async () => {
     render("riley");
     openBotChat?.(max, true);
-    await clearSessionToken();
+    await changeLocalEndpoint(() => {});
     render("max");
     await flush();
 
@@ -233,7 +231,6 @@ describe("read-aloud while a call is active", () => {
     vi.mocked(speakText).mockClear();
     vi.mocked(speakQueue).mockClear();
     vi.mocked(blockText).mockReturnValue("read from here");
-    await saveSessionToken("fake-token-a");
     root = createRoot(document.createElement("div"));
   });
 

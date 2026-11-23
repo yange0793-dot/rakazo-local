@@ -1,6 +1,11 @@
 import type { Route } from "@playwright/test";
 import { expect, test } from "@playwright/test";
-import { captureScreenshot, completeOnboarding, openBotPanelTab, signup } from "./helpers";
+import {
+  captureScreenshot,
+  completeOnboarding,
+  openBotPanelTab,
+  openLocalWorkspace,
+} from "./helpers";
 
 async function patchJson(route: Route, patch: (body: { json?: Record<string, unknown> }) => void) {
   const response = await route.fetch();
@@ -21,7 +26,7 @@ function stopComputer(computer: unknown) {
 }
 
 test("unavailable computers say so plainly and link setup help", async ({ page }, testInfo) => {
-  await signup(page, `computers-off-${Date.now()}@rakazo.test`, "password12", "Computers Off");
+  await openLocalWorkspace(page, "Computers Off");
   await completeOnboarding(page);
   let sandboxProvider = "none";
   let meFails = false;

@@ -7,7 +7,7 @@ import { useNavigate, useParams } from "react-router-dom";
 import { SharedSpaceRules } from "../components/SharedSpaceRules";
 import { rpc, selectSpace } from "../lib/rpc";
 import { errorText } from "../lib/user-error";
-import { AuthFrame, submitClass } from "./Auth";
+import { FormFrame, submitClass } from "./FormFrame";
 
 // An invite names its own space, so a remembered one that is no longer available must not
 // send the request through space recovery and away from the invite.
@@ -86,7 +86,7 @@ export function InvitePage() {
 
   if (state.kind === "invalid" || state.kind === "error") {
     return (
-      <AuthFrame
+      <FormFrame
         title={
           state.kind === "invalid" ? (
             <Trans>This invite link is no longer valid.</Trans>
@@ -103,13 +103,13 @@ export function InvitePage() {
         <Button type="submit" className={submitClass}>
           {state.kind === "invalid" ? <Trans>Open Rakazo</Trans> : <Trans>Retry</Trans>}
         </Button>
-      </AuthFrame>
+      </FormFrame>
     );
   }
 
   const { spaceName, inviterName } = state.preview;
   return (
-    <AuthFrame title={<Trans>Join {spaceName}</Trans>} onSubmit={join}>
+    <FormFrame title={<Trans>Join {spaceName}</Trans>} onSubmit={join}>
       <p className="-mt-6 text-center text-muted-foreground">
         <Trans>{inviterName} invited you</Trans>
       </p>
@@ -122,6 +122,6 @@ export function InvitePage() {
       <Button type="submit" disabled={joining} className={cn(submitClass, "mt-6")}>
         <Trans>Join</Trans>
       </Button>
-    </AuthFrame>
+    </FormFrame>
   );
 }

@@ -85,7 +85,7 @@ describe("service worker", () => {
   it("never handles live data, auth callbacks or the screen proxy", async () => {
     network = vi.fn(async () => new Response("live"));
     const sw = setup();
-    for (const path of ["/api/auth/callback/github?code=1", "/rpc/threads", "/novnc/session/x"]) {
+    for (const path of ["/api/mcp/oauth/callback?code=1", "/rpc/threads", "/novnc/session/x"]) {
       expect(await sw.fetch(path, "navigate")).toBeUndefined();
       expect(await sw.fetch(path)).toBeUndefined();
     }

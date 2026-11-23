@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import type { AdapterContext, ComputerRef, SandboxProvider } from "@rakazo/adapter-kit";
 import { isSandboxProviderOutage } from "@rakazo/adapter-kit";
 import type { ComputerMode } from "@rakazo/contracts";
@@ -38,6 +39,8 @@ export function positiveIntegerArg(value: unknown): number | undefined {
 type ReadFileRangeResult = {
   path: string;
   content: string;
+  sha256: string | null;
+  sizeBytes: number;
   totalLines: number;
   startLine: number;
   endLine: number;
@@ -54,6 +57,7 @@ function readFileRangeResult(
   filePath: string,
   text: string,
   args: Record<string, unknown>,
+  metadata: Pick<ReadFileRangeResult, "sha256" | "sizeBytes" | "note">,
 ): ReadFileRangeResult | { error: string; path: string; totalLines: number } {
   const lines = text.split("\n");
   const totalLines = lines.length;
@@ -73,13 +77,19 @@ function readFileRangeResult(
     return {
       path: filePath,
       content: lines.slice(first, first + count).join("\n"),
+      ...metadata,
       totalLines,
       startLine: offset,
       endLine,
       ...(endLine < totalLines
         ? {
             nextOffset: endLine + 1,
-            note: `the file continues; call read_file again with offset: ${endLine + 1}`,
+            note: [
+              metadata.note,
+              `the file continues; call read_file again with offset: ${endLine + 1}`,
+            ]
+              .filter(Boolean)
+              .join("; "),
           }
         : {}),
     };
@@ -100,13 +110,18 @@ function readFileRangeResult(
   // Not even one whole line fits: cut the first requested line and say so.
   const cutBase = {
     path: filePath,
+    ...metadata,
     totalLines,
     startLine: offset,
     endLine: offset,
     ...(offset < totalLines ? { nextOffset: offset + 1 } : {}),
-    note:
+    note: [
+      metadata.note,
       `line ${offset} is longer than the result limit and is cut` +
-      (offset < totalLines ? `; continue with offset: ${offset + 1}` : ""),
+        (offset < totalLines ? `; continue with offset: ${offset + 1}` : ""),
+    ]
+      .filter(Boolean)
+      .join("; "),
   };
   const budget = TOOL_RESULT_TEXT_LIMIT - JSON.stringify({ ...cutBase, content: "" }).length;
   return { ...cutBase, content: jsonEscapedPrefix(lines[first] ?? "", budget) };
@@ -218,7 +233,14 @@ export async function readFileFromTool(
   }
   // Redact the whole decoded text before any line is selected, so a secret is never
   // split across a chunk boundary by the range cut.
-  return readFileRangeResult(filePath, redactSecrets(decoded, runSecrets), args);
+  const redacted = redactSecrets(decoded, runSecrets);
+  return readFileRangeResult(filePath, redacted, args, {
+    sha256: redacted === decoded ? createHash("sha256").update(bytes).digest("hex") : null,
+    sizeBytes: bytes.byteLength,
+    ...(redacted === decoded
+      ? {}
+      : { note: "sha256 omitted because secret redaction changed content" }),
+  });
 }
 
 /** render_plot: returns the chart guide or catalog, or renders a chart into the workspace and chat. */

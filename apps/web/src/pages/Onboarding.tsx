@@ -1,12 +1,10 @@
 import { useLingui } from "@lingui/react/macro";
 import { useEffect, useId, useRef, useState } from "react";
 import { useNavigate, useParams } from "react-router-dom";
-import { AccountMenu } from "../components/AccountMenu";
 import { PageLoading } from "../components/PageLoading";
 import { SignupSurvey } from "../components/SignupSurvey";
 import type { ModelCatalogEntry } from "../lib/model-auth";
 import { rpc } from "../lib/rpc";
-import { useSignOut } from "../lib/sign-out";
 import { errorText } from "../lib/user-error";
 import { ensureFirstBot, FirstBotRetry } from "./onboarding/first-bot";
 import { ModelStep } from "./onboarding/model-step";
@@ -33,7 +31,6 @@ export function OnboardingPage() {
   });
   const { error, modelProbe, setError } = model;
   const createStartedRef = useRef(false);
-  const { signingOut, logOut } = useSignOut("/sign-in", setError);
 
   useEffect(() => {
     void Promise.all([rpc.me(), rpc.models.list().catch(() => [])])
@@ -96,7 +93,6 @@ export function OnboardingPage() {
 
   return (
     <div className="min-h-full bg-background px-6 py-12" data-rakazo-surface="onboarding">
-      <AccountMenu signingOut={signingOut} onLogOut={() => void logOut()} />
       <div className="mx-auto w-full max-w-[560px]">
         {step === "survey" ? <SignupSurvey onDone={() => setSurveyDone(true)} /> : null}
         {step === "model" ? <ModelStep model={model} fieldId={fieldId} /> : null}

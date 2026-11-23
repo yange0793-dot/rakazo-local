@@ -10,7 +10,6 @@
 | -------------------------- | ---------------------- |
 | `POSTGRES_PASSWORD`        | `openssl rand -hex 16` |
 | `POSTGRES_APP_PASSWORD`    | `openssl rand -hex 16` |
-| `BETTER_AUTH_SECRET`       | `openssl rand -hex 32` |
 | `ENCRYPTION_KEY`           | `openssl rand -hex 32` |
 | `SCREEN_PROXY_SECRET`      | `openssl rand -hex 32` |
 | `SANDBOX_SUPERVISOR_TOKEN` | `openssl rand -hex 32` |
@@ -21,12 +20,12 @@
 
 ```bash
 openssl rand -hex 16   # POSTGRES_PASSWORD, POSTGRES_APP_PASSWORD
-openssl rand -hex 32   # BETTER_AUTH_SECRET, ENCRYPTION_KEY, SCREEN_PROXY_SECRET, SANDBOX_SUPERVISOR_TOKEN
+openssl rand -hex 32   # ENCRYPTION_KEY, SCREEN_PROXY_SECRET, SANDBOX_SUPERVISOR_TOKEN
 ```
 
 ## ต้องไม่ซ้ำกัน
 
-`BETTER_AUTH_SECRET`, `ENCRYPTION_KEY`, `SCREEN_PROXY_SECRET`, `SANDBOX_SUPERVISOR_TOKEN` (และ `RAKAZO_UPDATER_TOKEN` ถ้าเปิด updater) ต้องเป็นค่าสุ่ม**คนละค่า**
+`ENCRYPTION_KEY`, `SCREEN_PROXY_SECRET`, `SANDBOX_SUPERVISOR_TOKEN` (และ `RAKAZO_UPDATER_TOKEN` ถ้าเปิด updater) ต้องเป็นค่าสุ่ม**คนละค่า**
 
 หมุน `ENCRYPTION_KEY` หลังมี credential เก็บไว้จะถอดรหัสไม่ได้
 
@@ -48,7 +47,6 @@ curl -fsS http://127.0.0.1:3100/internal/health
 
 ## กู้คืนโดยไม่พิมพ์ secret ซ้ำ
 
-- ลืมรหัส UI: ใช้ SMTP recovery ถ้ามี ไม่งั้นต้องแก้ที่ DB อย่าหมุน `BETTER_AUTH_SECRET` บน production โดยไม่จำเป็น
 - หาย `.env`: ใช้จาก backup เท่านั้น สร้าง secret ใหม่กับ volume เดิมจะทำให้รหัส DB และการเข้ารหัสไม่ตรงกัน
 - ย้ายเครื่อง: คัดลอก `.env` กับ volume พร้อมกัน
 

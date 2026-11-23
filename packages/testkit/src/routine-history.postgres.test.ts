@@ -4,7 +4,8 @@ import path from "node:path";
 import type { RoutineHistory } from "@rakazo/contracts";
 import type { PrismaClient } from "@rakazo/db";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import { sessionCookieHeader } from "./index.js";
+import { createTestSpace, testSpaceHeaders } from "./index.js";
+
 import { asSystem } from "./system-db.js";
 
 type App = { request: (input: string, init?: RequestInit) => Response | Promise<Response> };
@@ -20,7 +21,6 @@ describeHistory("routines.history late starts", () => {
   let app: App;
   let prisma: PrismaClient;
   let stop: () => Promise<void>;
-  const stamp = Date.now();
   const dataDir = mkdtempSync(path.join(tmpdir(), "rakazo-routine-history-"));
 
   beforeAll(async () => {
@@ -41,15 +41,15 @@ describeHistory("routines.history late starts", () => {
   });
 
   it("returns the due time a late run recorded, unchanged by later schedule edits", async () => {
-    const cookie = await signup(app, `routine-late-${stamp}@rakazo.test`, "Late User");
-    const bot = await rpc<{ id: string }>(app, cookie, "bots/create", {
+    const scope = await testSpace(app, "Late User");
+    const bot = await rpc<{ id: string }>(app, scope, "bots/create", {
       name: "Brief",
       title: "Brief",
       description: "",
       instructions: "",
       notifyOnFinish: false,
     });
-    const routine = await rpc<{ id: string }>(app, cookie, "routines/create", {
+    const routine = await rpc<{ id: string }>(app, scope, "routines/create", {
       botId: bot.id,
       name: "Morning brief",
       prompt: "Send the morning brief",
@@ -102,13 +102,13 @@ describeHistory("routines.history late starts", () => {
     const history = async () =>
       Object.fromEntries(
         (
-          await rpc<RoutineHistory>(app, cookie, "routines/history", { routineId: routine.id })
+          await rpc<RoutineHistory>(app, scope, "routines/history", { routineId: routine.id })
         ).runs.map((run) => [run.id, run.lateSince]),
       );
     const expected = { [late.id]: "2026-10-19T08:00:00.000Z", [onTime.id]: null };
     expect(await history()).toEqual(expected);
     // A later schedule edit does not rewrite what past runs recorded.
-    await rpc(app, cookie, "routines/update", {
+    await rpc(app, scope, "routines/update", {
       routineId: routine.id,
       crons: ["30 10 * * *"],
       timezone: "America/New_York",
@@ -117,22 +117,16 @@ describeHistory("routines.history late starts", () => {
   });
 });
 
-async function signup(app: App, email: string, name: string) {
-  const response = await app.request("/api/auth/sign-up/email", {
-    method: "POST",
-    headers: { "content-type": "application/json", origin: "http://127.0.0.1:5173" },
-    body: JSON.stringify({ email, password: "test-password-123", name }),
-  });
-  expect(response.status).toBeLessThan(400);
-  return sessionCookieHeader(response);
+async function testSpace(app: App, name = "Test") {
+  return createTestSpace(app, name);
 }
 
-async function rpc<T>(app: App, cookie: string, proc: string, body: unknown = {}): Promise<T> {
+async function rpc<T>(app: App, scope: string, proc: string, body: unknown = {}): Promise<T> {
   const res = await app.request(`/rpc/${proc}`, {
     method: "POST",
     headers: {
       "content-type": "application/json",
-      cookie,
+      ...testSpaceHeaders(scope),
       origin: "http://127.0.0.1:5173",
     },
     body: JSON.stringify({ json: body }),

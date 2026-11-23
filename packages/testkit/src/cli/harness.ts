@@ -99,11 +99,9 @@ async function main() {
     process.env.CLOUD_AGENT_PROVIDER = "emulator";
     delete process.env.CURSOR_API_KEY;
     process.env.COMPOSIO_API_KEY = "";
-    process.env.BETTER_AUTH_SECRET = "test-secret-test-secret-32chars!";
     process.env.ENCRYPTION_KEY = "test-encryption-key-test-encryption-key";
     process.env.SANDBOX_SUPERVISOR_TOKEN = "test-supervisor-token-test-32chars";
     process.env.SCREEN_PROXY_SECRET = "test-screen-proxy-secret-test-32chars";
-    process.env.BETTER_AUTH_URL = webOrigin;
     process.env.WEB_ORIGIN = webOrigin;
     process.env.API_PORT = String(apiPort);
     process.env.API_URL = `http://127.0.0.1:${apiPort}`;
@@ -111,8 +109,6 @@ async function main() {
     process.env.WEB_PORT = String(webPort);
     process.env.PLAYWRIGHT_BASE_URL = webOrigin;
     process.env.DATA_DIR = path.join(reportDir, "data");
-    process.env.SIGNUPS_ENABLED = "true";
-    process.env.SIGNUP_ALLOWLIST = "";
     // Model and speech fixtures listen on loopback, and most test accounts are not the owner.
     process.env.MCP_ALLOW_PRIVATE_ENDPOINT = "true";
     if (!integration) {

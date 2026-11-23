@@ -8,7 +8,7 @@ import {
   subscribeConfirmedSpaceSwitch,
 } from "./api-server";
 import { DEVICE_VOICE_KEY } from "./device-voice";
-import { clearSessionToken, restoreSessionToken, saveSessionToken } from "./session";
+import {changeLocalEndpoint} from "./session";
 import { getVoicePlaybackState, speakQueue } from "./voice";
 
 vi.mock("expo-localization", () => ({ getLocales: () => [{ languageTag: "en-US" }] }));
@@ -86,7 +86,6 @@ describe("read-aloud across session changes", () => {
     vi.mocked(SecureStore.deleteItemAsync).mockImplementation(
       async (key: string) => void secureStore.delete(key),
     );
-    await restoreSessionToken("");
   });
 
   afterEach(() => {
@@ -94,9 +93,8 @@ describe("read-aloud across session changes", () => {
     vi.unstubAllGlobals();
   });
 
-  it("stops the on-device queue when the session is cleared", async () => {
+  it("stops the on-device queue when the endpoint changes", async () => {
     secureStore.set(DEVICE_VOICE_KEY, "1");
-    await saveSessionToken("token-a");
     const utterances: Array<{ text: string; options: Parameters<typeof Speech.speak>[1] }> = [];
     vi.mocked(Speech.speak).mockImplementation((text, options) => {
       utterances.push({ text, options });
@@ -110,7 +108,7 @@ describe("read-aloud across session changes", () => {
     await vi.waitFor(() => expect(utterances).toHaveLength(1));
     expect(getVoicePlaybackState()).toMatchObject({ status: "playing", botId: "bot-a" });
 
-    await clearSessionToken();
+    await changeLocalEndpoint(() => {});
 
     expect(getVoicePlaybackState()).toEqual({ status: "idle", canPause: false });
     utterances[0]?.options?.onStopped?.();
@@ -121,7 +119,6 @@ describe("read-aloud across session changes", () => {
 
   it("stops the hosted queue without sending the queued replies to the next server", async () => {
     const serverA = await savedApiBase("https://a.example.test");
-    await saveSessionToken("token-a");
     secureStore.set(DEVICE_VOICE_KEY, "0");
     ControllableAudio.instances = [];
     const requests: string[] = [];
@@ -168,7 +165,6 @@ describe("read-aloud across session changes", () => {
 
   it("stops the on-device queue when the selection moves to another Space", async () => {
     await savedApiBase("https://a.example.test");
-    await saveSessionToken("token-a");
     await selectSpace("space-a");
     secureStore.set(DEVICE_VOICE_KEY, "1");
     const utterances: Array<{ text: string; options: Parameters<typeof Speech.speak>[1] }> = [];
@@ -193,7 +189,6 @@ describe("read-aloud across session changes", () => {
 
   it("keeps the queue when the same Space is selected again", async () => {
     await savedApiBase("https://a.example.test");
-    await saveSessionToken("token-a");
     await selectSpace("space-a");
     secureStore.set(DEVICE_VOICE_KEY, "1");
     const utterances: Array<{ text: string; options: Parameters<typeof Speech.speak>[1] }> = [];
@@ -220,7 +215,6 @@ describe("read-aloud across session changes", () => {
 
   it("stops the queue when a deleted organization's fallback adopts another Space", async () => {
     await savedApiBase("https://a.example.test");
-    await saveSessionToken("token-a");
     await selectSpace("space-a");
     secureStore.set(DEVICE_VOICE_KEY, "1");
     const utterances: Array<{ text: string; options: Parameters<typeof Speech.speak>[1] }> = [];
@@ -246,7 +240,6 @@ describe("read-aloud across session changes", () => {
 
   it("notifies once when a failed adoption persists on retry", async () => {
     await savedApiBase("https://a.example.test");
-    await saveSessionToken("token-a");
     await selectSpace("space-a");
     secureStore.set(DEVICE_VOICE_KEY, "1");
     const utterances: Array<{ text: string; options: Parameters<typeof Speech.speak>[1] }> = [];
@@ -300,7 +293,6 @@ describe("read-aloud across session changes", () => {
 
   it("lets a manual selection consume the pending origin, so a retry keeps its playback", async () => {
     await savedApiBase("https://a.example.test");
-    await saveSessionToken("token-a");
     await selectSpace("space-a");
     secureStore.set(DEVICE_VOICE_KEY, "1");
     const utterances: Array<{ text: string; options: Parameters<typeof Speech.speak>[1] }> = [];
@@ -361,7 +353,6 @@ describe("read-aloud across session changes", () => {
 
   it("stops the on-device queue when another account signs in", async () => {
     secureStore.set(DEVICE_VOICE_KEY, "1");
-    await saveSessionToken("token-a");
     const utterances: Array<{ text: string; options: Parameters<typeof Speech.speak>[1] }> = [];
     vi.mocked(Speech.speak).mockImplementation((text, options) => {
       utterances.push({ text, options });
@@ -373,7 +364,7 @@ describe("read-aloud across session changes", () => {
     ]);
     await vi.waitFor(() => expect(utterances).toHaveLength(1));
 
-    await saveSessionToken("token-b");
+    await changeLocalEndpoint(() => {});
 
     expect(getVoicePlaybackState()).toEqual({ status: "idle", canPause: false });
     utterances[0]?.options?.onStopped?.();
@@ -383,7 +374,6 @@ describe("read-aloud across session changes", () => {
 
   it("keeps a late prepare failure silent after the session is cleared", async () => {
     await savedApiBase("https://a.example.test");
-    await saveSessionToken("token-a");
     secureStore.set(DEVICE_VOICE_KEY, "0");
     let failPrepare: ((status: number) => void) | undefined;
     vi.stubGlobal(
@@ -410,7 +400,7 @@ describe("read-aloud across session changes", () => {
     await vi.waitFor(() => expect(failPrepare).toBeTypeOf("function"));
     expect(getVoicePlaybackState()).toMatchObject({ status: "playing", messageId: "m1" });
 
-    await clearSessionToken();
+    await changeLocalEndpoint(() => {});
     expect(getVoicePlaybackState()).toEqual({ status: "idle", canPause: false });
 
     failPrepare?.(401);
@@ -419,7 +409,6 @@ describe("read-aloud across session changes", () => {
 
   it("keeps a late clip failure silent after the session is cleared", async () => {
     await savedApiBase("https://a.example.test");
-    await saveSessionToken("token-a");
     secureStore.set(DEVICE_VOICE_KEY, "0");
     let failClip: ((status: number) => void) | undefined;
     vi.stubGlobal(
@@ -445,7 +434,7 @@ describe("read-aloud across session changes", () => {
     ]);
     await vi.waitFor(() => expect(failClip).toBeTypeOf("function"));
 
-    await clearSessionToken();
+    await changeLocalEndpoint(() => {});
     expect(getVoicePlaybackState()).toEqual({ status: "idle", canPause: false });
 
     failClip?.(401);
@@ -454,7 +443,6 @@ describe("read-aloud across session changes", () => {
 
   it("still reports a late prepare failure while the queue is current", async () => {
     await savedApiBase("https://a.example.test");
-    await saveSessionToken("token-a");
     secureStore.set(DEVICE_VOICE_KEY, "0");
     let failPrepare: ((status: number) => void) | undefined;
     vi.stubGlobal(

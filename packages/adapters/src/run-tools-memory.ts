@@ -376,7 +376,7 @@ export const memoryTools: ToolHandlers = {
         String(args.old_text ?? ""),
       );
       if ("error" in edit) return call.finish(edit);
-      const { content } = edit;
+      const content = redactSecrets(edit.content, ctx.secrets);
       if (content === (existing?.content ?? "")) return call.finish({ ok: true });
       try {
         await deps.memory.commit(
@@ -413,7 +413,7 @@ export const memoryTools: ToolHandlers = {
         {
           scope: "user",
           path,
-          content: String(args.content ?? ""),
+          content: redactSecrets(String(args.content ?? ""), ctx.secrets),
           expectedRevision,
           sourceRunId: runId,
           sourceThreadId: thread.id,
@@ -576,6 +576,15 @@ export const memoryTools: ToolHandlers = {
   async forget_memory(ctx, call) {
     const { bot, context } = ctx;
     const { args } = call;
+    if (
+      typeof args.expected_revision !== "number" ||
+      !Number.isSafeInteger(args.expected_revision) ||
+      args.expected_revision < 1
+    ) {
+      return call.finish({
+        error: "expected_revision must be a positive integer from a recall citation.",
+      });
+    }
     if (!ctx.memory.semantic?.forget) {
       return call.finish({
         error: "This memory provider does not support forgetting individual facts.",
@@ -587,6 +596,7 @@ export const memoryTools: ToolHandlers = {
           id: String(args.id ?? ""),
           scope: ctx.memory.scope!,
           botId: bot.id,
+          expectedRevision: args.expected_revision,
           ...(typeof args.entity === "string" && args.entity.trim()
             ? { entity: args.entity.trim() }
             : {}),

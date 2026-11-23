@@ -1,5 +1,6 @@
 import type { PrismaClient } from "@rakazo/db";
 import { runAsSystem, withTransactionRetry } from "@rakazo/db";
+import { isLocalInstallSessionId } from "@rakazo/contracts";
 import { advisoryLock } from "./advisory-lock.js";
 import { credentialDigest } from "./credential-digest.js";
 import { EncryptedSecretStore } from "./secrets.js";
@@ -42,7 +43,7 @@ export interface PushTokenStore {
   /** Import only when neither the account nor the device is registered already. */
   importLegacy(userId: string, token: string, sessionId: string): Promise<boolean>;
   remove(userId: string, tokenDigest?: string): Promise<void>;
-  endSession(userId: string, sessionId: string, nextSessionId?: string): Promise<void>;
+  endSession(userId: string, sessionId: string): Promise<void>;
 }
 
 export class PushSessionEndedError extends Error {
@@ -77,10 +78,7 @@ export class PrismaPushTokenStore implements PushTokenStore {
           await advisoryLock(tx, "push-user", userId, "joined");
           if (registration.voipToken)
             await advisoryLock(tx, "push-voip", credentialDigest(registration.voipToken), "joined");
-          const sessions = await tx.$queryRaw<
-            Array<{ id: string }>
-          >`SELECT id FROM "session" WHERE id = ${sessionId} AND "userId" = ${userId} AND "expiresAt" > CURRENT_TIMESTAMP FOR UPDATE`;
-          if (!sessions.length) throw new PushSessionEndedError();
+          if (!isLocalInstallSessionId(sessionId)) throw new PushSessionEndedError();
           const existing = await tx.callPushDevice.findUnique({ where: { id } });
           const previous =
             existing?.userId === userId
@@ -265,10 +263,7 @@ export class PrismaPushTokenStore implements PushTokenStore {
             return false;
           // Lock the session against deletion until registration commits. A late registration
           // after sign-out cannot publish a token, even when its request authenticated earlier.
-          const sessions = await tx.$queryRaw<Array<{ id: string }>>`
-          SELECT id FROM "session" WHERE id = ${sessionId} AND "userId" = ${userId}
-          AND "expiresAt" > CURRENT_TIMESTAMP FOR UPDATE`;
-          if (!sessions.length) throw new PushSessionEndedError();
+          if (!isLocalInstallSessionId(sessionId)) throw new PushSessionEndedError();
           const data = {
             ciphertext: sealed.ciphertext,
             tokenDigest,
@@ -303,27 +298,14 @@ export class PrismaPushTokenStore implements PushTokenStore {
     );
   }
 
-  async endSession(userId: string, sessionId: string, nextSessionId?: string): Promise<void> {
-    await runAsSystem("revoke or retarget a session's notification registration", () =>
+  async endSession(userId: string, sessionId: string): Promise<void> {
+    await runAsSystem("remove an installation's notification registration", () =>
       withTransactionRetry(() =>
         this.prisma.$transaction(async (tx) => {
           await advisoryLock(tx, "push-user", userId, "joined");
           const where = { userId, sessionId };
-          // Password changes may retarget a live installation; sign-out revokes both transports.
-          if (!nextSessionId) await tx.callPushDevice.deleteMany({ where });
-          if (nextSessionId) {
-            const session = await tx.session.findFirst({
-              where: { id: nextSessionId, userId, expiresAt: { gt: new Date() } },
-              select: { id: true },
-            });
-            if (!session) {
-              await tx.callPushDevice.deleteMany({ where });
-              await tx.pushToken.deleteMany({ where });
-              return;
-            }
-            await tx.callPushDevice.updateMany({ where, data: { sessionId: nextSessionId } });
-            await tx.pushToken.updateMany({ where, data: { sessionId: nextSessionId } });
-          } else await tx.pushToken.deleteMany({ where });
+          await tx.callPushDevice.deleteMany({ where });
+          await tx.pushToken.deleteMany({ where });
         }),
       ),
     );

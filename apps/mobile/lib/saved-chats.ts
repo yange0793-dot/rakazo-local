@@ -17,7 +17,7 @@ import type {
 } from "./mobile-types";
 import {
   currentSessionGeneration,
-  loadSessionToken,
+  loadLocalInstallSessionId,
   loadVerifiedIntegrationsScope,
   saveVerifiedIntegrationsScope,
 } from "./session";
@@ -202,7 +202,7 @@ async function withSessionNamespace(
   scope: IntegrationsCacheScope,
 ): Promise<SavedChatsScope | null> {
   try {
-    const namespace = await artifactCacheSession(await loadSessionToken());
+    const namespace = await artifactCacheSession(await loadLocalInstallSessionId());
     return isIntegrationsScopeCurrent(scope) ? { ...scope, namespace } : null;
   } catch {
     return null;

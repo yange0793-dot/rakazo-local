@@ -78,7 +78,6 @@ vi.mock("./api-server", () => ({
     return state.selectSpace(id);
   },
 }));
-vi.mock("./api-auth", () => ({}));
 vi.mock("./api-live", () => ({}));
 vi.mock("./api", () => ({
   spaceSelectionSeq: () => state.selectionSeq,

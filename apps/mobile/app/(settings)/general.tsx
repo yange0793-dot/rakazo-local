@@ -46,7 +46,7 @@ import {
   setResponseStreamingPreference,
   subscribeResponseStreaming,
 } from "../../lib/response-streaming";
-import { loadSessionToken } from "../../lib/session";
+import { loadLocalInstallSessionId } from "../../lib/session";
 import { createSettingsPageStyles } from "../../lib/settings-page-styles";
 import { useSideInsets } from "../../lib/side-insets";
 import { errorText } from "../../lib/user-error";
@@ -171,7 +171,7 @@ export default function General() {
         await setLiveNotificationSettings(
           settings,
           currentApiBase(),
-          await loadSessionToken(),
+          await loadLocalInstallSessionId(),
           selectedSpaceId() ?? "",
         );
       },

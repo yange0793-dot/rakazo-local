@@ -107,22 +107,6 @@ describe("desktop release workflow", () => {
     expect(workflow).toContain('grep -Fqx "version: $RELEASE_VERSION"');
   });
 
-  it("adds the system passkey association only when a provisioning profile is configured", () => {
-    expect(workflow).toContain(
-      `PROVISIONING_PROFILE: ${expression("secrets.DESKTOP_MAC_PROVISIONING_PROFILE")}`,
-    );
-    expect(workflow).toMatch(/if \[\[ -z "\$PROVISIONING_PROFILE" \]\]; then\n.*\n\s+exit 0/);
-    expect(workflow).toContain("pnpm exec tsx apps/desktop/scripts/passkey-entitlements.ts");
-    expect(workflow).toContain('if [[ "$app_id" != "$APPLE_TEAM_ID.$bundle_id" ]]; then');
-    // Helpers keep entitlementsInherit; only the main app is associated.
-    expect(workflow).toContain(
-      '"-c.mac.entitlements=$PASSKEY_ENTITLEMENTS" "-c.mac.provisioningProfile=$PASSKEY_PROFILE"',
-    );
-    expect(workflow).not.toContain("entitlementsInherit=");
-    expect(workflow).toContain('test -f "$app/Contents/embedded.provisionprofile"');
-    expect(workflow).not.toMatch(/secrets\.APPLE_TEAM_ID/);
-  });
-
   it("publishes the Apple silicon server bundle the macOS app names", () => {
     expect(workflow).toContain('node scripts/build-server-bundle.mjs "$RUNNER_TEMP/server-bundle"');
     expect(workflow).toContain(

@@ -1,11 +1,11 @@
-import { randomUUID } from "node:crypto";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { ComposioConnector, FakeComposioClient, FakeSandboxProvider } from "@rakazo/adapters";
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import { discardBotIntroRun } from "./discard-bot-intro.js";
-import { sessionCookieHeader } from "./index.js";
+import { createTestSpace, testSpaceHeaders } from "./index.js";
+
 import type { ModelEmulatorStep } from "./model-emulator.js";
 import { startModelEmulator } from "./model-emulator.js";
 import { asSystem } from "./system-db.js";
@@ -79,13 +79,12 @@ describe.skipIf(!databaseAvailable)("offline Pi computer approval", () => {
         const handles = await createApp({
           databaseUrl: process.env.DATABASE_URL!,
           realtimeDatabaseUrl: process.env.DATABASE_URL!,
-          authUrl: fixtureOrigin,
+
           webOrigin: fixtureOrigin,
           dataDir,
           sandboxProvider: "fake",
           agentRuntime: "pi",
           wakeupDriver: "memory",
-          signupsEnabled: "true",
           composio: new ComposioConnector({ client: new FakeComposioClient() }),
           encryptionKey: "offline-computer-fixture-encryption-key",
         });
@@ -96,18 +95,8 @@ describe.skipIf(!databaseAvailable)("offline Pi computer approval", () => {
         // Keep the real fake-provider implementation; observe calls and its state
         // independently of the model's claims and the persisted effect record.
         const act = vi.spyOn(sandbox, "act");
-        const signup = await handles.app.request("/api/auth/sign-up/email", {
-          method: "POST",
-          headers: { "content-type": "application/json", origin: fixtureOrigin },
-          body: JSON.stringify({
-            email: `computer-approval-${randomUUID()}@rakazo.test`,
-            password: "password12",
-            name: "Computer approval fixture",
-          }),
-        });
-        expect(signup.status).toBeLessThan(400);
-        const cookie = sessionCookieHeader(signup);
-        await rpc(handles.app, cookie, "models/connect", {
+        const scope = await createTestSpace(handles.app, "Computer approval fixture");
+        await rpc(handles.app, scope, "models/connect", {
           provider: model.model.provider,
           modelId: model.model.id,
           baseUrl: model.baseUrl,
@@ -115,20 +104,21 @@ describe.skipIf(!databaseAvailable)("offline Pi computer approval", () => {
           contextWindow: 160_000,
           maxTokens: 4096,
         });
-        const bot = await rpc<{ id: string }>(handles.app, cookie, "bots/create", {
+        const bot = await rpc<{ id: string }>(handles.app, scope, "bots/create", {
           name: "Computer fixture",
           title: "",
           description: "",
           instructions: "Complete the computer task.",
           notifyOnFinish: false,
         });
-        await discardBotIntroRun(handles, cookie, bot.id);
-        await rpc(handles.app, cookie, "bots/update", {
+        await discardBotIntroRun(handles, scope, bot.id);
+        await rpc(handles.app, scope, "bots/update", {
           botId: bot.id,
           modelProvider: model.model.provider,
           modelId: model.model.id,
         });
         const storedBot = await db.bot.findUniqueOrThrow({ where: { id: bot.id } });
+        await db.userActionApprovalRule.deleteMany({ where: { userId: storedBot.userId } });
         await db.userActionApprovalRule.create({
           data: {
             userId: storedBot.userId,
@@ -137,7 +127,7 @@ describe.skipIf(!databaseAvailable)("offline Pi computer approval", () => {
             matchValue: "computer_act",
           },
         });
-        const sent = await rpc<{ runId: string }>(handles.app, cookie, "threads/send", {
+        const sent = await rpc<{ runId: string }>(handles.app, scope, "threads/send", {
           botId: bot.id,
           text: "Put approved clipboard content on the computer clipboard.",
         });
@@ -181,7 +171,7 @@ describe.skipIf(!databaseAvailable)("offline Pi computer approval", () => {
             expect.objectContaining({ kind: "ask", approvalEffectId: actionEffect.id }),
           ]),
         );
-        await rpc(handles.app, cookie, "threads/answer", {
+        await rpc(handles.app, scope, "threads/answer", {
           botId: bot.id,
           runId: sent.runId,
           messageId: card.id,
@@ -219,15 +209,14 @@ describe.skipIf(!databaseAvailable)("offline Pi computer approval", () => {
   );
 });
 
-async function rpc<T>(
-  app: App,
-  cookie: string,
-  procedure: string,
-  input: unknown = {},
-): Promise<T> {
+async function rpc<T>(app: App, scope: string, procedure: string, input: unknown = {}): Promise<T> {
   const response = await app.request(`/rpc/${procedure}`, {
     method: "POST",
-    headers: { "content-type": "application/json", cookie, origin: fixtureOrigin },
+    headers: {
+      "content-type": "application/json",
+      ...testSpaceHeaders(scope),
+      origin: fixtureOrigin,
+    },
     body: JSON.stringify({ json: input }),
   });
   const body = (await response.json()) as { json?: T; error?: { message?: string } };

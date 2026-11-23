@@ -3,7 +3,8 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import type { PrismaClient } from "@rakazo/db";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import { sessionCookieHeader } from "./index.js";
+import { createTestSpace, testSpaceHeaders } from "./index.js";
+
 import { asSystem } from "./system-db.js";
 
 type App = { request: (input: string, init?: RequestInit) => Response | Promise<Response> };
@@ -42,8 +43,8 @@ describe.skipIf(!hasDb)("artifacts.listSpace made by bots", () => {
   });
 
   it("keeps files whose newest version a bot made, page by page", async () => {
-    const cookie = await signup(app, `artifacts-list-${Date.now()}@rakazo.test`);
-    const bot = await rpc<{ id: string }>(app, cookie, "bots/create", {
+    const scope = await testSpace(app, "Test");
+    const bot = await rpc<{ id: string }>(app, scope, "bots/create", {
       name: "Analyst",
       title: "Analyst",
       description: "",
@@ -51,7 +52,7 @@ describe.skipIf(!hasDb)("artifacts.listSpace made by bots", () => {
       notifyOnFinish: true,
     });
     const upload = (name: string) =>
-      rpc<{ id: string }>(app, cookie, "artifacts/create", {
+      rpc<{ id: string }>(app, scope, "artifacts/create", {
         botId: bot.id,
         name,
         mimeType: "text/plain",
@@ -90,7 +91,7 @@ describe.skipIf(!hasDb)("artifacts.listSpace made by bots", () => {
     await madeByBot("draft.md", new Date(), { rootArtifactId: draft.id, version: 2 });
 
     const list = (input: Record<string, unknown>) =>
-      rpc<Listing>(app, cookie, "artifacts/listSpace", input);
+      rpc<Listing>(app, scope, "artifacts/listSpace", input);
     const shown = (listing: Listing) =>
       listing.items.map(({ name, version, versionCount }) => [name, version, versionCount]);
 
@@ -121,20 +122,18 @@ describe.skipIf(!hasDb)("artifacts.listSpace made by bots", () => {
   });
 });
 
-async function signup(app: App, email: string) {
-  const response = await app.request("/api/auth/sign-up/email", {
-    method: "POST",
-    headers: { "content-type": "application/json", origin: "http://127.0.0.1:5173" },
-    body: JSON.stringify({ email, password: "test-password-123", name: "Artifacts User" }),
-  });
-  expect(response.status).toBeLessThan(400);
-  return sessionCookieHeader(response);
+async function testSpace(app: App, name = "Test") {
+  return createTestSpace(app, name);
 }
 
-async function rpc<T>(app: App, cookie: string, proc: string, body: unknown = {}): Promise<T> {
+async function rpc<T>(app: App, scope: string, proc: string, body: unknown = {}): Promise<T> {
   const response = await app.request(`/rpc/${proc}`, {
     method: "POST",
-    headers: { "content-type": "application/json", cookie, origin: "http://127.0.0.1:5173" },
+    headers: {
+      "content-type": "application/json",
+      ...testSpaceHeaders(scope),
+      origin: "http://127.0.0.1:5173",
+    },
     body: JSON.stringify({ json: body }),
   });
   const parsed = JSON.parse(await response.text()) as { json?: T; error?: { message?: string } };

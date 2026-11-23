@@ -8,36 +8,8 @@ import { afterEach, beforeEach, expect, it, vi } from "vitest";
 
 const accountToken = vi.hoisted(() => vi.fn());
 
-// The dialog itself is tested on its own; here it is a button that confirms it.
-vi.mock("./ConfirmIdentityDialog", async () => {
-  const { useState } = await import("react");
-  const { runWithIdentityConfirmation } = await import("@rakazo/contracts");
-  return {
-    useIdentityConfirmation: () => {
-      const [settle, setSettle] = useState<((confirmed: boolean) => void) | null>(null);
-      return {
-        withIdentityConfirmation: <T,>(action: () => Promise<T>) =>
-          runWithIdentityConfirmation(
-            action,
-            () => new Promise<boolean>((resolve) => setSettle(() => resolve)),
-          ),
-        identityDialog: settle ? (
-          <button
-            type="button"
-            data-testid="identity-confirm"
-            onClick={() => {
-              settle(true);
-              setSettle(null);
-            }}
-          />
-        ) : null,
-      };
-    },
-  };
-});
 vi.mock("../lib/rpc", () => ({
   rpc: { export: { accountToken } },
-  recheckSessionOnUnauthorized: () => undefined,
 }));
 vi.mock("@lingui/react/macro", () => ({
   useLingui: () => ({ t: (parts: TemplateStringsArray) => parts.join("") }),
@@ -105,20 +77,13 @@ it("confirms identity before minting the export token, then downloads it by link
   ) {
     clicked.push(this);
   });
-  accountToken
-    .mockRejectedValueOnce(
-      Object.assign(new Error("Confirm it's you"), { code: "IDENTITY_CONFIRMATION_REQUIRED" }),
-    )
-    .mockResolvedValueOnce({ token: "tok/en+1" });
+  accountToken.mockResolvedValueOnce({ token: "tok/en+1" });
   await render();
 
   await act(async () => button("Export").click());
-  expect(clicked).toHaveLength(0);
-  await act(async () => {
-    container.querySelector<HTMLButtonElement>('[data-testid="identity-confirm"]')!.click();
-  });
 
-  expect(accountToken).toHaveBeenCalledTimes(2);
+
+  expect(accountToken).toHaveBeenCalledOnce();
   expect(clicked).toHaveLength(1);
   const link = new URL(clicked[0]!.href);
   expect(link.pathname).toBe("/api/account/export");

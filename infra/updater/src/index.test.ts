@@ -485,7 +485,7 @@ describe("child process environment", () => {
       {
         PATH: "/usr/bin",
         HTTPS_PROXY: "http://proxy.invalid",
-        BETTER_AUTH_SECRET: "fake-secret-that-must-not-leak",
+        SCREEN_PROXY_SECRET: "fake-secret-that-must-not-leak",
         DATABASE_URL: "postgres://fake.invalid/db",
         AXIOM_TOKEN: "fake-axiom-token",
         LOG_LEVEL: "debug",
@@ -498,7 +498,7 @@ describe("child process environment", () => {
       RAKAZO_IMAGE_TAG: "sha-123",
       GIT_TERMINAL_PROMPT: "0",
     });
-    expect(env.BETTER_AUTH_SECRET).toBeUndefined();
+    expect(env.SCREEN_PROXY_SECRET).toBeUndefined();
     expect(env.DATABASE_URL).toBeUndefined();
     expect(env.AXIOM_TOKEN).toBeUndefined();
     expect(env.LOG_LEVEL).toBeUndefined();

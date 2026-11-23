@@ -18,7 +18,6 @@ export function oauthCallbackFrom(
   url: string,
   options: OAuthCallbackFromOptions = {},
 ): RakazoDesktopOAuthCallback | undefined {
-  if (options.frameName === "rakazo-sso-oauth") return undefined;
   let target: URL;
   try {
     target = new URL(url);

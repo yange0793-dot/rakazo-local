@@ -1,0 +1,14 @@
+appId: com.rakazo.app
+---
+- runFlow: launch-app.yaml
+- openLink: "rakazo:///"
+- extendedWaitUntil:
+    visible:
+      id: "organization-menu"
+    timeout: 40000
+- tapOn:
+    id: "organization-menu"
+- tapOn: ${RAKAZO_SCREENSHOT_WORKSPACE}
+- extendedWaitUntil:
+    visible: "Account"
+    timeout: 40000

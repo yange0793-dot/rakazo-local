@@ -1,7 +1,7 @@
 import type { Route } from "@playwright/test";
 import { expect, test } from "@playwright/test";
 import type { BillingStatus } from "@rakazo/contracts";
-import { captureScreenshot, completeOnboarding, signup } from "./helpers";
+import { captureScreenshot, completeOnboarding, openLocalWorkspace } from "./helpers";
 
 function billingStatus(overrides: Partial<BillingStatus>): BillingStatus {
   return {
@@ -50,14 +50,9 @@ for (const plan of plans) {
   test(`a run out of computer hours on the ${plan.name} says why and opens billing`, async ({
     page,
   }, testInfo) => {
-    await signup(
-      page,
-      `computer-hours-${plan.name}-${Date.now()}@rakazo.test`,
-      "password12",
-      "Hours Out",
-    );
+    await openLocalWorkspace(page, "Hours Out");
     await completeOnboarding(page);
-    await page.route("**/api/auth/capabilities", async (route) => {
+    await page.route("**/api/app-capabilities", async (route) => {
       const response = await route.fetch();
       await route.fulfill({ response, json: { ...(await response.json()), billing: true } });
     });

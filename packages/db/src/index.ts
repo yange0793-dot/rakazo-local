@@ -60,7 +60,6 @@ export * from "./sandbox-allowance.js";
 export * from "./scope.js";
 export * from "./security-events.js";
 export * from "./semantic-facts.js";
-export * from "./sessions.js";
 export * from "./space-members.js";
 export * from "./space-settings.js";
 export * from "./spaces.js";

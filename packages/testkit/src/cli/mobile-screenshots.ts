@@ -16,7 +16,8 @@ import {
 import { callRequestClientNonce } from "@rakazo/core";
 import type { PrismaClient } from "@rakazo/db";
 import { createThreadMessage } from "@rakazo/db";
-import { sessionCookieHeader } from "../index.js";
+import { createTestSpace, testSpaceHeaders } from "../index.js";
+
 import { disposableDatabaseEnv } from "./postgres.js";
 import { runProcess } from "./process.js";
 
@@ -24,8 +25,6 @@ const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../../.
 const REPORT_DIR = path.join(ROOT, "test-report", "mobile-screenshots");
 const DATA_DIR = path.join(ROOT, ".tmp", "mobile-screenshots-data");
 const FLOW_DIR = path.join(ROOT, "apps", "mobile", ".maestro");
-const EMAIL = "mobile-screenshots@example.test";
-const PASSWORD = "test-password-123";
 const API_PORT = 3110;
 const DEVICE_CONTROL_PORT = 3111;
 const HOST_API_URL = `http://127.0.0.1:${API_PORT}`;
@@ -176,9 +175,7 @@ async function runFlow(flow: string, fixture: Awaited<ReturnType<typeof seedFixt
       "-e",
       `RAKAZO_MOBILE_API_URL=http://10.0.2.2:${API_PORT}`,
       "-e",
-      `RAKAZO_SCREENSHOT_EMAIL=${EMAIL}`,
       "-e",
-      `RAKAZO_SCREENSHOT_PASSWORD=${PASSWORD}`,
       "-e",
       `RAKAZO_SCREENSHOT_BOT_ID=${fixture.botId}`,
       "-e",
@@ -218,7 +215,7 @@ function startDeviceControlServer(
       ]),
     "/ring": () => ringFromResearcher(prisma, fixture),
     "/connect-voice": () =>
-      rpc(app, fixture.cookie, "voice/connect", {
+      rpc(app, fixture.scope, "voice/connect", {
         provider: "scripted",
         apiKey: "fixture-voice-key",
       }),
@@ -338,17 +335,13 @@ export function configureEnvironment() {
     SANDBOX_PROVIDER: "fake",
     AGENT_RUNTIME: "scripted",
     COMPOSIO_API_KEY: "",
-    BETTER_AUTH_SECRET: "mobile-screenshot-auth-secret-32chars",
     ENCRYPTION_KEY: "mobile-screenshot-encryption-key-32chars",
     SCREEN_PROXY_SECRET: "mobile-screenshot-screen-secret-32chars",
-    BETTER_AUTH_URL: HOST_API_URL,
     WEB_ORIGIN,
     API_HOST: "0.0.0.0",
     API_PORT: String(API_PORT),
     API_URL: HOST_API_URL,
     DATA_DIR,
-    SIGNUPS_ENABLED: "true",
-    SIGNUP_ALLOWLIST: "",
     // Incoming calls ring through the open app's call feed, so no push service is needed.
     PHONE_CALLS_ENABLED: "true",
     CI: "1",
@@ -356,45 +349,45 @@ export function configureEnvironment() {
 }
 
 async function seedFixture(app: App, prisma: PrismaClient) {
-  const cookie = await signup(app);
-  const researcher = await rpc<{ id: string }>(app, cookie, "bots/create", {
+  const scope = await testSpace(app, "Screenshot User");
+  const researcher = await rpc<{ id: string }>(app, scope, "bots/create", {
     name: "Researcher",
     title: "Product research",
     description: "Finds evidence and keeps fixture notes organized.",
     instructions: "Find evidence and summarize it clearly.",
     notifyOnFinish: true,
   });
-  const writer = await rpc<{ id: string }>(app, cookie, "bots/create", {
+  const writer = await rpc<{ id: string }>(app, scope, "bots/create", {
     name: "Writer",
     title: "Clear writing",
     description: "Turns research into concise drafts.",
     instructions: "Write concise drafts from the available evidence.",
     notifyOnFinish: true,
   });
-  const support = await rpc<{ id: string }>(app, cookie, "bots/create", {
+  const support = await rpc<{ id: string }>(app, scope, "bots/create", {
     name: "Support",
     title: "Customer support",
     description: "Prepares friendly customer replies.",
     instructions: "Prepare accurate and friendly customer replies.",
     notifyOnFinish: false,
   });
-  const archived = await rpc<{ id: string }>(app, cookie, "bots/create", {
+  const archived = await rpc<{ id: string }>(app, scope, "bots/create", {
     name: "Archived fixture",
     title: "Archived",
     description: "A recoverable archived bot for account screenshots.",
     instructions: "Remain archived.",
     notifyOnFinish: true,
   });
-  await rpc(app, cookie, "bots/archive", { botId: archived.id });
+  await rpc(app, scope, "bots/archive", { botId: archived.id });
   for (const botId of [writer.id, support.id]) {
-    await rpc(app, cookie, "bots/update", { botId, pinned: true });
+    await rpc(app, scope, "bots/update", { botId, pinned: true });
   }
 
-  const group = await rpc<{ id: string }>(app, cookie, "groups/create", {
+  const group = await rpc<{ id: string }>(app, scope, "groups/create", {
     name: "Launch team",
     botIds: [researcher.id, writer.id, support.id],
   });
-  const routine = await rpc<{ id: string }>(app, cookie, "routines/create", {
+  const routine = await rpc<{ id: string }>(app, scope, "routines/create", {
     botId: researcher.id,
     name: "Weekly fixture review",
     prompt: "Review the fixture launch notes and summarize the open questions.",
@@ -513,28 +506,20 @@ async function seedFixture(app: App, prisma: PrismaClient) {
     groupId: group.id,
     routineId: routine.id,
     threadId: botThread.id,
-    cookie,
+    scope,
   };
 }
 
-async function signup(app: App) {
-  const response = await app.request("/api/auth/sign-up/email", {
-    method: "POST",
-    headers: { "content-type": "application/json", origin: WEB_ORIGIN },
-    body: JSON.stringify({ email: EMAIL, password: PASSWORD, name: "Screenshot User" }),
-  });
-  if (!response.ok) throw new Error(`Fixture signup failed with ${response.status}`);
-  const cookie = sessionCookieHeader(response);
-  if (!cookie) throw new Error("Fixture signup did not return a session cookie");
-  return cookie;
+async function testSpace(app: App, name = "Test") {
+  return createTestSpace(app, name);
 }
 
-async function rpc<T>(app: App, cookie: string, procedure: string, body: unknown = {}): Promise<T> {
+async function rpc<T>(app: App, scope: string, procedure: string, body: unknown = {}): Promise<T> {
   const response = await app.request(`/rpc/${procedure}`, {
     method: "POST",
     headers: {
       "content-type": "application/json",
-      cookie,
+      ...testSpaceHeaders(scope),
       origin: WEB_ORIGIN,
     },
     body: JSON.stringify({ json: body }),

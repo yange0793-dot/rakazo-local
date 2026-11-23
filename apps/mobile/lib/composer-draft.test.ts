@@ -3,7 +3,6 @@ import type { ComposerDraftScope } from "./composer-draft";
 import { readComposerDraft, writeComposerDraft } from "./composer-draft";
 
 vi.mock("./api-server", () => ({}));
-vi.mock("./api-auth", () => ({}));
 vi.mock("./api-live", () => ({}));
 vi.mock("./api", () => ({ currentApiBase: () => "https://api.example.test" }));
 

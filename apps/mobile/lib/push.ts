@@ -6,7 +6,7 @@ import * as SecureStore from "expo-secure-store";
 import { Platform } from "react-native";
 import { currentApiBase, rpc, selectedSpaceId } from "./api";
 import { resumeLiveNotifications } from "./live-notifications";
-import { currentSessionGeneration, loadSessionToken } from "./session";
+import { currentSessionGeneration, loadLocalInstallSessionId } from "./session";
 
 async function notificationsAllowed() {
   // On iOS getPermissionsAsync holds Expo's shared native queue until the system answers,
@@ -26,7 +26,7 @@ export async function registerPushToken() {
     if (!token) return;
     const generation = currentSessionGeneration();
     const apiBase = currentApiBase();
-    const sessionToken = await loadSessionToken();
+    const sessionToken = await loadLocalInstallSessionId();
     // A sign-in still saving its token registers again once the session lands.
     if (!sessionToken) return;
     if (generation !== currentSessionGeneration() || apiBase !== currentApiBase()) return;

@@ -111,17 +111,28 @@ describe("standalone web server", () => {
   it("forwards API requests with the hop it saw", async () => {
     const port = await start();
 
-    const forwarded = await get(port, "/rpc/ping?x=1", { "x-forwarded-for": "203.0.113.9" });
+    const forwarded = await get(port, "/rpc/ping?x=1", { "x-forwarded-for": "127.0.0.1" });
+    expect(forwarded.status).toBe(200);
     const echoed = JSON.parse(forwarded.body) as { url: string; headers: http.IncomingHttpHeaders };
     expect(echoed.url).toBe("/rpc/ping?x=1");
-    expect(echoed.headers["x-forwarded-for"]).toBe("203.0.113.9, 127.0.0.1");
-    expect(JSON.parse((await get(port, "/api/auth/ok")).body).url).toBe("/api/auth/ok");
+    expect(echoed.headers["x-forwarded-for"]).toBe("127.0.0.1, 127.0.0.1");
+    expect(JSON.parse((await get(port, "/api/local-identity")).body).url).toBe(
+      "/api/local-identity",
+    );
+  });
+
+  it("rejects a remote forwarding chain before asking the API", async () => {
+    const port = await start();
+
+    expect((await get(port, "/rpc/ping", { "x-forwarded-for": "203.0.113.9" })).status).toBe(403);
+    expect(apiRequests).toEqual([]);
   });
 
   it("forwards the device socket only for allowed hosts", async () => {
     const port = await start();
 
-    await expect(upgrade(port, "app.example.test")).resolves.toBe(101);
+    await expect(upgrade(port, "localhost")).resolves.toBe(101);
+    await expect(upgrade(port, "app.example.test")).resolves.toBe(404);
     await expect(upgrade(port, "evil.example")).resolves.toBe(404);
   });
 

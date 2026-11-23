@@ -3,15 +3,14 @@ import {
   activeBotId,
   captureScreenshot,
   completeOnboarding,
+  openLocalWorkspace,
   openUserSettings,
-  signup,
 } from "./helpers";
 
 test("a page chip in a right-to-left chat keeps its icon gap on the text side", async ({
   page,
 }, testInfo) => {
-  const stamp = Date.now();
-  await signup(page, `page-chip-rtl-${stamp}@rakazo.test`, "password12", "Locale QA");
+  await openLocalWorkspace(page, "Locale QA");
   await completeOnboarding(page);
   await page.waitForURL(/\/app\/[^/]+$/);
   const botId = activeBotId(page);

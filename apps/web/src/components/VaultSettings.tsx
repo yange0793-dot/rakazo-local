@@ -1,6 +1,6 @@
 import { Trans, useLingui } from "@lingui/react/macro";
 import type { BotSecretMetadata, SettingsScope, VaultKind, VaultRevealed } from "@rakazo/contracts";
-import { isIdentityConfirmationRequired, VAULT_KINDS, vaultKind } from "@rakazo/contracts";
+import { VAULT_KINDS, vaultKind } from "@rakazo/contracts";
 import { fetchFresh, writeSaved } from "@rakazo/core/query";
 import {
   Button,
@@ -17,7 +17,6 @@ import { Fragment, useEffect, useRef, useState } from "react";
 import { useSpaceQueries } from "../lib/query";
 import { useSpaceRpc } from "../lib/space-rpc";
 import { errorText } from "../lib/user-error";
-import { useIdentityConfirmation } from "./ConfirmIdentityDialog";
 import { BotEmailAddresses } from "./vault/BotEmailAddresses";
 import { useVaultKindLabels, useVaultSubtitle, VaultTile } from "./vault/kinds";
 import { VaultItemDetail } from "./vault/VaultItemDetail";
@@ -56,7 +55,6 @@ export function VaultSettings({
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [detailError, setDetailError] = useState<string | null>(null);
-  const { withIdentityConfirmation, identityDialog } = useIdentityConfirmation();
   const revealAttempt = useRef(0);
 
   useEffect(() => {
@@ -94,18 +92,10 @@ export function VaultSettings({
     const attempt = revealAttempt.current;
     const current = () => revealAttempt.current === attempt;
     try {
-      const shown = await withIdentityConfirmation(async () => {
-        try {
-          return await rpc.vault.reveal({ scope, name });
-        } catch (err) {
-          // A reveal whose item closed while it waited must not ask the person to confirm.
-          throw current() ? err : REVEAL_CANCELLED;
-        }
-      });
+      const shown = await rpc.vault.reveal({ scope, name });
       return current() ? shown : null;
     } catch (err) {
-      // Closing the confirmation is a choice, not a failure.
-      if (current() && err !== REVEAL_CANCELLED && !isIdentityConfirmationRequired(err))
+      if (current() && err !== REVEAL_CANCELLED)
         setDetailError(errorText(err, t`Could not show the credential`));
       return null;
     }
@@ -221,7 +211,6 @@ export function VaultSettings({
           onEdit={(revealed) => startEdit(openedItem, revealed)}
           onRemove={() => remove(openedItem.name)}
         />
-        {identityDialog}
       </section>
     );
 
@@ -346,7 +335,6 @@ export function VaultSettings({
         </p>
       ) : null}
       {scope === "account" ? <BotEmailAddresses /> : null}
-      {identityDialog}
     </section>
   );
 }

@@ -2,12 +2,10 @@ import { describe, expect, it } from "vitest";
 import { rpcOriginAllowed } from "./app.js";
 
 // The deployment's own values: the desktop shell loads the web app from WEB_ORIGIN, and the
-// tunnel is listed as an extra auth origin.
+// native app uses its own scheme.
 const env = {
   webOrigin: "http://127.0.0.1:5173",
   apiUrl: "http://127.0.0.1:3100",
-  authUrl: "http://127.0.0.1:5173",
-  extraAuthOrigins: ["https://kiln-bagpipe.example.test"],
 };
 
 describe("rpcOriginAllowed", () => {
@@ -20,8 +18,8 @@ describe("rpcOriginAllowed", () => {
       // The page the desktop shell loads, and the dev/preview server's proxy target.
       "http://127.0.0.1:5173",
       "http://127.0.0.1:3100",
-      "https://kiln-bagpipe.example.test",
-      "rakazo://sign-in",
+      "http://localhost:5173",
+      "rakazo://",
     ]) {
       expect(rpcOriginAllowed(origin, env), origin).toBe(true);
     }
@@ -30,6 +28,7 @@ describe("rpcOriginAllowed", () => {
   it("refuses a writable call from a page on another site", () => {
     for (const origin of [
       "https://evil.example",
+      "https://kiln-bagpipe.example.test",
       "http://127.0.0.1:9999",
       "https://kiln-bagpipe.example.test.evil.example",
     ]) {

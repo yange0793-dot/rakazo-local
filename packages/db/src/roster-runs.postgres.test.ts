@@ -64,7 +64,6 @@ describePostgres("bounded latest bot roster runs (PostgreSQL)", () => {
       provisionMessagingIdentity(
         prisma,
         { provider: "sendblue", address },
-        { signupsEnabled: undefined, signupAllowlist: undefined },
       ),
     );
     owner = identity;

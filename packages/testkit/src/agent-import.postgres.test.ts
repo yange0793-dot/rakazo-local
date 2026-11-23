@@ -6,10 +6,11 @@ import type { AgentImportPlan, Bot, MemoryDocument } from "@rakazo/contracts";
 import { resolveEncryptionKey } from "@rakazo/core";
 import type { Prisma, PrismaClient } from "@rakazo/db";
 import { createDb } from "@rakazo/db";
-import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
 // The app's own logger module (the API resolves `@rakazo/logging` to this file).
 import { createLogger, createTestSink, installLogger } from "../../logging/src/index.js";
-import { sessionCookieHeader } from "./index.js";
+import { createTestSpace, testSpaceHeaders } from "./index.js";
+
 import { asSystem } from "./system-db.js";
 
 type App = { request: (input: string, init?: RequestInit) => Response | Promise<Response> };
@@ -143,15 +144,25 @@ describeIntegration("agent import", () => {
     rmSync(dataDir, { recursive: true, force: true });
   });
 
+  beforeEach(async () => {
+    keyCheck.during = null;
+    keyCheck.status = undefined;
+    await db.userModelCredential.deleteMany();
+    await db.userModelRoleChoice.deleteMany();
+    await db.agentSkill.deleteMany();
+    await db.mcpServer.deleteMany();
+    await db.secret.deleteMany({ where: { kind: "model" } });
+  });
+
   it("previews, then creates the bot with only the chosen items and no overwrites", async () => {
-    const cookie = await signup(app, `import-${stamp}@rakazo.test`, "Import User");
+    const scope = await testSpace(app, "Import User");
     const existingSkill = await rpc<{ id: string; content: string }>(
       app,
-      cookie,
+      scope,
       "agentSkills/create",
       { content: skill("weekly-review", "Existing") },
     );
-    const anyBot = await rpc<Bot>(app, cookie, "bots/create", { name: "Existing" });
+    const anyBot = await rpc<Bot>(app, scope, "bots/create", { name: "Existing" });
     const owner = await db.bot.findUniqueOrThrow({
       where: { id: anyBot.id },
       select: { spaceId: true, userId: true },
@@ -160,7 +171,7 @@ describeIntegration("agent import", () => {
       data: { ...owner, scope: "user", botId: null, path: "USER.md", content: "Existing.\n" },
     });
 
-    const plan = await rpc<AgentImportPlan>(app, cookie, "bots/importPreview", {
+    const plan = await rpc<AgentImportPlan>(app, scope, "bots/importPreview", {
       files: workspace,
     });
     expect(plan.source).toBe("openclaw");
@@ -176,7 +187,7 @@ describeIntegration("agent import", () => {
     const id = (title: string) =>
       [...plan.instructions, ...plan.memory, ...plan.skills].find((item) => item.title === title)!
         .id;
-    const bot = await rpc<Bot>(app, cookie, "bots/importCreate", {
+    const bot = await rpc<Bot>(app, scope, "bots/importCreate", {
       files: workspace,
       name: "Pebble",
       description: plan.suggestedDescription,
@@ -230,15 +241,15 @@ describeIntegration("agent import", () => {
   });
 
   it("creates nothing that runs or acts unless each one is selected", async () => {
-    const cookie = await signup(app, `import-consent-${stamp}@rakazo.test`, "Consent User");
+    const scope = await testSpace(app, "Consent User");
     const files = [
       ...settingsHome,
       { path: ".openclaw/skills/notes/SKILL.md", content: skill("notes", "Take notes") },
     ];
-    const plan = await rpc<AgentImportPlan>(app, cookie, "bots/importPreview", { files });
+    const plan = await rpc<AgentImportPlan>(app, scope, "bots/importPreview", { files });
     expect([plan.skills.length, plan.mcpServers.length, plan.routines.length]).toEqual([1, 2, 2]);
     // What an untouched Create sends: instructions only.
-    const bot = await rpc<Bot>(app, cookie, "bots/importCreate", {
+    const bot = await rpc<Bot>(app, scope, "bots/importCreate", {
       files,
       name: "Untouched",
       selection: { instructions: plan.instructions.map((item) => item.id), memory: [], skills: [] },
@@ -272,9 +283,9 @@ describeIntegration("agent import", () => {
   });
 
   it("refuses unknown selections and oversized instructions without creating a bot", async () => {
-    const cookie = await signup(app, `import-reject-${stamp}@rakazo.test`, "Reject User");
-    const before = await rpc<Bot[]>(app, cookie, "bots/list", {});
-    const unknown = await raw(app, cookie, "bots/importCreate", {
+    const scope = await testSpace(app, "Reject User");
+    const before = await rpc<Bot[]>(app, scope, "bots/list", {});
+    const unknown = await raw(app, scope, "bots/importCreate", {
       files: workspace,
       name: "Nope",
       selection: { instructions: ["instructions:secret.md"], memory: [], skills: [] },
@@ -284,22 +295,22 @@ describeIntegration("agent import", () => {
       { path: "workspace/SOUL.md", content: "x".repeat(15_000) },
       { path: "workspace/AGENTS.md", content: "y".repeat(15_000) },
     ];
-    const plan = await rpc<AgentImportPlan>(app, cookie, "bots/importPreview", { files: big });
-    const tooLong = await raw(app, cookie, "bots/importCreate", {
+    const plan = await rpc<AgentImportPlan>(app, scope, "bots/importPreview", { files: big });
+    const tooLong = await raw(app, scope, "bots/importCreate", {
       files: big,
       name: "Nope",
       selection: { instructions: plan.instructions.map((item) => item.id), memory: [], skills: [] },
     });
     expect(tooLong.status).toBe(400);
-    const unrecognised = await raw(app, cookie, "bots/importPreview", {
+    const unrecognised = await raw(app, scope, "bots/importPreview", {
       files: [{ path: "notes.md", content: "Just notes.\n" }],
     });
     expect(unrecognised.status).toBe(400);
-    expect(await rpc<Bot[]>(app, cookie, "bots/list", {})).toHaveLength(before.length);
+    expect(await rpc<Bot[]>(app, scope, "bots/list", {})).toHaveLength(before.length);
   });
 
   it("keeps imported curated memory in the bot's context when daily logs are large", async () => {
-    const cookie = await signup(app, `import-memory-${stamp}@rakazo.test`, "Memory User");
+    const scope = await testSpace(app, "Memory User");
     const days = Array.from({ length: 5 }, (_, index) => ({
       path: `workspace/memory/2026-01-0${index + 1}.md`,
       content: `Day ${index + 1}. ${"Notes. ".repeat(1_500)}\n`,
@@ -310,8 +321,8 @@ describeIntegration("agent import", () => {
       ...days,
     ];
     expect(days.reduce((sum, day) => sum + day.content.length, 0)).toBeGreaterThan(32 * 1024);
-    const plan = await rpc<AgentImportPlan>(app, cookie, "bots/importPreview", { files });
-    const bot = await rpc<Bot>(app, cookie, "bots/importCreate", {
+    const plan = await rpc<AgentImportPlan>(app, scope, "bots/importPreview", { files });
+    const bot = await rpc<Bot>(app, scope, "bots/importCreate", {
       files,
       name: "Memory",
       selection: {
@@ -346,14 +357,14 @@ describeIntegration("agent import", () => {
   });
 
   it("imports model, MCP servers, routines and opted-in API keys through the existing paths", async () => {
-    const cookie = await signup(app, `import-settings-${stamp}@rakazo.test`, "Settings User");
-    const firstBot = await rpc<Bot>(app, cookie, "bots/create", { name: "First" });
+    const scope = await testSpace(app, "Settings User");
+    const firstBot = await rpc<Bot>(app, scope, "bots/create", { name: "First" });
     const owner = await db.bot.findUniqueOrThrow({
       where: { id: firstBot.id },
       select: { spaceId: true, userId: true },
     });
     await db.user.update({ where: { id: owner.userId }, data: { timezone: "Europe/Berlin" } });
-    await rpc(app, cookie, "models/connect", {
+    await rpc(app, scope, "models/connect", {
       provider: "anthropic",
       apiKey: "placeholder-existing-key",
     });
@@ -361,7 +372,7 @@ describeIntegration("agent import", () => {
       where: { userId: owner.userId, provider: "anthropic" },
     });
 
-    const preview = await rpc<AgentImportPlan>(app, cookie, "bots/importPreview", {
+    const preview = await rpc<AgentImportPlan>(app, scope, "bots/importPreview", {
       files: settingsHome,
     });
     expect(JSON.stringify(preview)).not.toContain("placeholder-");
@@ -388,7 +399,7 @@ describeIntegration("agent import", () => {
       reason: "builtin",
     });
 
-    const opted = await rpc<AgentImportPlan>(app, cookie, "bots/importPreview", {
+    const opted = await rpc<AgentImportPlan>(app, scope, "bots/importPreview", {
       files: settingsHome,
       includeSecrets: true,
     });
@@ -400,7 +411,7 @@ describeIntegration("agent import", () => {
 
     // A model that cannot be used yet is refused before anything is written.
     const botsBefore = await db.bot.count({ where: owner });
-    const refused = await raw(app, cookie, "bots/importCreate", {
+    const refused = await raw(app, scope, "bots/importCreate", {
       files: settingsHome,
       name: "Refused",
       selection: {
@@ -413,7 +424,7 @@ describeIntegration("agent import", () => {
       },
     });
     expect(refused.status).toBe(400);
-    const blocked = await raw(app, cookie, "bots/importCreate", {
+    const blocked = await raw(app, scope, "bots/importCreate", {
       files: settingsHome,
       name: "Blocked",
       selection: { instructions: [], memory: [], skills: [], mcpServers: ["mcp:files"] },
@@ -430,7 +441,7 @@ describeIntegration("agent import", () => {
       });
     expect((await mainModel()).map((row) => row.credentialId)).toEqual([existing.id]);
 
-    const response = await raw(app, cookie, "bots/importCreate", {
+    const response = await raw(app, scope, "bots/importCreate", {
       files: settingsHome,
       includeSecrets: true,
       name: "Settings",
@@ -473,7 +484,7 @@ describeIntegration("agent import", () => {
     ).toEqual([["docs", "streamable_http", {}, {}, null]]);
     const listed = await rpc<{ slug: string; hasSecret: boolean; headerKeys: string[] }[]>(
       app,
-      cookie,
+      scope,
       "mcp/servers/list",
       {},
     );
@@ -526,7 +537,7 @@ describeIntegration("agent import", () => {
         providers: Record<string, boolean>;
         serverIds: Record<string, boolean>;
         routineIds: Record<string, boolean>;
-      }>(app, cookie, "bots/importSetupState", {
+      }>(app, scope, "bots/importSetupState", {
         botId: bot.id,
         providers: ["openrouter", "deepseek"],
         serverIds: [servers[0]!.id, "missing"],
@@ -538,13 +549,13 @@ describeIntegration("agent import", () => {
       serverIds: { [servers[0]!.id]: false, missing: false },
       routineIds: Object.fromEntries(routineRows.map((row) => [row.id, false])),
     });
-    await rpc(app, cookie, "mcp/assignments/approve", { botId: bot.id, serverId: servers[0]!.id });
+    await rpc(app, scope, "mcp/assignments/approve", { botId: bot.id, serverId: servers[0]!.id });
     await db.routine.update({ where: { id: routineRows[0]!.id }, data: { active: true } });
     const approved = await state();
     // Approval is not setup: the server still has no value for its Authorization header.
     expect(approved.serverIds[servers[0]!.id]).toBe(false);
     expect(approved.routineIds[routineRows[0]!.id]).toBe(true);
-    await rpc(app, cookie, "mcp/servers/update", {
+    await rpc(app, scope, "mcp/servers/update", {
       id: servers[0]!.id,
       config: {
         slug: "docs",
@@ -560,7 +571,7 @@ describeIntegration("agent import", () => {
     expect((await state()).serverIds[servers[0]!.id]).toBe(true);
     await db.routine.update({ where: { id: routineRows[0]!.id }, data: { active: false } });
     // Another user reads nothing of these.
-    const stranger = await signup(app, `import-state-other-${stamp}@rakazo.test`, "Stranger");
+    const stranger = await testSpace(app, "Stranger");
     expect(
       await rpc(app, stranger, "bots/importSetupState", {
         botId: bot.id,
@@ -597,7 +608,7 @@ describeIntegration("agent import", () => {
     expect(record.created).toMatchObject({ mcpServers: [{ id: servers[0]!.id }] });
 
     // Imported again, without the opt-in: the existing slug is kept and a free one chosen.
-    const again = await rpc<AgentImportPlan>(app, cookie, "bots/importPreview", {
+    const again = await rpc<AgentImportPlan>(app, scope, "bots/importPreview", {
       files: settingsHome,
     });
     expect(again.mcpServers.map((item) => [item.title, item.name])).toEqual([
@@ -605,7 +616,7 @@ describeIntegration("agent import", () => {
       // Never created here (stdio is off), so its name is still free.
       ["files", "files"],
     ]);
-    await rpc<Bot>(app, cookie, "bots/importCreate", {
+    await rpc<Bot>(app, scope, "bots/importCreate", {
       files: settingsHome,
       name: "Settings again",
       selection: { instructions: [], memory: [], skills: [], mcpServers: ["mcp:docs"] },
@@ -613,16 +624,18 @@ describeIntegration("agent import", () => {
     const plain = await db.mcpServer.findFirstOrThrow({ where: { ...owner, slug: "docs-2" } });
     expect([plain.headers, plain.secretId]).toEqual([{}, null]);
 
-    // Another user sees none of it.
-    const other = await signup(app, `import-settings-other-${stamp}@rakazo.test`, "Other");
+    // Another space shares this installation's model credentials, but not the bot's routines.
+    const other = await testSpace(app, "Other");
     expect(await rpc<unknown[]>(app, other, "mcp/servers/list", {})).toEqual([]);
-    expect(await rpc<unknown[]>(app, other, "models/credentials", {})).toEqual([]);
+    expect(await rpc<unknown[]>(app, other, "models/credentials", {})).toEqual(
+      await rpc<unknown[]>(app, scope, "models/credentials", {}),
+    );
     expect((await raw(app, other, "routines/list", { botId: bot.id })).status).not.toBe(200);
   });
 
   it("writes nothing at all when the last write of the import fails", async () => {
-    const cookie = await signup(app, `import-rollback-${stamp}@rakazo.test`, "Rollback User");
-    const firstBot = await rpc<Bot>(app, cookie, "bots/create", { name: "First" });
+    const scope = await testSpace(app, "Rollback User");
+    const firstBot = await rpc<Bot>(app, scope, "bots/create", { name: "First" });
     const owner = await db.bot.findUniqueOrThrow({
       where: { id: firstBot.id },
       select: { spaceId: true, userId: true },
@@ -632,7 +645,7 @@ describeIntegration("agent import", () => {
       { path: ".openclaw/workspace/USER.md", content: "Prefers tea.\n" },
       { path: ".openclaw/skills/notes/SKILL.md", content: skill("notes", "Take notes") },
     ];
-    const plan = await rpc<AgentImportPlan>(app, cookie, "bots/importPreview", {
+    const plan = await rpc<AgentImportPlan>(app, scope, "bots/importPreview", {
       files,
       includeSecrets: true,
     });
@@ -658,7 +671,7 @@ describeIntegration("agent import", () => {
        FOR EACH ROW EXECUTE FUNCTION agent_import_test_fail()`,
     );
     try {
-      const response = await raw(app, cookie, "bots/importCreate", {
+      const response = await raw(app, scope, "bots/importCreate", {
         files,
         includeSecrets: true,
         name: "Fails",
@@ -683,8 +696,8 @@ describeIntegration("agent import", () => {
   });
 
   it("points an imported routine at its skill when the skill is renamed on a clash", async () => {
-    const cookie = await signup(app, `import-rename-${stamp}@rakazo.test`, "Rename");
-    await rpc(app, cookie, "agentSkills/create", { content: skill("garden", "Already here") });
+    const scope = await testSpace(app, "Rename");
+    await rpc(app, scope, "agentSkills/create", { content: skill("garden", "Already here") });
     const files = [
       { path: ".openclaw/workspace/SOUL.md", content: "Calm.\n" },
       { path: ".openclaw/skills/garden/SKILL.md", content: skill("garden", "Water plants") },
@@ -705,8 +718,8 @@ describeIntegration("agent import", () => {
         }),
       },
     ];
-    const plan = await rpc<AgentImportPlan>(app, cookie, "bots/importPreview", { files });
-    const bot = await rpc<Bot>(app, cookie, "bots/importCreate", {
+    const plan = await rpc<AgentImportPlan>(app, scope, "bots/importPreview", { files });
+    const bot = await rpc<Bot>(app, scope, "bots/importCreate", {
       files,
       name: "Renamed",
       selection: {
@@ -723,14 +736,14 @@ describeIntegration("agent import", () => {
   });
 
   it("refuses a key the provider rejects, in words the client chooses, writing nothing", async () => {
-    const cookie = await signup(app, `import-key-rejected-${stamp}@rakazo.test`, "Rejected User");
+    const scope = await testSpace(app, "Rejected User");
     const files = [
       { path: ".openclaw/workspace/SOUL.md", content: "Calm.\n" },
       { path: ".openclaw/.env", content: "OPENROUTER_API_KEY=placeholder-rejected-key\n" },
     ];
     keyCheck.status = 401;
     try {
-      const response = await raw(app, cookie, "bots/importCreate", {
+      const response = await raw(app, scope, "bots/importCreate", {
         files,
         includeSecrets: true,
         name: "Rejected",
@@ -751,17 +764,17 @@ describeIntegration("agent import", () => {
     } finally {
       keyCheck.status = undefined;
     }
-    const me = await rpc<Bot[]>(app, cookie, "bots/list", {});
+    const me = await rpc<Bot[]>(app, scope, "bots/list", {});
     expect(me).toEqual([]);
   });
 
   it("never replaces a key connected after the import checked it", async () => {
-    const cookie = await signup(app, `import-key-race-${stamp}@rakazo.test`, "Key Race User");
+    const scope = await testSpace(app, "Key Race User");
     const files = [
       { path: ".openclaw/workspace/SOUL.md", content: "Calm.\n" },
       { path: ".openclaw/.env", content: "OPENROUTER_API_KEY=placeholder-imported-key\n" },
     ];
-    const plan = await rpc<AgentImportPlan>(app, cookie, "bots/importPreview", {
+    const plan = await rpc<AgentImportPlan>(app, scope, "bots/importPreview", {
       files,
       includeSecrets: true,
     });
@@ -769,12 +782,12 @@ describeIntegration("agent import", () => {
     // The user connects OpenRouter by hand while the import is checking its key.
     keyCheck.during = async () => {
       keyCheck.during = null;
-      await rpc(app, cookie, "models/connect", {
+      await rpc(app, scope, "models/connect", {
         provider: "openrouter",
         apiKey: "placeholder-manual-key",
       });
     };
-    const bot = await rpc<Bot>(app, cookie, "bots/importCreate", {
+    const bot = await rpc<Bot>(app, scope, "bots/importCreate", {
       files,
       includeSecrets: true,
       name: "Imported",
@@ -795,22 +808,22 @@ describeIntegration("agent import", () => {
   });
 
   it("keeps a connection made between preview and Create, and still creates the bot", async () => {
-    const cookie = await signup(app, `import-key-between-${stamp}@rakazo.test`, "Between User");
+    const scope = await testSpace(app, "Between User");
     const files = [
       { path: ".openclaw/workspace/SOUL.md", content: "Calm.\n" },
       { path: ".openclaw/.env", content: "OPENROUTER_API_KEY=placeholder-imported-key\n" },
     ];
-    const plan = await rpc<AgentImportPlan>(app, cookie, "bots/importPreview", {
+    const plan = await rpc<AgentImportPlan>(app, scope, "bots/importPreview", {
       files,
       includeSecrets: true,
     });
     expect(plan.apiKeys.map((item) => item.id)).toEqual(["key:openrouter"]);
     // Connected by hand after the preview showed the key, before Create.
-    await rpc(app, cookie, "models/connect", {
+    await rpc(app, scope, "models/connect", {
       provider: "openrouter",
       apiKey: "placeholder-manual-key",
     });
-    const bot = await rpc<Bot>(app, cookie, "bots/importCreate", {
+    const bot = await rpc<Bot>(app, scope, "bots/importCreate", {
       files,
       includeSecrets: true,
       name: "Between",
@@ -829,7 +842,7 @@ describeIntegration("agent import", () => {
     expect(credentials).toHaveLength(1);
     expect(await db.secret.count({ where: { userId: owner.userId, kind: "model" } })).toBe(1);
     // A repeated id is refused even when its provider is connected.
-    const repeated = await raw(app, cookie, "bots/importCreate", {
+    const repeated = await raw(app, scope, "bots/importCreate", {
       files,
       includeSecrets: true,
       name: "Repeated",
@@ -842,7 +855,7 @@ describeIntegration("agent import", () => {
     });
     expect(repeated.status).toBe(400);
     // An id that was never offered is still refused.
-    const refused = await raw(app, cookie, "bots/importCreate", {
+    const refused = await raw(app, scope, "bots/importCreate", {
       files,
       includeSecrets: true,
       name: "Unknown",
@@ -857,25 +870,25 @@ describeIntegration("agent import", () => {
   });
 
   it("returns the same bot for a retried create and refuses a reused key", async () => {
-    const cookie = await signup(app, `import-retry-${stamp}@rakazo.test`, "Retry User");
+    const scope = await testSpace(app, "Retry User");
     const files = [{ path: "workspace/SOUL.md", content: "Calm.\n" }];
-    const plan = await rpc<AgentImportPlan>(app, cookie, "bots/importPreview", { files });
+    const plan = await rpc<AgentImportPlan>(app, scope, "bots/importPreview", { files });
     const request = {
       importKey: `retry-${stamp}`,
       files,
       name: "Retry",
       selection: { instructions: plan.instructions.map((item) => item.id), memory: [], skills: [] },
     };
-    const first = await rpc<Bot>(app, cookie, "bots/importCreate", request);
-    const second = await rpc<Bot>(app, cookie, "bots/importCreate", request);
+    const first = await rpc<Bot>(app, scope, "bots/importCreate", request);
+    const second = await rpc<Bot>(app, scope, "bots/importCreate", request);
     expect(second.id).toBe(first.id);
-    const changed = await raw(app, cookie, "bots/importCreate", { ...request, name: "Other" });
+    const changed = await raw(app, scope, "bots/importCreate", { ...request, name: "Other" });
     expect(changed.status).toBe(412);
 
     const concurrent = { ...request, importKey: `retry-concurrent-${stamp}` };
     const results = await Promise.all([
-      raw(app, cookie, "bots/importCreate", concurrent),
-      raw(app, cookie, "bots/importCreate", concurrent),
+      raw(app, scope, "bots/importCreate", concurrent),
+      raw(app, scope, "bots/importCreate", concurrent),
     ]);
     const ids = await Promise.all(
       results.map(async (result) => (JSON.parse(await result.text()) as { json: Bot }).json.id),
@@ -890,7 +903,7 @@ describeIntegration("agent import", () => {
   });
 
   it("ignores disallowed fields a client sends anyway", async () => {
-    const cookie = await signup(app, `import-raw-${stamp}@rakazo.test`, "Raw User");
+    const scope = await testSpace(app, "Raw User");
     const files = [
       { path: ".openclaw/workspace/SOUL.md", content: "Calm.\n" },
       {
@@ -915,7 +928,7 @@ describeIntegration("agent import", () => {
       },
     ];
     for (const includeSecrets of [false, true]) {
-      const plan = await rpc<AgentImportPlan>(app, cookie, "bots/importPreview", {
+      const plan = await rpc<AgentImportPlan>(app, scope, "bots/importPreview", {
         files,
         includeSecrets,
       });
@@ -925,7 +938,7 @@ describeIntegration("agent import", () => {
         includeSecrets ? ["openrouter"] : [],
       );
     }
-    const bot = await rpc<Bot>(app, cookie, "bots/importCreate", {
+    const bot = await rpc<Bot>(app, scope, "bots/importCreate", {
       files,
       includeSecrets: true,
       name: "Raw",
@@ -956,7 +969,7 @@ describeIntegration("agent import", () => {
   });
 
   it("counts an MCP server as set up only with non-blank values for every name it needs", async () => {
-    const cookie = await signup(app, `import-blank-${stamp}@rakazo.test`, "Blank User");
+    const scope = await testSpace(app, "Blank User");
     const files = [
       { path: ".openclaw/workspace/SOUL.md", content: "Calm.\n" },
       {
@@ -965,7 +978,7 @@ describeIntegration("agent import", () => {
           '{ mcp: { servers: { api: { url: "https://mcp.example.com/mcp", headers: { Authorization: "x", "X-Team": "y" } } } } }',
       },
     ];
-    const bot = await rpc<Bot>(app, cookie, "bots/importCreate", {
+    const bot = await rpc<Bot>(app, scope, "bots/importCreate", {
       files,
       name: "Blank",
       selection: {
@@ -981,9 +994,9 @@ describeIntegration("agent import", () => {
         userId: (await db.bot.findUniqueOrThrow({ where: { id: bot.id } })).userId,
       },
     });
-    await rpc(app, cookie, "mcp/assignments/approve", { botId: bot.id, serverId: server.id });
+    await rpc(app, scope, "mcp/assignments/approve", { botId: bot.id, serverId: server.id });
     const withHeaders = async (headers: Record<string, string>) => {
-      await rpc(app, cookie, "mcp/servers/update", {
+      await rpc(app, scope, "mcp/servers/update", {
         id: server.id,
         config: {
           slug: "api",
@@ -997,7 +1010,7 @@ describeIntegration("agent import", () => {
       });
       const state = await rpc<{ serverIds: Record<string, unknown> }>(
         app,
-        cookie,
+        scope,
         "bots/importSetupState",
         { botId: bot.id, providers: [], serverIds: [server.id], routineIds: [] },
       );
@@ -1037,7 +1050,7 @@ describeIntegration("agent import", () => {
         `unreadable-${canary}`,
       ]) {
         await db.secret.update({ where: { id: secret.id }, data: { ciphertext } });
-        const response = await raw(app, cookie, "bots/importSetupState", {
+        const response = await raw(app, scope, "bots/importSetupState", {
           botId: bot.id,
           providers: ["openrouter"],
           serverIds: [server.id],
@@ -1074,7 +1087,7 @@ describeIntegration("agent import", () => {
     });
     const unknown = await rpc<{ serverIds: Record<string, unknown> }>(
       app,
-      cookie,
+      scope,
       "bots/importSetupState",
       {
         botId: bot.id,
@@ -1086,107 +1099,18 @@ describeIntegration("agent import", () => {
     expect(unknown.serverIds[server.id]).toBe(false);
   });
 
-  it("keeps imports apart between two members of one space", async () => {
-    const owner = await signup(app, `import-shared-owner-${stamp}@rakazo.test`, "Owner");
-    const shared = await rpc<{ id: string }>(app, owner, "spaces/create", { name: "Shared" });
-    const { organizationId } = await db.space.findUniqueOrThrow({
-      where: { id: shared.id },
-      select: { organizationId: true },
-    });
-    const member = await signup(app, `import-shared-member-${stamp}@rakazo.test`, "Member");
-    const memberActor = await rpc<{ userId: string }>(app, member, "me");
-    await db.member.deleteMany({ where: { userId: memberActor.userId } });
-    await db.member.create({
-      data: {
-        id: `import-shared-org-member-${stamp}`,
-        organizationId,
-        userId: memberActor.userId,
-        role: "member",
-        createdAt: new Date(),
-      },
-    });
-    await db.spaceMember.create({
-      data: {
-        id: `import-shared-space-member-${stamp}`,
-        spaceId: shared.id,
-        organizationId,
-        userId: memberActor.userId,
-        role: "member",
-        createdAt: new Date(),
-      },
-    });
-    const files = [
-      { path: ".openclaw/workspace/SOUL.md", content: "Calm.\n" },
-      { path: ".openclaw/workspace/USER.md", content: "Prefers tea.\n" },
-      {
-        path: ".openclaw/openclaw.json",
-        content:
-          '{ mcp: { servers: { docs: { url: "https://mcp.example.com/mcp", headers: { Authorization: "x" } } } } }',
-      },
-      { path: ".openclaw/skills/garden/SKILL.md", content: skill("garden", "Water plants") },
-    ];
-    const selection = (plan: AgentImportPlan) => ({
-      instructions: plan.instructions.map((item) => item.id),
-      memory: plan.memory.map((item) => ({ id: item.id, destination: "space" })),
-      skills: plan.skills.map((item) => item.id),
-      mcpServers: plan.mcpServers.map((item) => item.id),
-    });
-    const ownerPlan = await rpc<AgentImportPlan>(
-      app,
-      owner,
-      "bots/importPreview",
-      { files },
-      shared.id,
-    );
-    const ownerBot = await rpc<Bot>(
-      app,
-      owner,
-      "bots/importCreate",
-      { files, name: "Owned", selection: selection(ownerPlan) },
-      shared.id,
-    );
-    const server = await db.mcpServer.findFirstOrThrow({
-      where: { slug: "docs", spaceId: shared.id },
-    });
-
-    // Both act in the shared space.
-    const memberBot = await rpc<Bot>(app, member, "bots/create", { name: "Mine" }, shared.id);
-    expect(
-      (
-        await db.bot.findMany({
-          where: { id: { in: [ownerBot.id, memberBot.id] } },
-          select: { spaceId: true },
-        })
-      ).map((row) => row.spaceId),
-    ).toEqual([shared.id, shared.id]);
-    // The member's names are their own: nothing of the owner's is taken.
-    const memberPlan = await rpc<AgentImportPlan>(
-      app,
-      member,
-      "bots/importPreview",
-      { files },
-      shared.id,
-    );
-    expect(memberPlan.skills.map((item) => item.name)).toEqual(["garden"]);
-    expect(memberPlan.memory.find((item) => item.path === "USER.md")?.spacePath).toBe("USER.md");
-    expect(memberPlan.mcpServers.map((item) => item.name)).toEqual(["docs"]);
-
-    // The owner's import's setup state cannot be read by the member.
-    expect(
-      await rpc(
-        app,
-        member,
-        "bots/importSetupState",
-        { botId: ownerBot.id, providers: [], serverIds: [server.id], routineIds: [] },
-        shared.id,
-      ),
-    ).toEqual({ providers: {}, serverIds: { [server.id]: false }, routineIds: {} });
-  });
-
   it("keeps each import inside the actor's own space", async () => {
-    const ownerCookie = await signup(app, `import-owner-${stamp}@rakazo.test`, "Owner");
-    const otherCookie = await signup(app, `import-other-${stamp}@rakazo.test`, "Other");
-    await rpc(app, ownerCookie, "agentSkills/create", { content: skill("watering", "Owner") });
+    const ownerCookie = await testSpace(app, "Owner");
+    const otherCookie = await testSpace(app, "Other");
+    const skillRow = await rpc<{ id: string }>(app, ownerCookie, "agentSkills/create", {
+      content: skill("watering", "Owner"),
+    });
+    await rpc(app, ownerCookie, "availability/set", {
+      kind: "skill",
+      id: skillRow.id,
+      allSpaces: false,
+      spaceIds: [ownerCookie],
+    });
 
     const otherPlan = await rpc<AgentImportPlan>(app, otherCookie, "bots/importPreview", {
       files: workspace,
@@ -1215,24 +1139,18 @@ describeIntegration("agent import", () => {
   });
 });
 
-async function signup(app: App, email: string, name: string) {
-  const response = await app.request("/api/auth/sign-up/email", {
-    method: "POST",
-    headers: { "content-type": "application/json", origin: "http://127.0.0.1:5173" },
-    body: JSON.stringify({ email, password: "test-password-123", name }),
-  });
-  expect(response.status).toBeLessThan(400);
-  return sessionCookieHeader(response);
+async function testSpace(app: App, name = "Test") {
+  return createTestSpace(app, name);
 }
 
 async function rpc<T>(
   app: App,
-  cookie: string,
+  scope: string,
   proc: string,
   body: unknown = {},
   spaceId?: string,
 ): Promise<T> {
-  const res = await raw(app, cookie, proc, body, spaceId);
+  const res = await raw(app, scope, proc, body, spaceId);
   const text = await res.text();
   const parsed = JSON.parse(text) as { json?: T; error?: { message?: string } };
   if (res.status >= 400 || parsed.error) {
@@ -1242,12 +1160,12 @@ async function rpc<T>(
 }
 
 /** Undo as the app's dialog does it: for the import it was shown. */
-async function raw(app: App, cookie: string, proc: string, body: unknown, spaceId?: string) {
+async function raw(app: App, scope: string, proc: string, body: unknown, spaceId?: string) {
   return app.request(`/rpc/${proc}`, {
     method: "POST",
     headers: {
       "content-type": "application/json",
-      cookie,
+      ...testSpaceHeaders(scope),
       origin: "http://127.0.0.1:5173",
       ...(spaceId ? { "x-rakazo-space-id": spaceId } : {}),
     },

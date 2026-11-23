@@ -1,7 +1,13 @@
 import type { Route } from "@playwright/test";
 import { expect, test } from "@playwright/test";
 import type { BillingStatus } from "@rakazo/contracts";
-import { captureScreenshot, completeOnboarding, openUserSettings, rpc, signup } from "./helpers";
+import {
+  captureScreenshot,
+  completeOnboarding,
+  openLocalWorkspace,
+  openUserSettings,
+  rpc,
+} from "./helpers";
 
 const price = { amount: 1200, currency: "usd", interval: "month", intervalCount: 1 } as const;
 
@@ -33,10 +39,9 @@ async function enableBilling(route: Route, path: "me" | "bootstrap") {
 test("choose your own key or monthly credits, then add a one-time top-up", async ({
   page,
 }, testInfo) => {
-  const stamp = Date.now();
-  await signup(page, `credit-choice-${stamp}@rakazo.test`, "password12", "Demo Customer");
+  await openLocalWorkspace(page, "Demo Customer");
   await completeOnboarding(page);
-  await page.route("**/api/auth/capabilities", async (route) => {
+  await page.route("**/api/app-capabilities", async (route) => {
     const response = await route.fetch();
     await route.fulfill({ response, json: { ...(await response.json()), billing: true } });
   });
@@ -78,27 +83,6 @@ test("choose your own key or monthly credits, then add a one-time top-up", async
   await page.keyboard.press("Escape");
   await expect(page.getByText("All $30 goes to model usage.", { exact: true })).toBeVisible();
   await captureScreenshot(page, testInfo, "billing-credit-choice");
-  // Leaving before choosing a plan: log out or delete the account, without reaching settings.
-  await page.getByRole("button", { name: "Account", exact: true }).click();
-  await expect(page.getByRole("menuitem", { name: "Log out" })).toBeVisible();
-  await captureScreenshot(page, testInfo, "billing-account-menu");
-  // A log out the server rejects reports the log-out failure, not a billing error.
-  await page.route("**/api/auth/sign-out", (route) => route.fulfill({ status: 500, body: "" }), {
-    times: 1,
-  });
-  await page.getByRole("menuitem", { name: "Log out" }).click();
-  await expect(
-    page.getByRole("alert").filter({ hasText: "Could not log out. Try again." }),
-  ).toBeVisible();
-  await page.unroute("**/api/auth/sign-out");
-  // The failed log out reloaded the page; reopen the menu to reach deletion.
-  await page.getByRole("button", { name: "Account", exact: true }).click();
-  await page.getByRole("menuitem", { name: "Delete account" }).click();
-  const deletion = page.getByRole("dialog", { name: "Delete account" });
-  await expect(deletion.getByLabel("Current password")).toBeVisible();
-  await captureScreenshot(page, testInfo, "billing-delete-account");
-  await page.keyboard.press("Escape");
-  await expect(deletion).toHaveCount(0);
   let purchase: { amountCents: number; monthly: boolean } | undefined;
   await page.route("**/rpc/billing/purchaseCredits", async (route) => {
     purchase = route.request().postDataJSON().json;
@@ -239,12 +223,12 @@ test("choose your own key or monthly credits, then add a one-time top-up", async
 });
 
 test("delete an unpaid organization from the plan choice", async ({ page }, testInfo) => {
-  await signup(page, `org-paywall-${Date.now()}@rakazo.test`, "password12", "Demo Customer");
+  await openLocalWorkspace(page, "Demo Customer");
   await completeOnboarding(page);
   const work = await rpc<{ id: string; defaultSpaceId: string }>(page, "organizations/create", {
     name: "Work",
   });
-  await page.route("**/api/auth/capabilities", async (route) => {
+  await page.route("**/api/app-capabilities", async (route) => {
     const response = await route.fetch();
     await route.fulfill({ response, json: { ...(await response.json()), billing: true } });
   });
@@ -280,10 +264,9 @@ test("delete an unpaid organization from the plan choice", async ({ page }, test
 });
 
 test("start the own-key plan billed yearly", async ({ page }, testInfo) => {
-  const stamp = Date.now();
-  await signup(page, `byok-yearly-${stamp}@rakazo.test`, "password12", "Demo Customer");
+  await openLocalWorkspace(page, "Demo Customer");
   await completeOnboarding(page);
-  await page.route("**/api/auth/capabilities", async (route) => {
+  await page.route("**/api/app-capabilities", async (route) => {
     const response = await route.fetch();
     await route.fulfill({ response, json: { ...(await response.json()), billing: true } });
   });
@@ -320,9 +303,9 @@ test("start the own-key plan billed yearly", async ({ page }, testInfo) => {
 });
 
 test("end an own-key trial early to get full computer hours", async ({ page }, testInfo) => {
-  await signup(page, `trial-end-${Date.now()}@rakazo.test`, "password12", "Demo Customer");
+  await openLocalWorkspace(page, "Demo Customer");
   await completeOnboarding(page);
-  await page.route("**/api/auth/capabilities", async (route) => {
+  await page.route("**/api/app-capabilities", async (route) => {
     const response = await route.fetch();
     await route.fulfill({ response, json: { ...(await response.json()), billing: true } });
   });
@@ -367,9 +350,9 @@ test("end an own-key trial early to get full computer hours", async ({ page }, t
 test("a cancelled trial explains its missing computer hours and offers renewal", async ({
   page,
 }, testInfo) => {
-  await signup(page, `trial-cancelled-${Date.now()}@rakazo.test`, "password12", "Demo Customer");
+  await openLocalWorkspace(page, "Demo Customer");
   await completeOnboarding(page);
-  await page.route("**/api/auth/capabilities", async (route) => {
+  await page.route("**/api/app-capabilities", async (route) => {
     const response = await route.fetch();
     await route.fulfill({ response, json: { ...(await response.json()), billing: true } });
   });
@@ -408,9 +391,9 @@ test("a cancelled trial explains its missing computer hours and offers renewal",
 });
 
 test("switch a monthly own-key plan to yearly", async ({ page }, testInfo) => {
-  await signup(page, `byok-switch-${Date.now()}@rakazo.test`, "password12", "Demo Customer");
+  await openLocalWorkspace(page, "Demo Customer");
   await completeOnboarding(page);
-  await page.route("**/api/auth/capabilities", async (route) => {
+  await page.route("**/api/app-capabilities", async (route) => {
     const response = await route.fetch();
     await route.fulfill({ response, json: { ...(await response.json()), billing: true } });
   });
@@ -453,9 +436,9 @@ test("switch a monthly own-key plan to yearly", async ({ page }, testInfo) => {
 });
 
 test("move an own-key plan to a bigger tier", async ({ page }, testInfo) => {
-  await signup(page, `byok-tier-${Date.now()}@rakazo.test`, "password12", "Demo Customer");
+  await openLocalWorkspace(page, "Demo Customer");
   await completeOnboarding(page);
-  await page.route("**/api/auth/capabilities", async (route) => {
+  await page.route("**/api/app-capabilities", async (route) => {
     const response = await route.fetch();
     await route.fulfill({ response, json: { ...(await response.json()), billing: true } });
   });
@@ -532,9 +515,9 @@ test("move an own-key plan to a bigger tier", async ({ page }, testInfo) => {
 test("yearly billing shows the monthly computer reset separately from renewal", async ({
   page,
 }, testInfo) => {
-  await signup(page, `annual-hours-${Date.now()}@rakazo.test`, "password12", "Demo Customer");
+  await openLocalWorkspace(page, "Demo Customer");
   await completeOnboarding(page);
-  await page.route("**/api/auth/capabilities", async (route) => {
+  await page.route("**/api/app-capabilities", async (route) => {
     const response = await route.fetch();
     await route.fulfill({ response, json: { ...(await response.json()), billing: true } });
   });

@@ -485,7 +485,13 @@ async function commitAnswerRunInput(
     },
     data: {
       status: "queued",
-      ...(resumedTrigger !== run.trigger ? { trigger: resumedTrigger } : {}),
+      ...(resumedTrigger !== run.trigger
+        ? {
+            trigger: resumedTrigger,
+            // The composer's persisted reply, not the generated opening question, owns this turn.
+            ...(input.answerMessageId ? { sourceMessageId: input.answerMessageId } : {}),
+          }
+        : {}),
       ...(choiceAsk ? { checkpoint: null } : {}),
     },
   });

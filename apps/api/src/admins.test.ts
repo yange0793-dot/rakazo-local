@@ -3,21 +3,14 @@ import { describe, expect, it } from "vitest";
 import { isAdmin } from "./admins.js";
 
 describe("isAdmin", () => {
-  const users = [
-    { id: "verified", email: "Admin@Example.test", emailVerified: true },
-    { id: "unverified", email: "admin@example.test", emailVerified: false },
-  ];
   const prisma = {
-    user: {
-      findUnique: async ({ where }: { where: { id: string } }) =>
-        users.find((user) => user.id === where.id) ?? null,
+    deploymentSettings: {
+      findUnique: async () => ({ ownerUserId: "local-owner" }),
     },
   } as unknown as PrismaClient;
 
-  it("requires a listed, verified email", async () => {
-    const deps = { prisma, env: { adminEmails: ["admin@example.test"] } as never };
-    expect(await isAdmin(deps, "verified")).toBe(true);
-    expect(await isAdmin(deps, "unverified")).toBe(false);
-    expect(await isAdmin({ prisma, env: {} as never }, "verified")).toBe(false);
+  it("grants only the local deployment owner administration", async () => {
+    expect(await isAdmin({ prisma }, "local-owner")).toBe(true);
+    expect(await isAdmin({ prisma }, "chat-contact")).toBe(false);
   });
 });

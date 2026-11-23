@@ -1,11 +1,16 @@
 import { expect, test } from "@playwright/test";
-import { captureScreenshot, completeOnboarding, openNewSpace, rpc, signup } from "./helpers";
+import {
+  captureScreenshot,
+  completeOnboarding,
+  openLocalWorkspace,
+  openNewSpace,
+  rpc,
+} from "./helpers";
 
 test("a new space auto-completes onboarding, is renamed in its settings, and is deleted with its bots", async ({
   page,
 }, testInfo) => {
-  const stamp = Date.now();
-  await signup(page, `spaces-delete-${stamp}@rakazo.test`, "password12", "Space Owner");
+  await openLocalWorkspace(page, "Space Owner");
   await completeOnboarding(page);
 
   const sidebar = page.locator("aside").first();
@@ -77,8 +82,7 @@ test("a new space auto-completes onboarding, is renamed in its settings, and is 
 test("deleting the last bot in a space stays in the app after first use", {
   tag: "@nightly",
 }, async ({ page }) => {
-  const stamp = Date.now();
-  await signup(page, `spaces-empty-${stamp}@rakazo.test`, "password12", "Space Owner");
+  await openLocalWorkspace(page, "Space Owner");
   await completeOnboarding(page);
   const [chief] = await rpc<Array<{ id: string }>>(page, "bots/list", {});
   expect(chief).toBeTruthy();

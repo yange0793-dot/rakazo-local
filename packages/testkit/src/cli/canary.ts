@@ -37,14 +37,10 @@ async function main() {
       COMPOSIO_API_KEY: "",
       CURSOR_API_KEY: "",
       MAX_TOOL_CALLS_PER_TURN: "24",
-      BETTER_AUTH_SECRET: "provider-canary-auth-secret-at-least-32-characters",
       ENCRYPTION_KEY: "provider-canary-encryption-key-at-least-32-characters",
       SANDBOX_SUPERVISOR_TOKEN: "provider-canary-supervisor-token-at-least-32-characters",
       SCREEN_PROXY_SECRET: "provider-canary-screen-proxy-secret-at-least-32-characters",
-      BETTER_AUTH_URL: "http://127.0.0.1:5173",
       WEB_ORIGIN: "http://127.0.0.1:5173",
-      SIGNUPS_ENABLED: "true",
-      SIGNUP_ALLOWLIST: "",
       DATA_DIR: dataDir,
     };
     if (postgres) {

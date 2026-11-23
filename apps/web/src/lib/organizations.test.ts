@@ -4,7 +4,6 @@ import { queryClient, spaceQueries } from "./query";
 import type * as RpcModule from "./rpc";
 import { clearSpaceSelection, rpc, selectSpace } from "./rpc";
 
-vi.mock("./auth", () => ({ authClient: { $store: { notify: vi.fn() } } }));
 vi.mock("./rpc", async (importOriginal) => ({
   ...(await importOriginal<typeof RpcModule>()),
   rpc: { organizations: { list: vi.fn() } },

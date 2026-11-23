@@ -75,11 +75,7 @@ export const IMPROVER_STRATEGIES: Record<string, { revision: string; strategy: s
 export const CURRENT_IMPROVER_REVISION = "file-delivery-improver.v1";
 export const CURRENT_IMPROVER = IMPROVER_STRATEGIES[CURRENT_IMPROVER_REVISION]!;
 
-// A delivery check takes three to five model calls that each resend the growing context, and a
-// call must fit its full output reservation before it starts.
-const BUDGET = { maxToolCalls: 16, maxTotalTokens: 32_000, timeoutMs: 180_000 };
-const PROPOSAL_MAX_TOKENS = 3_072;
-const COMPARISON_MAX_TOKENS = 4_096;
+const BUDGET = { maxToolCalls: 16, timeoutMs: 180_000 };
 const ProposalSchema = z.discriminatedUnion("kind", [
   z.strictObject({ kind: z.literal("skip"), reason: z.string().min(1).max(600) }),
   z.strictObject({
@@ -220,8 +216,8 @@ export function ticketImprovementTrial(
       (run) =>
         run.tools.length <= execution.budget.maxToolCalls &&
         run.durationMs <= execution.budget.timeoutMs &&
-        // The comparison charges each call against the budget as it runs, by an upper bound when
-        // the provider reports no total, so a run without these errors stayed within it.
+        // Explicit comparison budgets are enforced during execution; unknown totals do not
+        // override a recorded budget error.
         !run.errors.some(
           (error) =>
             error.code === "missing_usage" ||
@@ -454,16 +450,10 @@ async function propose(
         tools: [],
         model: {
           ...model,
-          maxTokens: Math.min(model.maxTokens ?? PROPOSAL_MAX_TOKENS, PROPOSAL_MAX_TOKENS),
           callObserver: {
             async beforeCall(call) {
               if (call.provider !== model.provider || call.modelId !== model.id)
                 throw new Error("proposal_model_changed");
-              const counts = [...receipts.values()].map(reportedProposalTokens);
-              if (counts.some((count) => count === null)) throw new Error("missing_proposal_usage");
-              const spent = counts.reduce<number>((sum, count) => sum + count!, 0);
-              if (spent + call.inputTokensEstimate + call.maxOutputTokens > BUDGET.maxTotalTokens)
-                throw new Error("proposal_budget_exhausted");
               return model.callObserver?.beforeCall(call) ?? randomUUID();
             },
             afterCall: (reservationId, usage) =>
@@ -513,8 +503,6 @@ async function propose(
     error ??= "proposal_model_changed";
   // An unreported cache bucket leaves the total unknown; only a call with no counts is unusable.
   if (!usage.length || reported.some((count) => count === null)) error ??= "missing_proposal_usage";
-  if (reported.reduce<number>((sum, count) => sum + (count ?? 0), 0) > BUDGET.maxTotalTokens)
-    error ??= "proposal_budget_exhausted";
   const rawText = redactSecrets(output, secrets);
   const result = error
     ? null
@@ -1035,10 +1023,7 @@ export async function reflectTicketImprovement(
         candidate: { revision: `playbook:${candidateHash}`, playbook: proposal.playbook },
         improverRevision: CURRENT_IMPROVER,
         execution: {
-          model: {
-            ...model,
-            maxTokens: Math.min(model.maxTokens ?? COMPARISON_MAX_TOKENS, COMPARISON_MAX_TOKENS),
-          },
+          model,
           route: `${model.provider}/${model.id}/${model.apiProtocol ?? "default"}`,
           budget: BUDGET,
         },

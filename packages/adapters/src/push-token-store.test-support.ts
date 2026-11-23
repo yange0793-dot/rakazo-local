@@ -24,10 +24,9 @@ export class MemoryPushTokenStore implements PushTokenStore {
     const row = this.rows.get(userId);
     if (row && (!digest || credentialDigest(row.token) === digest)) this.rows.delete(userId);
   }
-  async endSession(userId: string, sessionId: string, nextSessionId?: string) {
+  async endSession(userId: string, sessionId: string) {
     const row = this.rows.get(userId);
     if (row?.sessionId !== sessionId) return;
-    if (nextSessionId) this.rows.set(userId, { ...row, sessionId: nextSessionId });
-    else this.rows.delete(userId);
+    this.rows.delete(userId);
   }
 }

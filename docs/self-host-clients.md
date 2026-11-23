@@ -14,7 +14,7 @@ Native apps need a setting on the server before they can use its [passkeys](./se
 ## Connecting a phone on the same network
 
 In the Compose stack's `.env`, set `RAKAZO_WEB_BIND=0.0.0.0` (or the host's LAN IP),
-and set `WEB_ORIGIN`, `BETTER_AUTH_URL` and `API_URL` to `http://<LAN-IP>:5173`.
+and set `WEB_ORIGIN`, `API_URL` to `http://<LAN-IP>:5173`.
 Replace `<LAN-IP>` with the server's LAN IP. This publishes only the web port; the API
 and other ports stay on loopback. For published images, if you changed `RAKAZO_WEB_PORT`,
 use that port instead of `5173` in the origins, firewall rule and app address below.

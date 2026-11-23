@@ -5,7 +5,7 @@ import { cleanupActors } from "./runner.js";
 const actors: EvalActor[] = [
   {
     botId: "root-bot",
-    cookie: "root-session",
+    scope: "eval-space",
     userId: "eval-user",
     spaceId: "eval-space",
   },

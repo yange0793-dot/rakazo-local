@@ -4,7 +4,7 @@ import type { ReactNode } from "react";
 import { act, Suspense } from "react";
 import { createRoot } from "react-dom/client";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
-import { isLeavingSession, startCall } from "../../lib/call-session";
+import { startCall } from "../../lib/call-session";
 import { rpc } from "../../lib/rpc";
 import { IncomingCall } from "./IncomingCall";
 
@@ -22,7 +22,6 @@ vi.mock("@rakazo/ui-web", () => ({
   ),
 }));
 vi.mock("../../lib/call-session", () => ({
-  isLeavingSession: vi.fn(() => false),
   prepareCallAudio: vi.fn(),
   startCall: vi.fn(),
   useCallSession: () => null,
@@ -90,7 +89,6 @@ beforeEach(() => {
   vi.mocked(rpc.threads.answerCall).mockReset();
   vi.mocked(rpc.notifications.declineIncomingCall).mockReset();
   vi.mocked(rpc.threads.endCall).mockReset();
-  vi.mocked(isLeavingSession).mockReturnValue(false);
   container = document.createElement("div");
   document.body.append(container);
   root = createRoot(container);
@@ -183,21 +181,6 @@ it.each(["Answer", "Decline"])("keeps a failed %s retryable", async (action) => 
   expect(button().disabled).toBe(false);
 });
 
-it.each(["Answer", "Decline"])(
-  "sends no %s while the page is leaving its session",
-  async (action) => {
-    // Another tab switched accounts and this page is reloading: its cookie is no longer the caller's.
-    vi.mocked(isLeavingSession).mockReturnValue(true);
-    render([bot("call-1", start + 45_000)]);
-    const button = [...container.querySelectorAll("button")].find(
-      (element) => element.textContent === action,
-    )!;
-    await act(async () => button.click());
-    expect(rpc.threads.answerCall).not.toHaveBeenCalled();
-    expect(rpc.notifications.declineIncomingCall).not.toHaveBeenCalled();
-  },
-);
-
 it("keeps private call content out of notifications", () => {
   const caller = bot("call-1", start + 45_000);
   caller.incomingCall!.reason = "Private reason";
@@ -232,31 +215,6 @@ it("hangs up an answer that lands after the call view is gone", async () => {
     { botId: "bot-1", callId: "call-1" },
     { context: { spaceId: "space-1" } },
   );
-});
-
-it("sends nothing for an answer that lands while the page reloads for another session", async () => {
-  let deliver: (value: { opening: string; reason: string }) => void = () => undefined;
-  vi.mocked(rpc.threads.answerCall).mockReturnValue(
-    new Promise((resolve) => {
-      deliver = resolve;
-    }),
-  );
-  const onAnswered = vi.fn();
-  act(() =>
-    root.render(<IncomingCall bots={[bot("call-1", start + 45_000)]} onAnswered={onAnswered} />),
-  );
-  act(() =>
-    [...container.querySelectorAll("button")]
-      .find((button) => button.textContent === "Answer")!
-      .click(),
-  );
-  act(() => root.render(null));
-  // Another tab switched accounts: a hang-up now would carry the other user's cookie.
-  vi.mocked(isLeavingSession).mockReturnValue(true);
-  await act(async () => deliver({ opening: "Ready?", reason: "Review" }));
-  expect(rpc.threads.endCall).not.toHaveBeenCalled();
-  expect(startCall).not.toHaveBeenCalled();
-  expect(onAnswered).not.toHaveBeenCalled();
 });
 
 it("hangs up an answer that lands while a lazy route hides the call view", async () => {

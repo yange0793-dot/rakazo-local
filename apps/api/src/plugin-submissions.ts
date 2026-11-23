@@ -8,7 +8,7 @@ import {
   pluginSubmissionAdminEmail,
   pluginSubmissionReceivedEmail,
   pluginSubmissionReviewedEmail,
-} from "@rakazo/auth";
+} from "@rakazo/mail";
 import type {
   IntegrationClaim,
   PluginMarketplaceEntry,

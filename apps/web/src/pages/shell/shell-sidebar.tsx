@@ -13,7 +13,6 @@ import { Search, SlidersHorizontal } from "lucide-react";
 import type { ReactNode, UIEvent } from "react";
 import { useState } from "react";
 import { InviteDialog } from "../../components/InviteDialog";
-import { PasskeyOffer } from "../../components/PasskeyOffer";
 import { PlanUsageRows, useUsageHint } from "../../components/PlanUsage";
 import { SidebarFooter } from "../../components/SidebarFooter";
 import { useBilling } from "../../components/SubscriptionGate";
@@ -22,7 +21,6 @@ import type { BotsSidebarDensity } from "../../lib/bots-sidebar-density-pref";
 import { switchOrganization, useOrganizations } from "../../lib/organizations";
 import { useQueryUserId } from "../../lib/query";
 import type { Panel } from "../../lib/right-panel-state";
-import { useSignOut } from "../../lib/sign-out";
 import { ActivityList } from "../ActivityList";
 import { SpaceSearchResults } from "../SpaceSearch";
 import type { SettingsSection } from "../shell-overlay";
@@ -299,9 +297,6 @@ export function ShellSidebar({
         >
           {archived}
         </div>
-        <div className={mini ? "hidden" : "contents"}>
-          <PasskeyOffer />
-        </div>
         <ShellSidebarFooter
           mini={mini}
           logos={footerLogos}
@@ -359,12 +354,6 @@ function ShellSidebarFooter({
   const [menuOpen, setMenuOpen] = useState(false);
   const [inviteOpen, setInviteOpen] = useState(false);
   const referral = billing?.referral;
-  const [logOutError, setLogOutError] = useState<string | null>(null);
-  const { signingOut, logOut } = useSignOut("/sign-in", (message) => {
-    // A failed sign-out reloads the page: reopen the menu so its error shows.
-    setMenuOpen(true);
-    setLogOutError(message);
-  });
   const { label: userName, initial: initials } = accountDisplay(user ?? {}, t`You`);
   const day = freeUntil ? formatBillingDate(freeUntil, i18n.locale || "en") : "";
   return (
@@ -389,10 +378,7 @@ function ShellSidebarFooter({
         image={user?.image}
         email={user?.email}
         open={menuOpen}
-        onOpenChange={(open) => {
-          setMenuOpen(open);
-          if (!open) setLogOutError(null);
-        }}
+        onOpenChange={setMenuOpen}
         onIntegrations={() => {
           setMenuOpen(false);
           openIntegrations();
@@ -439,12 +425,6 @@ function ShellSidebarFooter({
               }
             : undefined
         }
-        onLogOut={() => {
-          setLogOutError(null);
-          void logOut();
-        }}
-        signingOut={signingOut}
-        logOutError={logOutError}
         organizations={organizations}
         activeOrganizationId={activeOrganizationId}
         onSwitchOrganization={(organization) => {

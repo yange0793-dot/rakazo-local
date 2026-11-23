@@ -3,9 +3,9 @@ import { expect, test } from "@playwright/test";
 import {
   captureScreenshot,
   completeOnboarding,
+  openLocalWorkspace,
   openModelConnection,
   openUserSettings,
-  signup,
 } from "./helpers";
 
 const probePath = "**/rpc/models/probeOpenAiCompatible";
@@ -31,12 +31,7 @@ for (const surface of ["settings", "onboarding"] as const) {
           await route.fulfill({ response, json: { json: { ...body.json, needsModel: true } } });
         });
       }
-      await signup(
-        page,
-        `header-${surface}-${action}-${Date.now()}@rakazo.test`,
-        "password12",
-        "Header discovery",
-      );
+      await openLocalWorkspace(page, "Header discovery");
       if (surface === "settings") {
         await completeOnboarding(page);
         await openUserSettings(page, "models");

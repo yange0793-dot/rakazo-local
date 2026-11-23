@@ -1,11 +1,10 @@
 import { expect, test } from "@playwright/test";
-import { captureScreenshot, completeOnboarding, signup } from "./helpers";
+import { captureScreenshot, completeOnboarding, openLocalWorkspace } from "./helpers";
 
 test("opening a bot in another space switches in place, without a page reload", async ({
   page,
 }, testInfo) => {
-  const stamp = Date.now();
-  await signup(page, `space-switch-${stamp}@rakazo.test`, "password12", "Space Switcher");
+  await openLocalWorkspace(page, "Space Switcher");
   await completeOnboarding(page);
   const otherSpace = await page.request.post("/rpc/spaces/create", {
     data: { json: { name: "Second space" } },

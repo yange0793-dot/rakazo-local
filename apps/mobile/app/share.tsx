@@ -25,16 +25,7 @@ export default function ShareRoute() {
   const tokens = useMobileTokens();
   const insets = useSafeAreaInsets();
   const { t } = useLingui();
-  const allowRemoval = usePreventRemove(guarded, ({ data, repeat }) => {
-    const payload = data.action.payload;
-    // Authentication temporarily replaces the picker; sign-in returns here with the share.
-    if (payload && "name" in payload && payload.name === "sign-in") {
-      leave();
-      repeat();
-      return;
-    }
-    close();
-  });
+  const allowRemoval = usePreventRemove(guarded, () => close());
   const leave = () => {
     leaving.current = true;
     setGuarded(false);

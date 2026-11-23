@@ -18,7 +18,6 @@ const session = vi.hoisted(() => ({ space: "space-a", generation: 1, alert: vi.f
 
 vi.mock("react-native", () => ({ Alert: { alert: session.alert } }));
 vi.mock("./api-server", () => ({}));
-vi.mock("./api-auth", () => ({}));
 vi.mock("./api-live", () => ({}));
 vi.mock("./api", () => ({
   captureApiRequestContext: vi.fn(async () => ({
@@ -40,7 +39,7 @@ vi.mock("./live-notifications", () => ({
 vi.mock("./search-inbox", () => ({ removeFromSearchInbox: vi.fn() }));
 vi.mock("./section-name-prompt", () => ({ promptSectionName: vi.fn() }));
 vi.mock("./session", () => ({
-  loadSessionToken: async () => null,
+  loadLocalInstallSessionId: async () => null,
   currentSessionGeneration: () => session.generation,
 }));
 vi.mock("./user-error", () => ({ errorText: (_error: unknown, fallback: string) => fallback }));

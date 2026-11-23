@@ -29,7 +29,7 @@ describePostgres("security events (PostgreSQL)", () => {
 
   it("rejects rewriting an event", async () => {
     const row = await prisma.securityEvent.create({
-      data: { type: "auth.sign_in", userId: `${suffix}-a`, ip: "203.0.113.5" },
+      data: { type: "device.paired", userId: `${suffix}-a`, ip: "203.0.113.5" },
     });
     await expect(
       prisma.securityEvent.update({
@@ -45,11 +45,11 @@ describePostgres("security events (PostgreSQL)", () => {
     await prisma.securityEvent.createMany({
       data: [
         {
-          type: "auth.sign_in",
+          type: "device.paired",
           userId: `${suffix}-old`,
           createdAt: new Date(now.getTime() - 40 * 24 * 60 * 60 * 1000),
         },
-        { type: "auth.sign_in", userId: `${suffix}-new`, createdAt: now },
+        { type: "device.paired", userId: `${suffix}-new`, createdAt: now },
       ],
     });
     await pruneSecurityEvents(prisma, 30, now);

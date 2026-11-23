@@ -26,7 +26,7 @@ install -d -m 700 -o postgres -g postgres "$PGDATA"
 install -d -m 750 -o node -g node "$DATA/app"
 if [[ ! -s "$DATA/secrets.env" ]]; then
   {
-    for name in BETTER_AUTH_SECRET ENCRYPTION_KEY SCREEN_PROXY_SECRET SANDBOX_SUPERVISOR_TOKEN \
+    for name in ENCRYPTION_KEY SCREEN_PROXY_SECRET SANDBOX_SUPERVISOR_TOKEN \
       PG_OWNER_PASSWORD PG_APP_PASSWORD; do
       printf '%s=%s\n' "$name" "$(openssl rand -hex 32)"
     done
@@ -67,13 +67,13 @@ stop_database() {
 export NODE_ENV=production
 export DATABASE_URL="postgres://rakazo_app:${PG_APP_PASSWORD}@127.0.0.1:5432/rakazo"
 export DATA_DIR="$DATA/app"
-export WEB_ORIGIN="https://$HOST" BETTER_AUTH_URL="https://$HOST" RAKAZO_HOST="$HOST"
+export WEB_ORIGIN="https://$HOST" RAKAZO_HOST="$HOST"
 export API_HOST=127.0.0.1 API_PORT=3100 API_URL=http://127.0.0.1:3100
 export API_PROXY_TARGET=http://127.0.0.1:3100 WEB_PORT="$PORT"
 export TRUSTED_PROXIES=127.0.0.1 CLIENT_IP_HEADER=fly-client-ip
 export WAKEUP_DRIVER=graphile AGENT_RUNTIME=scripted SANDBOX_PROVIDER=fake
 export CLOUD_AGENT_PROVIDER=emulator PAYMENT_WALLET_PROVIDER=emulator
-export RAKAZO_LIVE_MODEL_CATALOG=off SIGNUPS_ENABLED=false CONTENT_ENCRYPTION=on
+export RAKAZO_LIVE_MODEL_CATALOG=off CONTENT_ENCRYPTION=on
 
 migrate() {
   DATABASE_MIGRATION_URL="postgres://rakazo:${PG_OWNER_PASSWORD}@127.0.0.1:5432/rakazo" \
@@ -146,7 +146,7 @@ kill "$waiting"
 wait "$waiting" 2> /dev/null || true
 (
   cd "$ROOT/apps/web"
-  exec env -u DATABASE_URL -u ENCRYPTION_KEY -u BETTER_AUTH_SECRET -u PG_OWNER_PASSWORD \
+  exec env -u DATABASE_URL -u ENCRYPTION_KEY -u PG_OWNER_PASSWORD \
     -u PG_APP_PASSWORD gosu node node_modules/.bin/vite preview --host 0.0.0.0 --port "$PORT" \
     --strictPort
 ) &

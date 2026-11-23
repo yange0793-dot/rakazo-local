@@ -20,7 +20,6 @@ vi.mock("expo-router", () => ({
   useLocalSearchParams: () => state.params,
 }));
 vi.mock("./api-server", () => ({}));
-vi.mock("./api-auth", () => ({}));
 vi.mock("./api-live", () => ({}));
 vi.mock("./api", () => ({
   rpc: state.rpc,

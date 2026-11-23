@@ -23,7 +23,6 @@ const TEMPLATE = `POSTGRES_USER=rakazo
 POSTGRES_PASSWORD=
 POSTGRES_DB=rakazo
 POSTGRES_APP_PASSWORD=
-BETTER_AUTH_SECRET=
 ENCRYPTION_KEY=
 SCREEN_PROXY_SECRET=
 SANDBOX_SUPERVISOR_TOKEN=
@@ -284,7 +283,6 @@ describe("NativeStackController", () => {
       WEB_PORT: "5173",
       API_PROXY_TARGET: "http://127.0.0.1:40001",
     });
-    expect(web?.env.BETTER_AUTH_SECRET).toBeUndefined();
     expect(runs.at(-1)?.args).toEqual([
       "image",
       "pull",

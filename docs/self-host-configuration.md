@@ -36,10 +36,6 @@ commands, add `-f docker-compose.override.yml` after the base file.
 All of these are optional:
 
 ```env
-RAKAZO_EXTRA_AUTH_ORIGINS=   # extra origins allowed to sign in and call the API; see below
-SIGNUPS_ENABLED=true
-SIGNUP_ALLOWLIST=you@example.com,@company.com
-SCIM_BEARER_TOKEN=        # lets your identity provider add and remove accounts; see self-host-accounts.md
 SANDBOX_PROVIDER=docker   # or none, e2b, novita, daytona, createos, boat. Keep fake only for pnpm test.
 AGENT_RUNTIME=pi          # Keep scripted only for pnpm test.
 WAKEUP_DRIVER=graphile
@@ -86,22 +82,12 @@ silent stream sooner.
   OpenAI-compatible model or speech connection added in the app. `RAKAZO_LOCAL_MODELS` servers
   and built-in providers retain Node's own connection timeout.
 
-### Reaching Rakazo from a second address
+### Local addresses
 
-Sign-in and API calls are accepted only from `WEB_ORIGIN`, `API_URL`, `BETTER_AUTH_URL` and the
-mobile app. If you also open the same install from another address, such as a Tailscale name or a
-LAN IP, the browser or desktop app gets `403 INVALID_ORIGIN`. List that address in
-`RAKAZO_EXTRA_AUTH_ORIGINS`, comma-separated:
-
-```env
-RAKAZO_EXTRA_AUTH_ORIGINS=https://rakazo.your-tailnet.ts.net,http://192.168.1.20:5173
-```
-
-Each entry must be a bare origin (scheme, host, optional port; no path). `https://` is accepted for
-any host. `http://` is accepted only for loopback, `.local`, and private-network IPs (RFC 1918 and
-Tailscale's 100.64.0.0/10). Anything else is ignored and logged as a warning. Only origins you list
-are trusted; the default is none. `WEB_ORIGIN` stays the address used in links, passkeys and OAuth
-callbacks.
+The local installation accepts loopback hosts and the configured `WEB_ORIGIN` and `API_URL`
+browser origins. `localhost`, `127.0.0.1`, and `::1` are equivalent on the same port. The API
+refuses public hosts and forwarded remote requests before selecting the local owner.
+See [Local identity](self-host-accounts.md).
 
 ## Feature switches
 

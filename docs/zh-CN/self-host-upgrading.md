@@ -172,7 +172,7 @@ Git 远端只接受 `https://` 和 `ssh://`，且只允许快进合并；工作�
 不要将其端口对外发布。普通应用账号没有更新接口，应用 API 也不持有更新令牌。
 更新器容器没有发布任何宿主机端口，未接入 Caddy，进程环境只包含更新器设置；
 应用密钥留在 Compose 读取的挂载 `.env` 中，不会加载到更新器容器。API、worker 和 web 仍没有 Docker 套接字。
-`RAKAZO_UPDATER_TOKEN` 还必须不同于 `BETTER_AUTH_SECRET`、`SANDBOX_SUPERVISOR_TOKEN` 和
+`RAKAZO_UPDATER_TOKEN` 还必须不同于 `SANDBOX_SUPERVISOR_TOKEN` 和
 `SCREEN_PROXY_SECRET`；不需要自动更新时可一直保持该 profile 关闭。
 
 `RAKAZO_DEPLOY_DIR` 必须是 Docker 守护进程看到的实际路径，宿主机与更新器内使用同一路径。

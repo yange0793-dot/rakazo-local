@@ -57,7 +57,6 @@ describePostgres("group and thread lock order (PostgreSQL)", { concurrent: false
       provisionMessagingIdentity(
         prisma,
         { provider: "sendblue", address },
-        { signupsEnabled: undefined, signupAllowlist: undefined },
       ),
     );
     provisioned = true;

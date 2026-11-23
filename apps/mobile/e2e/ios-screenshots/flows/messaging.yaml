@@ -2,17 +2,17 @@ appId: com.rakazo.app
 name: Messaging
 ---
 - runFlow:
-    file: ../subflows/sign-in.yaml
+    file: ../subflows/open-workspace.yaml
     env:
-      RAKAZO_ACTIVE_EMAIL: ${RAKAZO_SCREENSHOT_EMAIL}
-- openLink: "rakazo:///messaging"
+      RAKAZO_SCREENSHOT_WORKSPACE: Screenshot User
+- openLink: rakazo:///messaging
 - extendedWaitUntil:
-    visible: ".*#launch.*"
+    visible: .*#launch.*
     timeout: 15000
 - waitForAnimationToEnd:
     timeout: 3000
 - takeScreenshot: 01-messaging
-- tapOn: ".*#launch.*"
+- tapOn: .*#launch.*
 - waitForAnimationToEnd:
     timeout: 3000
 - takeScreenshot: 02-team-conversation

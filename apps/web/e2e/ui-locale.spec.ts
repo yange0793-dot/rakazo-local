@@ -1,10 +1,15 @@
 import { expect, test } from "@playwright/test";
-import { captureScreenshot, completeOnboarding, openUserSettings, signup } from "./helpers";
+import {
+  captureScreenshot,
+  completeOnboarding,
+  openLocalWorkspace,
+  openUserSettings,
+} from "./helpers";
 
 test("Polish can be selected, survives reload, and switches back to English", async ({
   page,
 }, testInfo) => {
-  await signup(page, `ui-locale-pl-${Date.now()}@rakazo.test`, "password12", "Locale QA");
+  await openLocalWorkspace(page, "Locale QA");
   await completeOnboarding(page, testInfo);
   const settings = await openUserSettings(page);
   const picker = settings.getByTestId("ui-locale-select");
@@ -30,8 +35,7 @@ test("Polish can be selected, survives reload, and switches back to English", as
 test("account settings language picker includes Hebrew and mirrors the UI right-to-left", async ({
   page,
 }, testInfo) => {
-  const stamp = Date.now();
-  await signup(page, `ui-locale-he-${stamp}@rakazo.test`, "password12", "Locale QA");
+  await openLocalWorkspace(page, "Locale QA");
   await completeOnboarding(page, testInfo);
 
   const settings = await openUserSettings(page);

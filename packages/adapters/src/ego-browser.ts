@@ -43,7 +43,7 @@ export type EgoBrowserProviderOptions = {
   /**
    * Origins the page tools may never navigate to or act on, such as this app's own approval UI.
    * An origin matches exactly: scheme, host and port. Defaults to the app's own origins from
-   * WEB_ORIGIN, BETTER_AUTH_URL and RAKAZO_EXTRA_AUTH_ORIGINS.
+   * WEB_ORIGIN and API_URL.
    */
   blockedOrigins?: string[];
   /** Environment for the default blocked origins. Tests inject their own. */
@@ -1003,11 +1003,7 @@ function originOrigin(value: string): string {
 
 /** The app's own origins, as the server already names them; nothing local is hardcoded here. */
 function selfAppOrigins(source: NodeJS.ProcessEnv): string[] {
-  const entries = [
-    source.WEB_ORIGIN,
-    source.BETTER_AUTH_URL,
-    ...(source.RAKAZO_EXTRA_AUTH_ORIGINS ?? "").split(/[\s,]+/),
-  ];
+  const entries = [source.WEB_ORIGIN, source.API_URL];
   const origins = new Set<string>();
   for (const entry of entries) {
     if (!entry?.trim()) continue;

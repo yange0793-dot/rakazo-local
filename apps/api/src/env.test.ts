@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { loadEnv, parseExtraAuthOrigins } from "./env.js";
+import { loadEnv } from "./env.js";
 
 const base = {
   DATABASE_URL: "postgres://rakazo:rakazo@127.0.0.1:5433/rakazo",
@@ -190,7 +190,7 @@ describe("loadEnv", () => {
         DATABASE_URL: base.DATABASE_URL,
         NODE_ENV: "production",
       }),
-    ).toThrow(/BETTER_AUTH_SECRET/);
+    ).toThrow(/ENCRYPTION_KEY/);
   });
 
   it("throws when production uses placeholder secrets", () => {
@@ -198,36 +198,33 @@ describe("loadEnv", () => {
       loadEnv({
         DATABASE_URL: base.DATABASE_URL,
         NODE_ENV: "production",
-        BETTER_AUTH_SECRET: "dev-secret-change-me-please-32chars",
-        ENCRYPTION_KEY: "real-encryption-key-value",
+        ENCRYPTION_KEY: "dev-encryption-key",
         SANDBOX_SUPERVISOR_TOKEN: "real-supervisor-token-with-enough-length",
         SCREEN_PROXY_SECRET: "real-screen-proxy-secret-with-enough-length",
       }),
-    ).toThrow(/BETTER_AUTH_SECRET/);
+    ).toThrow(/ENCRYPTION_KEY/);
   });
 
   it("loads real secrets in production", () => {
     const env = loadEnv({
       DATABASE_URL: base.DATABASE_URL,
       NODE_ENV: "production",
-      BETTER_AUTH_SECRET: "prod-auth-secret-with-enough-length",
       ENCRYPTION_KEY: "prod-encryption-key-with-enough-length",
       SCREEN_PROXY_SECRET: "prod-screen-proxy-secret-with-enough-length",
       SANDBOX_PROVIDER: "e2b",
-      API_HOST: "0.0.0.0",
+      API_HOST: "127.0.0.1",
     });
-    expect(env.authSecret).toBe("prod-auth-secret-with-enough-length");
     expect(env.encryptionKey).toBe("prod-encryption-key-with-enough-length");
     expect(env.sandboxSupervisorToken).toBeUndefined();
     expect(env.screenProxySecret).toBe("prod-screen-proxy-secret-with-enough-length");
-    expect(env.apiHost).toBe("0.0.0.0");
+    expect(env.apiHost).toBe("127.0.0.1");
+    expect(() => loadEnv({ ...base, API_HOST: "0.0.0.0" })).toThrow(/loopback/);
   });
 
   it("encrypts content on servers by default and fails startup on an invalid switch", () => {
     const production = {
       DATABASE_URL: base.DATABASE_URL,
       NODE_ENV: "production",
-      BETTER_AUTH_SECRET: "prod-auth-secret-with-enough-length",
       ENCRYPTION_KEY: "prod-encryption-key-with-enough-length",
       SCREEN_PROXY_SECRET: "prod-screen-proxy-secret-with-enough-length",
       SANDBOX_PROVIDER: "e2b",
@@ -246,7 +243,6 @@ describe("loadEnv", () => {
     const env = loadEnv({
       DATABASE_URL: base.DATABASE_URL,
       NODE_ENV: "production",
-      BETTER_AUTH_SECRET: "prod-auth-secret-with-enough-length",
       ENCRYPTION_KEY: "prod-encryption-key-with-enough-length",
       SCREEN_PROXY_SECRET: "prod-screen-proxy-secret-with-enough-length",
       SANDBOX_PROVIDER: "docker",
@@ -260,7 +256,6 @@ describe("loadEnv", () => {
       loadEnv({
         DATABASE_URL: base.DATABASE_URL,
         NODE_ENV: "production",
-        BETTER_AUTH_SECRET: "prod-auth-secret-with-enough-length",
         ENCRYPTION_KEY: "prod-encryption-key-with-enough-length",
         SCREEN_PROXY_SECRET: "prod-screen-proxy-secret-with-enough-length",
         SANDBOX_PROVIDER: "docker",
@@ -309,7 +304,6 @@ describe("loadEnv", () => {
       loadEnv({
         ...base,
         NODE_ENV: "production",
-        BETTER_AUTH_SECRET: "prod-auth-secret-with-enough-length",
         ENCRYPTION_KEY: "prod-encryption-key-with-enough-length",
         SCREEN_PROXY_SECRET: "prod-screen-proxy-secret-with-enough-length",
         SANDBOX_PROVIDER: "none",
@@ -341,52 +335,6 @@ describe("loadEnv", () => {
   });
 });
 
-describe("OIDC environment", () => {
-  const oidc = {
-    OIDC_ISSUER: "https://identity.example.test",
-    OIDC_CLIENT_ID: "fake-client",
-    OIDC_CLIENT_SECRET: "fake-secret",
-  };
-  it("requires all credentials and an HTTPS issuer", () => {
-    for (const [key, value] of Object.entries(oidc))
-      expect(() => loadEnv({ ...base, [key]: value })).toThrow(/configured together/);
-    expect(() =>
-      loadEnv({ ...base, ...oidc, OIDC_ISSUER: "http://identity.example.test" }),
-    ).toThrow(/HTTPS/);
-  });
-  it.each(["identity.example.test", "/issuer", "https://"])(
-    "reports invalid issuer %s as a configuration error",
-    (issuer) => {
-      expect(() => loadEnv({ ...base, ...oidc, OIDC_ISSUER: issuer })).toThrow(
-        "OIDC_ISSUER must be an HTTPS issuer URL",
-      );
-    },
-  );
-  it("guards password-only lockout without contacting discovery", () => {
-    expect(() => loadEnv({ ...base, AUTH_PASSWORD_ENABLED: "false" })).toThrow(/requires OIDC/);
-    expect(loadEnv({ ...base, ...oidc, AUTH_PASSWORD_ENABLED: "false" }).passwordAuth).toBe(false);
-  });
-  it("leaves the breached password check off unless explicitly enabled", () => {
-    expect(loadEnv(base).breachedPasswordCheck).toBe(false);
-    expect(
-      loadEnv({ ...base, AUTH_BREACHED_PASSWORD_CHECK_ENABLED: "true" }).breachedPasswordCheck,
-    ).toBe(true);
-    expect(() => loadEnv({ ...base, AUTH_BREACHED_PASSWORD_CHECK_ENABLED: "yes" })).toThrow(
-      "AUTH_BREACHED_PASSWORD_CHECK_ENABLED must be true or false",
-    );
-  });
-  it("defaults to SSO with no policy bypass", () => {
-    expect(loadEnv({ ...base, ...oidc }).oidc).toMatchObject({
-      name: "SSO",
-      allowSignupBypass: false,
-      scopes: ["openid", "email", "profile"],
-    });
-    expect(
-      loadEnv({ ...base, ...oidc, OIDC_ALLOW_SIGNUP_BYPASS: "true" }).oidc?.allowSignupBypass,
-    ).toBe(true);
-  });
-});
-
 describe("web origin", () => {
   it("drops trailing slashes so links never double up", () => {
     expect(loadEnv({ ...base, WEB_ORIGIN: "https://app.example.com/" }).webOrigin).toBe(
@@ -402,32 +350,11 @@ describe("web origin", () => {
 
   it("keeps the local default when none is set", () => {
     expect(loadEnv(base).webOrigin).toBe("http://127.0.0.1:5173");
-    expect(loadEnv(base).authUrl).toBe("http://127.0.0.1:5173");
   });
 
   it.each(["", " \t "])("uses the local default for blank WEB_ORIGIN %j", (value) => {
     const env = loadEnv({ ...base, WEB_ORIGIN: value });
     expect(env.webOrigin).toBe("http://127.0.0.1:5173");
-    expect(env.authUrl).toBe("http://127.0.0.1:5173");
-  });
-
-  it.each(["", " \t "])("uses webOrigin for blank BETTER_AUTH_URL %j", (value) => {
-    const env = loadEnv({
-      ...base,
-      WEB_ORIGIN: "https://app.example.com/",
-      BETTER_AUTH_URL: value,
-    });
-    expect(env.authUrl).toBe("https://app.example.com");
-  });
-
-  it("normalises BETTER_AUTH_URL the same way and keeps a path", () => {
-    const env = loadEnv({
-      ...base,
-      WEB_ORIGIN: "https://app.example.com/",
-      BETTER_AUTH_URL: "https://auth.example.com/base/",
-    });
-    expect(env.authUrl).toBe("https://auth.example.com/base");
-    expect(env.webOrigin).toBe("https://app.example.com");
   });
 
   it("refuses something that is not an absolute URL", () => {
@@ -436,65 +363,16 @@ describe("web origin", () => {
     );
   });
 
-  it("names BETTER_AUTH_URL when it is invalid", () => {
-    expect(() => loadEnv({ ...base, BETTER_AUTH_URL: "app.example.com" })).toThrow(
-      "BETTER_AUTH_URL must be an absolute http(s) URL",
-    );
-  });
-
-  it.each(["WEB_ORIGIN", "BETTER_AUTH_URL"])("refuses non-HTTP URLs for %s", (name) => {
+  it.each(["WEB_ORIGIN"])("refuses non-HTTP URLs for %s", (name) => {
     expect(() => loadEnv({ ...base, [name]: "app.example.com:5173" })).toThrow(
       `${name} must be an absolute http(s) URL`,
     );
   });
 
-  it.each(["WEB_ORIGIN", "BETTER_AUTH_URL"])("does not expose invalid %s values", (name) => {
+  it.each(["WEB_ORIGIN"])("does not expose invalid %s values", (name) => {
     const value = "postgres://user:password@db.example.test/database";
     const load = () => loadEnv({ ...base, [name]: value });
     expect(load).toThrow(`${name} must be an absolute http(s) URL`);
     expect(load).not.toThrow(value);
-  });
-});
-
-describe("directory provisioning environment", () => {
-  it("stays off without a token and keeps a long one", () => {
-    expect(loadEnv(base).scimBearerToken).toBeUndefined();
-    expect(loadEnv({ ...base, SCIM_BEARER_TOKEN: " " }).scimBearerToken).toBeUndefined();
-    const token = "a".repeat(32);
-    expect(loadEnv({ ...base, SCIM_BEARER_TOKEN: ` ${token} ` }).scimBearerToken).toBe(token);
-  });
-  it.each(["a".repeat(31), `${"a".repeat(16)} ${"a".repeat(16)}`])(
-    "refuses a short or spaced token",
-    (token) => {
-      expect(() => loadEnv({ ...base, SCIM_BEARER_TOKEN: token })).toThrow("SCIM_BEARER_TOKEN");
-    },
-  );
-});
-
-describe("RAKAZO_EXTRA_AUTH_ORIGINS", () => {
-  it("is empty when unset or blank", () => {
-    expect(loadEnv(base).extraAuthOrigins).toEqual([]);
-    expect(parseExtraAuthOrigins(" , ")).toEqual([]);
-  });
-
-  it("keeps https origins and http on loopback or a private network, normalized", () => {
-    expect(
-      parseExtraAuthOrigins(
-        "https://host.tailnet.ts.net/, http://192.168.1.20:5173 ,http://100.64.1.2,http://localhost:5173,https://host.tailnet.ts.net",
-      ),
-    ).toEqual([
-      "https://host.tailnet.ts.net",
-      "http://192.168.1.20:5173",
-      "http://100.64.1.2",
-      "http://localhost:5173",
-    ]);
-  });
-
-  it("drops invalid entries", () => {
-    expect(
-      parseExtraAuthOrigins(
-        "http://example.com,ftp://host,rakazo://,not a url,https://host/path,https://u:p@host,*",
-      ),
-    ).toEqual([]);
   });
 });

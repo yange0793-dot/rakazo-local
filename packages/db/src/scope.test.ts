@@ -2,22 +2,9 @@ import { describe, expect, it, vi } from "vitest";
 import type { PrismaClient } from "./client.js";
 import { IsolationError, requireMembership } from "./scope.js";
 
-function prismaForMembership(
-  found: boolean,
-  lastActive: string[] = [],
-  session: {
-    pinned?: string | null;
-    member?: boolean;
-    winner?: string;
-  } = {},
-) {
-  const pins = [session.pinned ?? null, session.winner ?? session.pinned ?? null];
+function prismaForMembership(found: boolean, lastActive: string[] = []) {
   return {
     $queryRaw: vi.fn(async () => lastActive.map((spaceId) => ({ spaceId }))),
-    session: {
-      findUnique: vi.fn(async () => ({ activeOrganizationId: pins.shift() ?? null })),
-      updateMany: vi.fn(async () => ({ count: session.winner ? 0 : 1 })),
-    },
     space: {
       findUnique: vi.fn(async ({ where }: { where: { id: string } }) => ({
         organizationId: `org-of-${where.id}`,
@@ -32,7 +19,6 @@ function prismaForMembership(
           where: { userId: string; spaceId?: string };
           select: Record<string, unknown>;
         }) => {
-          if (select.id) return session.member === false ? null : { id: "space-member-1" };
           if (select.organizationId) return { organizationId: "org-first" };
           return found
             ? {
@@ -89,7 +75,7 @@ describe("requireMembership", () => {
   it("without a requested Space, opens the organization the user was last active in", async () => {
     const prisma = prismaForMembership(true, ["space-recent"]);
 
-    await requireMembership(prisma, "user-1", null, "session-1");
+    await requireMembership(prisma, "user-1");
 
     expect(prisma.spaceMember.findFirst).toHaveBeenCalledWith(
       expect.objectContaining({
@@ -98,72 +84,6 @@ describe("requireMembership", () => {
           organizationId: "org-of-space-recent",
           space: { deletingAt: null },
         },
-      }),
-    );
-    expect(prisma.session.updateMany).toHaveBeenCalledWith({
-      where: { id: "session-1", userId: "user-1", activeOrganizationId: null },
-      data: { activeOrganizationId: "org-of-space-recent" },
-    });
-  });
-
-  it("keeps a session in the organization it was first given", async () => {
-    const prisma = prismaForMembership(true, ["space-elsewhere"], { pinned: "org-pinned" });
-
-    await requireMembership(prisma, "user-1", null, "session-1");
-
-    expect(prisma.spaceMember.findFirst).toHaveBeenCalledWith(
-      expect.objectContaining({
-        where: { userId: "user-1", organizationId: "org-pinned", space: { deletingAt: null } },
-        select: expect.objectContaining({ spaceId: true }),
-      }),
-    );
-    expect(prisma.$queryRaw).not.toHaveBeenCalled();
-    expect(prisma.session.updateMany).not.toHaveBeenCalled();
-  });
-
-  it("pins a session with no finished runs to the organization it opens", async () => {
-    const prisma = prismaForMembership(true, []);
-
-    await requireMembership(prisma, "user-1", null, "session-1");
-
-    expect(prisma.session.updateMany).toHaveBeenCalledWith({
-      where: { id: "session-1", userId: "user-1", activeOrganizationId: null },
-      data: { activeOrganizationId: "org-first" },
-    });
-  });
-
-  it("follows the pin a concurrent first request wrote", async () => {
-    const prisma = prismaForMembership(true, ["space-recent"], { winner: "org-winner" });
-
-    await requireMembership(prisma, "user-1", null, "session-1");
-
-    expect(prisma.spaceMember.findFirst).toHaveBeenLastCalledWith(
-      expect.objectContaining({
-        where: { userId: "user-1", organizationId: "org-winner", space: { deletingAt: null } },
-      }),
-    );
-  });
-
-  it("moves a session on from an organization the user left", async () => {
-    const prisma = prismaForMembership(true, ["space-recent"], {
-      pinned: "org-gone",
-      member: false,
-    });
-
-    await requireMembership(prisma, "user-1", null, "session-1");
-
-    expect(prisma.spaceMember.findFirst).toHaveBeenCalledWith(
-      expect.objectContaining({
-        where: {
-          userId: "user-1",
-          organizationId: "org-of-space-recent",
-          space: { deletingAt: null },
-        },
-      }),
-    );
-    expect(prisma.session.updateMany).toHaveBeenCalledWith(
-      expect.objectContaining({
-        where: expect.objectContaining({ activeOrganizationId: "org-gone" }),
       }),
     );
   });

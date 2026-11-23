@@ -13,6 +13,7 @@ import {
   MODEL_KEY_REJECTED_ERROR,
 } from "@rakazo/contracts";
 import { cloudflareRoutingFields } from "./cloudflare-ai-gateway.js";
+import { CODEX_CLIENT_HEADERS } from "./model-client-headers.js";
 import { COMPATIBLE_ENDPOINT_PRESETS } from "./openai-compatible-url.js";
 import { LOCAL_PROVIDER_ID, registerLocalProvider } from "./pi-local-provider.js";
 import { applyPiModelCompatibility } from "./pi-model-compat.js";
@@ -190,7 +191,7 @@ export async function verifyCatalogProviderApiKey(
       headers:
         provider === "google"
           ? { "x-goog-api-key": input.apiKey.trim() }
-          : { Authorization: `Bearer ${input.apiKey.trim()}` },
+          : { ...CODEX_CLIENT_HEADERS, Authorization: `Bearer ${input.apiKey.trim()}` },
       redirect: "error",
       signal: AbortSignal.any([
         AbortSignal.timeout(MODEL_CONNECT_TIMEOUT_MS),

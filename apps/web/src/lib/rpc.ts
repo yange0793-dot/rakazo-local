@@ -5,10 +5,10 @@ import type { AppContract, ProductEvent } from "@rakazo/contracts";
 import { CLIENT_BUILD_HEADER, formatClientBuild } from "@rakazo/contracts";
 import { displayIdentityEvent, displayIdentityResult } from "@rakazo/core";
 import { clientCorrelationHeaders, responseCorrelation } from "@rakazo/logging/monitoring";
-import { authClient } from "./auth";
 import { CLIENT_BUILD } from "./client-build";
 import { i18n } from "./i18n";
 import { identityLabels } from "./identity-display";
+import { localInstallSessionId } from "./local-install";
 import { reportClientError } from "./monitoring";
 
 const SPACE_STORAGE_KEY = "rakazo:space-id";
@@ -84,13 +84,14 @@ const link = new RPCLink<RpcClientContext>({
       options.context.spaceId === undefined ? selectedSpaceId() : options.context.spaceId;
     const correlation = clientCorrelationHeaders();
     const headers = withSpaceHeaders(request.headers, spaceId);
+    headers.set("x-rakazo-install-id", localInstallSessionId());
     if (CLIENT_BUILD) headers.set(CLIENT_BUILD_HEADER, formatClientBuild("web", CLIENT_BUILD));
     for (const [key, value] of Object.entries(correlation)) headers.set(key, value);
     let response: Response;
     try {
       response = await fetch(request, {
         headers,
-        credentials: "include",
+        credentials: "omit",
         // Keep cancellation attached directly to fetch rather than only a cloned Request.
         signal: options.signal,
       });
@@ -100,22 +101,12 @@ const link = new RPCLink<RpcClientContext>({
       throw error;
     }
     // Server exceptions are reported by the API; do not report every HTTP failure twice.
-    recheckSessionOnUnauthorized(response.status);
     if (response.status === 401 && spaceId && spaceId === selectedSpaceId())
       void leaveUnavailableSpace(spaceId);
     for (const listener of responseListeners) listener(response);
     return response;
   },
 });
-
-/**
- * A 401 means the session behind the app's last known user may be gone, but Better Auth only
- * rechecks it on focus or a timer, so a backgrounded window would keep its stale user (and every
- * screen that polls) indefinitely. Recheck now: a signed-out answer routes to sign-in.
- */
-export function recheckSessionOnUnauthorized(status: number): void {
-  if (status === 401) authClient.$store.notify("$sessionSignal");
-}
 
 let leavingSpace: Promise<void> | null = null;
 

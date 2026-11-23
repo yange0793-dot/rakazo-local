@@ -24,7 +24,6 @@ describePostgres("backing off a routine on refused model accounts (PostgreSQL)",
       provisionMessagingIdentity(
         db.prisma,
         { provider: "email", address },
-        { signupsEnabled: undefined, signupAllowlist: undefined },
       ),
     );
     identity = { userId, spaceId, botId, threadId };

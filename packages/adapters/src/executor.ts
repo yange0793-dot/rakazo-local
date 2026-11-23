@@ -1406,7 +1406,10 @@ export function createRunExecutor(executorDeps: ExecutorDeps) {
             groupId: thread.groupId,
             trigger: run.trigger,
             semanticMemoryEnabled,
-            semanticMemoryForgets: Boolean(semanticMemory?.forget),
+            semanticMemoryForgets: Boolean(
+              semanticMemory?.forget &&
+                semanticMemory.describe().capabilities.managedFacts === true,
+            ),
             mediaImagesEnabled: Boolean(deps.artifacts && mediaGeneration?.capabilities.images),
             mediaVideoEnabled: Boolean(deps.artifacts && mediaGeneration?.capabilities.video),
             paidServicesEnabled: Boolean(paidServices),

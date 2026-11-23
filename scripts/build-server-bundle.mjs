@@ -12,7 +12,7 @@
 // platform only. manifest.json names each entrypoint relative to that folder. Run each with that
 // folder as the working directory, the same environment as the Compose service of the same name:
 //   migrate  DATABASE_URL, DATABASE_MIGRATION_URL, RAKAZO_DB_PACKAGE_DIR=packages/db
-//   api      DATABASE_URL, API_HOST, API_PORT, BETTER_AUTH_SECRET, BETTER_AUTH_URL, WEB_ORIGIN,
+//   api      DATABASE_URL, API_HOST, API_PORT, WEB_ORIGIN,
 //            SCREEN_PROXY_SECRET, DATA_DIR, SANDBOX_PROVIDER (and that provider's settings,
 //            such as LOCAL_VM_CLI), RAKAZO_DESKTOP_STACK_TOKEN
 //   worker   DATABASE_URL, DATA_DIR, SANDBOX_PROVIDER (and that provider's settings)

@@ -1,8 +1,12 @@
-import { randomUUID } from "node:crypto";
 import type { Route } from "@playwright/test";
 import { expect, test } from "@playwright/test";
 import { computerProviderDescriptors } from "../../../packages/adapters/src/fake-computer-settings.test-support";
-import { captureScreenshot, completeOnboarding, openUserSettings, signup } from "./helpers";
+import {
+  captureScreenshot,
+  completeOnboarding,
+  openLocalWorkspace,
+  openUserSettings,
+} from "./helpers";
 
 async function adminComputers(route: Route) {
   const response = await route.fetch();
@@ -17,12 +21,7 @@ async function adminComputers(route: Route) {
 }
 
 test("an admin selects a computer provider and sees its fields", async ({ page }, testInfo) => {
-  await signup(
-    page,
-    `computer-settings-${randomUUID()}@rakazo.test`,
-    "password12",
-    "Computer settings",
-  );
+  await openLocalWorkspace(page, "Computer settings");
   await completeOnboarding(page);
   await page.route("**/rpc/me", adminComputers);
   await page.route("**/rpc/bootstrap", adminComputers);
@@ -56,7 +55,7 @@ test("an admin selects a computer provider and sees its fields", async ({ page }
 
 for (const enabled of [undefined, false]) {
   test(`Computer settings stay hidden when the flag is ${enabled}`, async ({ page }, testInfo) => {
-    await signup(page, `computer-hidden-${randomUUID()}@rakazo.test`, "password12", "Settings");
+    await openLocalWorkspace(page, "Settings");
     await completeOnboarding(page);
     const disabledComputers = async (route: Route) => {
       const response = await route.fetch();

@@ -30,7 +30,6 @@ describePostgres("routine tick prompt and model consistency (PostgreSQL)", () =>
       provisionMessagingIdentity(
         db.prisma,
         { provider: "email", address },
-        { signupsEnabled: undefined, signupAllowlist: undefined },
       ),
     );
     const { userId, spaceId, botId, threadId } = provisioned;

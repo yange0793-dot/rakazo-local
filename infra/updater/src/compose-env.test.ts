@@ -23,7 +23,7 @@ const composeDir = path.join(repoRoot, "infra/compose");
 const SHARED_SOURCES = [
   "packages/adapter-kit/src",
   "packages/adapters/src",
-  "packages/auth/src",
+  "packages/mail/src",
   "packages/contracts/src",
   "packages/core/src",
   "packages/db/src",
@@ -43,8 +43,6 @@ const KUBERNETES_SANDBOX =
 const LOCAL_VM = "Mac VM computers, which only the desktop app's native stack runs";
 const NOT_PASSED: Record<string, string> = {
   VITEST: "set by the test runner",
-  OWNER_EMAIL: "bootstrap-owner CLI input, passed on its own command line",
-  OWNER_PASSWORD: "bootstrap-owner CLI input, passed on its own command line",
   PM2_HOME: "restart-supervisor detection for PM2 hosts; Compose restarts containers",
   INVOCATION_ID: "restart-supervisor detection for systemd hosts; Compose restarts containers",
   RAKAZO_ALLOW_DEV_SECRETS: "development-only escape hatch for placeholder secrets",
@@ -64,6 +62,7 @@ const NOT_PASSED: Record<string, string> = {
   RAKAZO_IMAGE_TAG_PREVIOUS: "read by the updater sidecar, which has its own environment",
   RAKAZO_DB_PACKAGE_DIR: "passed only to the migration CLI by the desktop app's native stack",
   RAKAZO_ENV_FILE: "set by the desktop app's native stack so no stray .env is read",
+  RAKAZO_ALLOW_DESKTOP_SANDBOX: "local desktop sandbox opt-in; Compose uses its supervisor",
   LOCAL_VM_CLI: LOCAL_VM,
   LOCAL_VM_COMPUTER_IMAGE: LOCAL_VM,
   LOCAL_VM_CPUS: LOCAL_VM,
@@ -82,13 +81,12 @@ const NOT_PASSED: Record<string, string> = {
 };
 
 /**
- * Shared-package reads a process must not receive. Only the API signs sessions and talks to
- * the identity provider, so the worker resolves no auth secret. Only the migrate container
+ * Shared-package reads a process must not receive. Only the migrate container
  * gets the owner database login, so neither process holds one that bypasses row-level security.
  */
 const DENIED = {
   api: ["DATABASE_MIGRATION_URL"],
-  worker: ["BETTER_AUTH_SECRET", "DATABASE_MIGRATION_URL"],
+  worker: ["DATABASE_MIGRATION_URL"],
 } as const;
 
 /** Reads a source scan cannot see: names held in constants or read by third-party SDKs. */
@@ -212,7 +210,7 @@ describe("api and worker environment allowlists", () => {
       expect(api).toContain(key);
       expect(worker).toContain(key);
     }
-    for (const key of ["BETTER_AUTH_SECRET", "OIDC_CLIENT_SECRET", "SCREEN_PROXY_SECRET"]) {
+    for (const key of ["SCREEN_PROXY_SECRET"]) {
       expect(api).toContain(key);
       expect(worker).not.toContain(key);
     }
@@ -244,8 +242,6 @@ describe("api and worker environment allowlists", () => {
     (_name, files) => {
       const worker = stackEnvironment(files, "worker");
       for (const key of [
-        "BETTER_AUTH_SECRET",
-        "OIDC_CLIENT_SECRET",
         "SCREEN_PROXY_SECRET",
         "RAKAZO_UPDATER_TOKEN",
         "STRIPE_SECRET_KEY",

@@ -1,7 +1,12 @@
 import type { Route } from "@playwright/test";
 import { expect, test } from "@playwright/test";
 import type { BillingStatus, PlanLimits } from "@rakazo/contracts";
-import { captureScreenshot, completeOnboarding, openUserSettings, signup } from "./helpers";
+import {
+  captureScreenshot,
+  completeOnboarding,
+  openLocalWorkspace,
+  openUserSettings,
+} from "./helpers";
 
 const hours = (count: number) => new Date(Date.now() + count * 3_600_000).toISOString();
 
@@ -77,8 +82,7 @@ test("account menu and Usage show allowances and credits only when present", asy
 }, testInfo) => {
   await page.route("**/rpc/usage/limits", (route) => route.fulfill({ json: { json: plans } }));
   await page.route("**/rpc/usage/summary", (route) => route.fulfill({ json: { json: summary } }));
-  const stamp = Date.now();
-  await signup(page, `usage-limits-${stamp}@rakazo.test`, "password12", "Usage limits");
+  await openLocalWorkspace(page, "Usage limits");
   await completeOnboarding(page);
 
   await page.getByTestId("user-menu-trigger").click();
@@ -106,7 +110,7 @@ test("account menu and Usage show allowances and credits only when present", asy
   await expect(settings.getByText("example-large")).toBeVisible();
   await captureScreenshot(page, testInfo, "usage-limits-settings");
 
-  await page.route("**/api/auth/capabilities", async (route) => {
+  await page.route("**/api/app-capabilities", async (route) => {
     const response = await route.fetch();
     await route.fulfill({ response, json: { ...(await response.json()), billing: true } });
   });

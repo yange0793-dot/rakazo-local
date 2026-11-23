@@ -2,7 +2,7 @@ import { fetchFresh, writeSaved } from "@rakazo/core/query";
 import { useQuery } from "@tanstack/react-query";
 import { rpc } from "./api";
 import { accountRpcQuery, queryClient } from "./query";
-import { loadSessionToken } from "./session";
+import { loadLocalInstallSessionId } from "./session";
 
 const none: readonly string[] = [];
 
@@ -18,7 +18,7 @@ export function useTrustedLinkSites(): readonly string[] {
 
 /** Reads the list again when someone is signed in. */
 export async function loadTrustedLinkSites(): Promise<void> {
-  if (await loadSessionToken())
+  if (await loadLocalInstallSessionId())
     await fetchFresh(queryClient, trustedLinkSitesRead(), { reuse: true });
 }
 

@@ -3,7 +3,6 @@ vi.mock("./ai-consent", () => ({ promptAiConsent: vi.fn() }));
 import * as SecureStore from "expo-secure-store";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { authHeaders, currentApiBase } from "./api.js";
-import { passwordResetCapabilities } from "./api-auth.js";
 import { loadApiBase, resetApiBase, saveApiBase } from "./api-server.js";
 import { probeApiBase } from "./endpoint.js";
 import { fetchServer, serverHeaders, serverHeadersForUrl } from "./server-headers.js";
@@ -68,21 +67,6 @@ describe("server request headers", () => {
     expect(serverHeadersForUrl(`${SERVER}/rpc/me`, currentApiBase())).toEqual(ACCESS);
     expect(serverHeadersForUrl("https://rakazo.example.test.evil/rpc", SERVER)).toEqual({});
     expect(serverHeadersForUrl("https://other.example.test/rpc", SERVER)).toEqual({});
-  });
-
-  it("adds them to unauthenticated auth requests without replacing the caller's own", async () => {
-    await saveApiBase(SERVER, ACCESS);
-    const fetchMock = vi.fn(
-      async (_input: RequestInfo | URL, _init?: RequestInit) =>
-        new Response(JSON.stringify({ passwordReset: false, sso: [] })),
-    );
-    vi.stubGlobal("fetch", fetchMock);
-
-    await passwordResetCapabilities().catch(() => undefined);
-
-    const headers = new Headers(fetchMock.mock.calls[0]?.[1]?.headers);
-    expect(headers.get("cf-access-client-id")).toBe("id.access");
-    expect(headers.get("origin")).toBe("rakazo://");
   });
 
   it("restores saved headers on launch and drops them for another server", async () => {

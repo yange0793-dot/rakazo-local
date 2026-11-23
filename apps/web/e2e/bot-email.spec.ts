@@ -4,16 +4,16 @@ import {
   captureScreenshot,
   completeOnboarding,
   openBotPanelTab,
+  openLocalWorkspace,
   openUserSettings,
   rpc,
-  signup,
 } from "./helpers";
 
 test("a bot gets its email address from its settings and lists it in the Vault", async ({
   page,
 }, testInfo) => {
   const stamp = Date.now();
-  await signup(page, `bot-email-${stamp}@rakazo.test`, "password12", "Bot Email");
+  await openLocalWorkspace(page, "Bot Email");
   await completeOnboarding(page);
   const botId = activeBotId(page);
   await openBotPanelTab(page, "Computer");

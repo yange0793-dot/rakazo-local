@@ -23,7 +23,7 @@ describe("bootstrap upload configuration", () => {
   it.each([undefined, 2 * 1024 * 1024, 25 * 1024 * 1024])(
     "uses the server limit %s with an older-server fallback",
     async (maxUploadSizeBytes) => {
-      vi.stubGlobal("window", { location: { pathname: "/sign-in" } });
+      vi.stubGlobal("window", { location: { pathname: "/" } });
       vi.mocked(rpc.bootstrap).mockResolvedValue({
         me: { ticketBoardEnabled: false, maxUploadSizeBytes },
       } as Awaited<ReturnType<typeof rpc.bootstrap>>);
@@ -36,7 +36,7 @@ describe("bootstrap upload configuration", () => {
 
 describe("switching spaces in place", () => {
   it("loads the other space under its own header and leaves it for the shell", async () => {
-    vi.stubGlobal("window", { location: { pathname: "/sign-in" } });
+    vi.stubGlobal("window", { location: { pathname: "/" } });
     const other = { me: { ticketBoardEnabled: false } } as Awaited<
       ReturnType<typeof rpc.bootstrap>
     >;
@@ -53,7 +53,7 @@ describe("switching spaces in place", () => {
   });
 
   it("never hands a discarded switch's bootstrap to a later shell", async () => {
-    vi.stubGlobal("window", { location: { pathname: "/sign-in" } });
+    vi.stubGlobal("window", { location: { pathname: "/" } });
     vi.mocked(rpc.bootstrap)
       .mockReset()
       .mockResolvedValue({ me: { ticketBoardEnabled: false } } as Awaited<
@@ -72,7 +72,7 @@ describe("switching spaces in place", () => {
 
 describe("revisiting a space", () => {
   it("opens with the cached bootstrap and still refreshes it", async () => {
-    vi.stubGlobal("window", { location: { pathname: "/sign-in" } });
+    vi.stubGlobal("window", { location: { pathname: "/" } });
     const cached = { me: { ticketBoardEnabled: true, maxUploadSizeBytes: 4321 } } as Awaited<
       ReturnType<typeof rpc.bootstrap>
     >;
@@ -97,7 +97,7 @@ describe("revisiting a space", () => {
   });
 
   it("opens a visited space through any of its chats, not only the one it was left on", async () => {
-    vi.stubGlobal("window", { location: { pathname: "/sign-in" } });
+    vi.stubGlobal("window", { location: { pathname: "/" } });
     vi.mocked(rpc.bootstrap)
       .mockReset()
       .mockResolvedValue({ me: { ticketBoardEnabled: false } } as Awaited<
@@ -119,7 +119,7 @@ describe("revisiting a space", () => {
   });
 
   it("never seeds a shell for another space", async () => {
-    vi.stubGlobal("window", { location: { pathname: "/sign-in" } });
+    vi.stubGlobal("window", { location: { pathname: "/" } });
     vi.mocked(rpc.bootstrap)
       .mockReset()
       .mockResolvedValue({ me: { ticketBoardEnabled: false } } as Awaited<
@@ -134,7 +134,7 @@ describe("revisiting a space", () => {
 
 describe("primed space isolation", () => {
   it("applies capabilities only when the selected shell takes the bootstrap", async () => {
-    vi.stubGlobal("window", { location: { pathname: "/sign-in" } });
+    vi.stubGlobal("window", { location: { pathname: "/" } });
     const other = { me: { ticketBoardEnabled: true, maxUploadSizeBytes: 1234 } } as Awaited<
       ReturnType<typeof rpc.bootstrap>
     >;
@@ -166,7 +166,7 @@ describe("primed space isolation", () => {
   });
 
   it("does not let a superseded response overwrite the selected space's capabilities", async () => {
-    vi.stubGlobal("window", { location: { pathname: "/sign-in" } });
+    vi.stubGlobal("window", { location: { pathname: "/" } });
     type Bootstrap = Awaited<ReturnType<typeof rpc.bootstrap>>;
     let resolveOld = (_value: Bootstrap) => {};
     const old = new Promise<Bootstrap>((resolve) => {
@@ -193,7 +193,7 @@ describe("primed space isolation", () => {
   });
 
   it("drops another space's group bootstrap and requests the selected space", async () => {
-    vi.stubGlobal("window", { location: { pathname: "/sign-in" } });
+    vi.stubGlobal("window", { location: { pathname: "/" } });
     vi.mocked(selectedSpaceId).mockReturnValue("space-a");
     const other = { me: { ticketBoardEnabled: true, maxUploadSizeBytes: 1234 } } as Awaited<
       ReturnType<typeof rpc.bootstrap>
@@ -213,7 +213,7 @@ describe("primed space isolation", () => {
   });
 
   it("does not expose a switch bootstrap to the subscription gate", async () => {
-    vi.stubGlobal("window", { location: { pathname: "/sign-in" } });
+    vi.stubGlobal("window", { location: { pathname: "/" } });
     vi.mocked(rpc.bootstrap).mockResolvedValue({ me: {} } as Awaited<
       ReturnType<typeof rpc.bootstrap>
     >);

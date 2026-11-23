@@ -3279,7 +3279,7 @@ describe("MCP connector private endpoints", () => {
     await connector.close();
   });
 
-  it.each(["http://localhost:3100/api/auth/get-session", "https://127.0.0.1:3100/mcp"])(
+  it.each(["http://localhost:3100/api/local-identity", "https://127.0.0.1:3100/mcp"])(
     "does not connect loopback %s for a non-owner",
     async (endpoint) => {
       const fetch = vi.fn();

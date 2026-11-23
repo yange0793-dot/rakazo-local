@@ -5,8 +5,8 @@ import {
   captureScreenshot,
   completeOnboarding,
   openBotPanelTab,
+  openLocalWorkspace,
   rpc,
-  signup,
 } from "./helpers";
 
 test(
@@ -15,7 +15,7 @@ test(
   async ({ page }, testInfo) => {
     const stamp = Date.now();
     const userName = `Korean Routine ${stamp}`;
-    await signup(page, `routine-ko-${stamp}@rakazo.test`, "password12", userName);
+    await openLocalWorkspace(page, userName);
     await completeOnboarding(page);
 
     await page.getByRole("button", { name: new RegExp(userName) }).click();
@@ -48,8 +48,7 @@ test(
 );
 
 test("routine test-run completes and survives reload", async ({ page }, testInfo) => {
-  const stamp = Date.now();
-  await signup(page, `routine-${stamp}@rakazo.test`, "password12", "Routine");
+  await openLocalWorkspace(page, "Routine");
   await completeOnboarding(page);
   const botId = activeBotId(page);
 
@@ -122,7 +121,7 @@ test("a routine run that failed to start shows the error in Details", async ({
   page,
 }, testInfo) => {
   const stamp = Date.now();
-  await signup(page, `routine-failed-${stamp}@rakazo.test`, "password12", "Routine");
+  await openLocalWorkspace(page, "Routine");
   await completeOnboarding(page);
   const botId = activeBotId(page);
   await rpc<Routine>(page, "routines/create", {
@@ -177,7 +176,7 @@ test("a routine run that failed to start shows the error in Details", async ({
 
 test("run history links runs that replied and marks silent ones", async ({ page }, testInfo) => {
   const stamp = Date.now();
-  await signup(page, `routine-states-${stamp}@rakazo.test`, "password12", "Routine");
+  await openLocalWorkspace(page, "Routine");
   await completeOnboarding(page);
   const botId = activeBotId(page);
   await rpc<Routine>(page, "routines/create", {
@@ -248,8 +247,7 @@ test("run history links runs that replied and marks silent ones", async ({ page 
 test("a webhook delivery stays out of the chat, like a scheduled run", async ({
   page,
 }, testInfo) => {
-  const stamp = Date.now();
-  await signup(page, `routine-delivery-${stamp}@rakazo.test`, "password12", "Delivery");
+  await openLocalWorkspace(page, "Delivery");
   await completeOnboarding(page);
   const botId = activeBotId(page);
 
