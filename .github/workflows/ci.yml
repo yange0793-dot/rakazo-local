@@ -116,10 +116,10 @@ jobs:
           DATABASE_URL: postgres://rakazo:rakazo@127.0.0.1:5433/rakazo
       - name: Typecheck
         if: steps.areas.outputs.all_packages != 'false'
-        run: pnpm check
+        run: pnpm check --concurrency=2
       - name: Typecheck affected packages
         if: steps.areas.outputs.all_packages == 'false'
-        run: pnpm check --affected
+        run: pnpm check --affected --concurrency=2
         env:
           TURBO_SCM_BASE: HEAD^1
       - name: Save typecheck cache

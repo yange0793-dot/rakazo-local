@@ -26,7 +26,7 @@ done
 # It must not move edge backward. The caller holds the same image lock through this check and push.
 current_main=""
 if [[ "${GITHUB_REF:-}" == refs/heads/main ]]; then
-  current_main="$(git ls-remote --exit-code origin refs/heads/main | cut -f1)"
+  current_main="$(gh api "repos/${GITHUB_REPOSITORY:?}/git/ref/heads/main" --jq .object.sha)"
   [[ "$current_main" =~ ^[a-f0-9]{40}$ ]] || { echo "Could not resolve main." >&2; exit 1; }
 fi
 tag_args=()
