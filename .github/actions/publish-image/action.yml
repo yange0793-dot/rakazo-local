@@ -32,6 +32,8 @@ runs:
         GH_TOKEN: ${{ github.token }}
       run: bash "$ACTION_PATH/publish.sh"
     - name: Attest the published image
+      # GitHub does not support attestations for user-owned private repositories.
+      if: ${{ !github.event.repository.private || github.event.repository.owner.type != 'User' }}
       uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
       with:
         subject-name: ${{ inputs.image }}

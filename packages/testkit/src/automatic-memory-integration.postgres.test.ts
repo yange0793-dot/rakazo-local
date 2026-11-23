@@ -158,7 +158,11 @@ postgres("automatic memory synthetic integration (isolated PostgreSQL)", () => {
 
   const complete = async (request: MemoryCompletionRequest): Promise<MemoryCompletionResponse> => {
     if (request.tools.some((tool) => tool.name === "judge_memory_support")) {
-      const candidates = JSON.parse(request.messages.at(-1)!.content) as Array<{
+      const content = request.messages.at(-1)?.content;
+      if (typeof content !== "string") {
+        throw new Error("Memory support request must contain JSON text.");
+      }
+      const candidates = JSON.parse(content) as Array<{
         index: number;
         memory: string;
       }>;

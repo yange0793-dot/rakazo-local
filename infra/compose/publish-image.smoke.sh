@@ -27,18 +27,19 @@ case "$3" in
   *) exit 1 ;;
 esac
 FAKE
-cat > "$scratch/bin/git" <<'FAKE'
+cat > "$scratch/bin/gh" <<'FAKE'
 #!/usr/bin/env bash
 set -euo pipefail
-[[ "$*" == 'ls-remote --exit-code origin refs/heads/main' ]] || exit 1
+[[ "$*" == "api repos/$GITHUB_REPOSITORY/git/ref/heads/main --jq .object.sha" ]] || exit 1
 [[ "${FAIL_MAIN:-0}" != 1 ]] || exit 1
-printf '%s\trefs/heads/main\n' "$MAIN_SHA"
+printf '%s\n' "$MAIN_SHA"
 FAKE
 chmod +x "$scratch/bin/"*
 export PATH="$scratch/bin:$PATH"
 export IMAGE=registry.example.test/project/app
 export DIGESTS_DIRECTORY="$scratch/digests"
 export GITHUB_REF=refs/heads/main
+export GITHUB_REPOSITORY=example/project
 export GITHUB_SHA=1111111111111111111111111111111111111111
 export MAIN_SHA="$GITHUB_SHA"
 export GITHUB_OUTPUT="$scratch/outputs"
