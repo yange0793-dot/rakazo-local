@@ -8,7 +8,11 @@ import {
   ScriptedAgentRuntime,
   SendBlueEmulator,
 } from "@rakazo/adapters";
-import { formatMessagingLinkCode, issueMessagingLinkCode } from "@rakazo/db";
+import {
+  formatMessagingLinkCode,
+  issueMessagingLinkCode,
+  provisionMessagingIdentity,
+} from "@rakazo/db";
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import { asSystem } from "./system-db.js";
 
@@ -47,6 +51,10 @@ describeMessaging("messaging surface journeys", () => {
     prisma.messagingIdentity.findUnique({
       where: { provider_address: { provider: "sendblue", address } },
     });
+  const linkedNumber = async (address = uniqueNumber()) => {
+    await provisionMessagingIdentity(prisma, { provider: "sendblue", address });
+    return address;
+  };
 
   /** Text answers apply only to a request the person has received. */
   const waitForInviteSent = async (address: string) => {
@@ -96,21 +104,28 @@ describeMessaging("messaging surface journeys", () => {
       dataDir,
       sandboxProvider: "fake",
       agentRuntime: "scripted",
-      // These journeys exercise the Poke-style open line; the linking journey
-      // below covers the default (linking-only) posture explicitly.
-      messagingOpenSignup: true,
       messaging: new ChatSdkMessagingSurface([platform]),
     });
     app = handles.app;
     stop = handles.stop;
     prisma = asSystem(handles.prisma);
+    await linkedNumber(sender);
   });
 
   afterAll(async () => {
     await stop?.();
   });
 
-  it("provisions on first text, runs the bot, and mirrors the reply back out", async () => {
+  it("does not create an identity for an unlinked sender", async () => {
+    const stranger = uniqueNumber();
+    const res = await app.request(
+      emulator.buildInboundRequest({ fromNumber: stranger, content: "hello" }),
+    );
+    expect(res.status).toBe(200);
+    expect(await findIdentity(stranger)).toBeNull();
+  });
+
+  it("runs the linked sender's bot and mirrors the reply back out", async () => {
     const res = await app.request(
       emulator.buildInboundRequest({
         fromNumber: sender,
@@ -192,7 +207,7 @@ describeMessaging("messaging surface journeys", () => {
   });
 
   it("answers a text sent while an app turn is working back in the chat it came from", async () => {
-    const texter = uniqueNumber();
+    const texter = await linkedNumber();
     await app.request(
       emulator.buildInboundRequest({
         fromNumber: texter,
@@ -380,7 +395,7 @@ describeMessaging("messaging surface journeys", () => {
   });
 
   it("declines a channel invite on NO without waking the bot", async () => {
-    const owner = uniqueNumber();
+    const owner = await linkedNumber();
     const stranger = uniqueNumber();
     const groupId = `grp-no-${stamp}`;
 
@@ -432,7 +447,7 @@ describeMessaging("messaging surface journeys", () => {
   });
 
   it("stops the owner's work on a direct STOP and answers an idle one; media and group stops stay messages", async () => {
-    const owner = uniqueNumber();
+    const owner = await linkedNumber();
     const groupId = `grp-stop-${stamp}`;
     const note = "Stopped. Anything already done stays done.";
     const text = (content: string, handle: string, extra: Record<string, unknown> = {}) =>
@@ -490,7 +505,7 @@ describeMessaging("messaging surface journeys", () => {
   });
 
   it("leaves an approved channel on LEAVE and can rejoin via a later invite", async () => {
-    const owner = uniqueNumber();
+    const owner = await linkedNumber();
     const stranger = uniqueNumber();
     const groupId = `grp-leave-${stamp}`;
 
@@ -560,7 +575,7 @@ describeMessaging("messaging surface journeys", () => {
   });
 
   it("answers a group invite by text only right after it", async () => {
-    const owner = uniqueNumber();
+    const owner = await linkedNumber();
     const stranger = uniqueNumber();
     const groupId = `grp-answer-${stamp}`;
     await dmAndWaitForReply(owner, "hello", `answer-dm-${stamp}`);
@@ -593,7 +608,7 @@ describeMessaging("messaging surface journeys", () => {
   });
 
   it("marks a mirrored reply failed when the outbound status webhook reports ERROR", async () => {
-    const texter = uniqueNumber();
+    const texter = await linkedNumber();
     const handle = `fail-status-dm-${stamp}`;
     const res = await app.request(
       emulator.buildInboundRequest({
@@ -628,13 +643,13 @@ describeMessaging("messaging surface journeys", () => {
   });
 
   it("still accepts sendblue inbound on the legacy phone webhook path", async () => {
-    const texter = uniqueNumber();
+    const texter = await linkedNumber();
     const source = emulator.buildInboundRequest({
       fromNumber: texter,
       content: "legacy path",
       handle: `legacy-dm-${stamp}`,
     });
-    const res = await app.request("https://rakazo.test/api/v1/phone/webhook", {
+    const res = await app.request("http://127.0.0.1/api/v1/phone/webhook", {
       method: "POST",
       headers: {
         "content-type": "application/json",
@@ -643,15 +658,22 @@ describeMessaging("messaging surface journeys", () => {
       body: await source.text(),
     });
     expect(res.status).toBe(200);
-    // Provisioning proves the legacy route reached the sendblue platform.
-    await waitForDatabase(async () => findIdentity(texter));
+    const identity = await findIdentity(texter);
+    await waitForDatabase(async () =>
+      prisma.message.findFirst({
+        where: {
+          thread: { botId: identity.botId },
+          clientNonce: `messaging:sendblue:legacy-dm-${stamp}`,
+        },
+      }),
+    );
   });
 
   it("ignores a nested vendor envelope that is not a flat inbound message", async () => {
     const stranger = uniqueNumber();
     // A mistaken parser that unwraps `data` would treat this as a message and
     // provision. The SendBlue inbound shape is flat; nested envelopes are ignored.
-    const res = await app.request("https://rakazo.test/api/v1/phone/webhook", {
+    const res = await app.request("http://127.0.0.1/api/v1/phone/webhook", {
       method: "POST",
       headers: {
         "content-type": "application/json",
@@ -677,7 +699,7 @@ describeMessaging("messaging surface journeys", () => {
   });
 
   // Runs last: it unlinks the first journey's identity to free its bot.
-  it("links a new address to an existing account via a web-issued code", async () => {
+  it("links a new address to an existing bot via an issued code", async () => {
     const owner = await findIdentity(sender);
     expect(owner).toBeTruthy();
     // Unlink (as the web UI would) so the bot is free to link again.
@@ -706,9 +728,7 @@ describeMessaging("messaging surface journeys", () => {
         (message) => message.to === newAddress && message.body.startsWith("Linked"),
       ),
     );
-    // The code is single-use: a replay never binds another address to the
-    // issuer's account. (This suite runs the open line, so the replayer
-    // auto-provisions a fresh account of their own instead.)
+    // The code is single-use: replay neither binds another address nor creates an identity.
     const replayAddress = uniqueNumber();
     const replay = await app.request(
       emulator.buildInboundRequest({
@@ -717,11 +737,11 @@ describeMessaging("messaging surface journeys", () => {
       }),
     );
     expect(replay.status).toBe(200);
-    const replayIdentity = await waitForDatabase<{ userId: string; botId: string }>(() =>
-      findIdentity(replayAddress),
-    );
-    expect(replayIdentity.userId).not.toBe(owner.userId);
-    expect(replayIdentity.botId).not.toBe(owner.botId);
+    expect(await findIdentity(replayAddress)).toBeNull();
+    expect(await findIdentity(newAddress)).toMatchObject({
+      userId: owner.userId,
+      botId: owner.botId,
+    });
   });
 });
 

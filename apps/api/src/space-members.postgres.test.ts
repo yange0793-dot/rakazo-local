@@ -956,12 +956,19 @@ describePostgres("shared spaces: invites and membership (PostgreSQL)", () => {
     await expect(
       call(asInvitee, "skills/start", { botId: otherBot.id, goal: "Book a table" }),
     ).resolves.toMatchObject({ status: 409 });
-    // A background helper never uses the computer, so it doesn't keep teaching away, and the
-    // teacher's own helper keeps working through the lesson.
+    // Helpers can use the computer too, so another person's helper still blocks teaching.
     await system.run.updateMany({
       where: { botId: bot.id, status: "running" },
       data: { trigger: "helper" },
     });
+    await expect(
+      call(asInvitee, "skills/start", { botId: otherBot.id, goal: "Book a table" }),
+    ).resolves.toMatchObject({ status: 409 });
+    await system.run.updateMany({
+      where: { botId: bot.id, status: "running" },
+      data: { status: "completed", completedAt: new Date() },
+    });
+    // Once the other person's work ends, teaching cancels the teacher's own helper.
     const helperThread = await system.thread.create({
       data: { spaceId: home, helperBotId: otherBot.id, userId: invitee.id },
     });
@@ -993,7 +1000,7 @@ describePostgres("shared spaces: invites and membership (PostgreSQL)", () => {
     ).not.toContain("working for someone else");
     await expect(
       system.run.findUniqueOrThrow({ where: { id: ownHelper.id } }),
-    ).resolves.toMatchObject({ status: "running" });
+    ).resolves.toMatchObject({ status: "cancelled" });
 
     // A member removed while holding the screen frees it at once, not when the lease runs out.
     await system.computer.update({

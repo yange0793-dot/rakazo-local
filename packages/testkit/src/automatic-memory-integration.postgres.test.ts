@@ -52,7 +52,6 @@ import { afterAll, beforeAll, describe, expect, it } from "vitest";
  * outbox id or index candidate, never generated prose.
  */
 const databaseUrl = process.env.DATABASE_URL;
-const postgres = process.env.VERIFY_DATABASE && databaseUrl ? describe : describe.skip;
 
 const SOURCE_ROOT = fileURLToPath(new URL("../../../", import.meta.url));
 const INDEX_PYTHON = process.env.RAKAZO_TEST_INDEX_PYTHON ?? "";
@@ -61,6 +60,12 @@ const INDEX_SCRIPT = join(SOURCE_ROOT, "scripts/local-memory-index.py");
 const LANGMEM_PYTHON = process.env.RAKAZO_TEST_EXTRACTOR_PYTHON ?? "";
 const LANGMEM_SCRIPT = join(SOURCE_ROOT, "scripts/langmem-memory-extractor.py");
 const OUTPUT_DIR = process.env.RAKAZO_TEST_MEMORY_OUTPUT ?? tmpdir();
+
+// The real-service journey is opt-in: supply the two Python runtimes and offline model cache.
+// A partially supplied configuration still runs and fails validation instead of being skipped.
+const configured = Boolean(INDEX_PYTHON || INDEX_CACHE || LANGMEM_PYTHON);
+const postgres =
+  process.env.VERIFY_DATABASE && databaseUrl && configured ? describe : describe.skip;
 
 const stamp = randomUUID();
 const userId = `am-int-user-${stamp}`;
@@ -152,6 +157,30 @@ postgres("automatic memory synthetic integration (isolated PostgreSQL)", () => {
   }
 
   const complete = async (request: MemoryCompletionRequest): Promise<MemoryCompletionResponse> => {
+    if (request.tools.some((tool) => tool.name === "judge_memory_support")) {
+      const candidates = JSON.parse(request.messages.at(-1)!.content) as Array<{
+        index: number;
+        memory: string;
+      }>;
+      const scripted = stages.flatMap((stage) =>
+        stage.kind === "insert" ? stage.facts : [stage.fact],
+      );
+      expect(candidates.map((candidate) => candidate.memory)).toEqual(
+        scripted.map((fact) => fact.content),
+      );
+      return {
+        content: "",
+        toolCalls: [
+          {
+            id: `support-${stamp}-${stageCursor}`,
+            name: "judge_memory_support",
+            args: {
+              decisions: candidates.map(({ index }) => ({ index, supported: true })),
+            },
+          },
+        ],
+      };
+    }
     const durable = request.tools.find((tool) => tool.name === "DurableFact");
     if (!durable) throw new Error("LangMem did not offer the DurableFact tool.");
     expect(propertyNames(durable)).toEqual(

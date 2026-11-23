@@ -39,10 +39,10 @@ describe.skipIf(!enabled)("send model gate with a bot's own model (PostgreSQL)",
   beforeEach(async () => {
     vi.clearAllMocks();
     const identity = await runAsSystem("test fixture", () =>
-      provisionMessagingIdentity(
-        prisma,
-        { provider: "test", address: `model-gate-${randomUUID()}` },
-      ),
+      provisionMessagingIdentity(prisma, {
+        provider: "test",
+        address: `model-gate-${randomUUID()}`,
+      }),
     );
     botId = identity.botId;
     actor = { spaceId: identity.spaceId, userId: identity.userId } as Actor;
@@ -53,7 +53,7 @@ describe.skipIf(!enabled)("send model gate with a bot's own model (PostgreSQL)",
     const deps = {
       prisma,
       events: createThreadEvents(prisma),
-      jobs: { enqueue, cancel: vi.fn(), close: async () => undefined },
+      jobs: { enqueue, cancel: vi.fn(async () => undefined), close: async () => undefined },
       secrets: { load: vi.fn() },
       sandbox: {},
       env: { agentRuntime: "pi", deploymentModelConfigured: false },

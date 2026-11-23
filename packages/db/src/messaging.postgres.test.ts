@@ -16,10 +16,7 @@ describePostgres("provisionMessagingIdentity (PostgreSQL)", () => {
   // Production provisions from the inbound messaging webhook.
   const provision = (from: string) =>
     runAsSystem("messaging inbound", () =>
-      provisionMessagingIdentity(
-        prisma,
-        { provider, address: from },
-      ),
+      provisionMessagingIdentity(prisma, { provider, address: from }),
     );
 
   afterAll(async () => {
@@ -48,11 +45,10 @@ describePostgres("provisionMessagingIdentity (PostgreSQL)", () => {
 
     const user = await asSystem(prisma).user.findUnique({
       where: { id: result.userId },
-      include: { accounts: true, members: true },
+      include: { members: true },
     });
     expect(user).toBeTruthy();
     expect(user!.email).toMatch(/^msg-[a-f0-9]{32}@messaging\.invalid$/);
-    expect(user!.accounts).toHaveLength(0);
     expect(user!.members).toHaveLength(1);
     expect(user!.members[0]!.organizationId).toBe(result.spaceId);
     expect(user!.members[0]!.role).toBe("owner");
@@ -94,7 +90,7 @@ describePostgres("provisionMessagingIdentity (PostgreSQL)", () => {
     expect(identity!.outboundSinceInbound).toBe(0);
     expect(identity!.verifiedAt).toBeNull();
 
-    // bootstrap parity: same surrounding rows the auth signup hook creates
+    // Messaging identities receive the same workspace defaults as the local owner.
     const memories = await runAsSystem("test fixture", () =>
       prisma.memoryDocument.findMany({
         where: { spaceId: result.spaceId, userId: result.userId },

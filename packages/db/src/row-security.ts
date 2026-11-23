@@ -135,6 +135,8 @@ export const ROW_SECURITY_MODELS: ReadonlySet<string> = new Set([
   "SpendingLimit",
   "Payment",
   "TaughtSkill",
+  "TaughtSkillRevision",
+  "RunTaughtSkillRevision",
   "AgentSkill",
   "AgentSkillSpace",
   "CapabilityInstallSpace",
