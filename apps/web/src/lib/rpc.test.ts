@@ -28,6 +28,15 @@ describe("failed responses", () => {
   });
 });
 
+it("preserves a same-origin access gateway session for RPC requests", async () => {
+  const fetch = vi.fn(async (_request: Request, _init?: RequestInit) =>
+    Response.json({ json: { ok: true } }),
+  );
+  vi.stubGlobal("fetch", fetch);
+  await rpc.health({});
+  expect(fetch.mock.calls[0]?.[1]?.credentials).toBe("same-origin");
+});
+
 describe("unavailable space", () => {
   function browser(selected: string, spaces: string[] | null) {
     const items = new Map([["rakazo:space-id", selected]]);

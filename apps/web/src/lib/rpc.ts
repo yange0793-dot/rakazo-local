@@ -91,7 +91,7 @@ const link = new RPCLink<RpcClientContext>({
     try {
       response = await fetch(request, {
         headers,
-        credentials: "omit",
+        credentials: "same-origin",
         // Keep cancellation attached directly to fetch rather than only a cloned Request.
         signal: options.signal,
       });

@@ -235,7 +235,7 @@ export function clientUpdates(): ReturnType<typeof createClientUpdates> {
     },
     responses: onRpcResponse,
     servedBuild: async () => {
-      const response = await fetch("/build-id", { cache: "no-store", credentials: "omit" });
+      const response = await fetch("/build-id", { cache: "no-store", credentials: "same-origin" });
       return response.ok ? (await response.text()).trim() : null;
     },
     reload: recoveryReload,

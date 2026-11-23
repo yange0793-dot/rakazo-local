@@ -10,7 +10,7 @@ import { usePageDocument } from "../lib/pages";
 
 async function readSharedPage(token: string): Promise<SharedPage | null> {
   const response = await fetch(`${SHARED_PAGE_PATH_PREFIX}${token}`, {
-    credentials: "omit",
+    credentials: "same-origin",
     referrerPolicy: "no-referrer",
   });
   if (response.status === 404) return null;
