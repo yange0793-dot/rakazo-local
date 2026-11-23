@@ -88,7 +88,9 @@ describe("eval trial isolation", () => {
 
     expect(f.request).toHaveBeenCalledWith(
       "/rpc/threads/stop",
-      expect.objectContaining({ headers: expect.objectContaining({ cookie: "root-session" }) }),
+      expect.objectContaining({
+        headers: expect.objectContaining({ "x-rakazo-space-id": "eval-space" }),
+      }),
     );
     expect(f.order.indexOf("disable")).toBeLessThan(f.order.indexOf("stop:root-bot"));
     expect(f.order).toContain("stop:child-bot");

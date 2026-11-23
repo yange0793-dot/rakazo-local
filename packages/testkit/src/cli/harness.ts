@@ -69,7 +69,7 @@ async function main() {
     // Test code that seeds or inspects rows directly connects as the owner.
     const migrationUrl = container.getConnectionUri();
     const runtimeUrl = new URL(migrationUrl);
-    runtimeUrl.username = "rakazo_app";
+    runtimeUrl.username = integration ? "rkz_test_app" : "rakazo_app";
     runtimeUrl.password = "rakazo-test-runtime";
     const databaseUrl = runtimeUrl.toString();
     const apiPort = Number(process.env.API_PORT ?? 3110);
@@ -102,7 +102,7 @@ async function main() {
     process.env.ENCRYPTION_KEY = "test-encryption-key-test-encryption-key";
     process.env.SANDBOX_SUPERVISOR_TOKEN = "test-supervisor-token-test-32chars";
     process.env.SCREEN_PROXY_SECRET = "test-screen-proxy-secret-test-32chars";
-    process.env.WEB_ORIGIN = webOrigin;
+    process.env.WEB_ORIGIN = integration ? "http://127.0.0.1:5173" : webOrigin;
     process.env.API_PORT = String(apiPort);
     process.env.API_URL = `http://127.0.0.1:${apiPort}`;
     process.env.API_PROXY_TARGET = `http://127.0.0.1:${apiPort}`;

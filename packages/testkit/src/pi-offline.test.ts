@@ -318,9 +318,8 @@ describe("real Pi against an offline model HTTP endpoint", () => {
     },
   );
 
-  it("enforces the same context budget inside a delegated tool loop", async () => {
-    const decisions: Array<{ agentId?: string; strategy?: string; truncatedToolResults: number }> =
-      [];
+  it("returns a queued helper receipt without running a nested model loop", async () => {
+    const calls: string[] = [];
     const server = await startModelEmulator({
       steps: [
         {
@@ -334,30 +333,9 @@ describe("real Pi against an offline model HTTP endpoint", () => {
         },
         {
           expect(request) {
-            expect(request.tools?.some((tool) => tool.function.name === "run_subagent")).toBe(
-              false,
-            );
-            expect(JSON.stringify(request.messages)).toContain("Save hello to notes.txt.");
-          },
-          response: {
-            type: "tool",
-            id: "child-write",
-            name: "write_file",
-            arguments: { path: "notes.txt", content: "hello" },
-          },
-        },
-        {
-          expect(request) {
-            expect(estimateTextTokens(JSON.stringify(request.messages))).toBeLessThan(7168);
-            expect(latestToolResult(request)?.tool_call_id).toBe("child-write");
-            expect(String(latestToolResult(request)?.content)).toContain("truncated");
-            expect(JSON.stringify(request.messages)).toContain("Save hello to notes.txt.");
-          },
-          response: { type: "text", text: "Saved." },
-        },
-        {
-          expect(request) {
             expect(latestToolResult(request)?.tool_call_id).toBe("delegate");
+            expect(String(latestToolResult(request)?.content)).toContain("helper-run");
+            expect(String(latestToolResult(request)?.content)).toContain("queued");
           },
           response: { type: "text", text: "Finished." },
         },
@@ -365,7 +343,7 @@ describe("real Pi against an offline model HTTP endpoint", () => {
     });
     cleanups.push(() => server.close());
     await collect(
-      new PiAgentRuntime({ onContextDecision: (decision) => decisions.push(decision) }).run(
+      new PiAgentRuntime().run(
         runRequest(
           { ...server.model, contextWindow: 8192, maxTokens: 1024 },
           {
@@ -381,7 +359,11 @@ describe("real Pi against an offline model HTTP endpoint", () => {
                 },
               },
             ],
-            executeTool: async () => ({ original: "0".repeat(63_000) }),
+            executeTool: async (name, args) => {
+              calls.push(name);
+              expect(args.task).toBe("Save hello to notes.txt.");
+              return { runId: "helper-run", status: "queued" };
+            },
           },
         ),
       ),
@@ -390,12 +372,7 @@ describe("real Pi against an offline model HTTP endpoint", () => {
       throw error;
     });
     server.assertComplete();
-    expect(decisions).toHaveLength(4);
-    expect(decisions.every((decision) => decision.strategy === "retrieval")).toBe(true);
-    expect(decisions.filter((decision) => decision.agentId)).toHaveLength(2);
-    expect(
-      decisions.some((decision) => decision.agentId && decision.truncatedToolResults === 1),
-    ).toBe(true);
+    expect(calls).toEqual(["run_subagent"]);
   });
 
   it("assembles fragmented tool arguments, executes the write, and sends its result back", async () => {

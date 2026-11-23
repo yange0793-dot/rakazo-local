@@ -12,7 +12,6 @@ type Row = {
 };
 function fixture() {
   const rows = new Map<string, Row>();
-  let live = true;
   const matches = (row: Row, where: Record<string, unknown>): boolean =>
     Object.entries(where).every(([key, value]) => {
       if (key === "OR")
@@ -51,9 +50,7 @@ function fixture() {
   };
   const tx = {
     callPushDevice: table,
-    $queryRaw: vi.fn(async (strings: TemplateStringsArray) =>
-      strings.join("").includes('FROM "session"') ? (live ? [{ id: "session-1" }] : []) : [],
-    ),
+    $queryRaw: vi.fn(async () => []),
     pushToken: { deleteMany: vi.fn(async () => {}) },
   };
   const prisma = {
@@ -63,9 +60,6 @@ function fixture() {
   return {
     store: new PrismaPushTokenStore(prisma, "offline-test-key"),
     rows,
-    endSession: () => {
-      live = false;
-    },
   };
 }
 const registration = {
@@ -77,7 +71,7 @@ const registration = {
 describe("call push registrations", () => {
   it("encrypts tokens, isolates owners, and retains multiple installations", async () => {
     const { store, rows } = fixture();
-    await store.saveDevice("user-1", registration, "session-1");
+    await store.saveDevice("user-1", registration, "rakazo-local-install:one");
     await store.saveDevice(
       "user-1",
       {
@@ -86,7 +80,7 @@ describe("call push registrations", () => {
         expoToken: "ExponentPushToken[second]",
         voipToken: "second-voip-token",
       },
-      "session-2",
+      "rakazo-local-install:two",
     );
     expect(await store.devices("user-1")).toHaveLength(2);
     expect(await store.devices("user-2")).toEqual([]);
@@ -94,17 +88,17 @@ describe("call push registrations", () => {
       expect(row.ciphertext).not.toContain(registration.voipToken);
       expect(row.ciphertext).not.toContain(registration.expoToken);
     }
-    await store.saveDevice("user-2", registration, "session-3");
+    await store.saveDevice("user-2", registration, "rakazo-local-install:three");
     expect(await store.devices("user-1")).toHaveLength(1);
     expect(await store.devices("user-2")).toHaveLength(1);
   });
   it("merges independently arriving Expo and VoIP registrations", async () => {
     const { store } = fixture();
-    await store.saveDevice("user-1", registration, "session-1");
+    await store.saveDevice("user-1", registration, "rakazo-local-install:one");
     await store.saveDevice(
       "user-1",
       { deviceId: registration.deviceId, platform: "ios", voipToken: "replacement-token" },
-      "session-1",
+      "rakazo-local-install:one",
     );
     expect((await store.devices("user-1"))[0]).toMatchObject({
       expoToken: registration.expoToken,
@@ -113,18 +107,17 @@ describe("call push registrations", () => {
   });
   it("moves reused tokens to one owner even with a new installation id", async () => {
     const { store } = fixture();
-    await store.saveDevice("user-1", registration, "session-1");
+    await store.saveDevice("user-1", registration, "rakazo-local-install:one");
     await store.saveDevice(
       "user-2",
       { ...registration, deviceId: "new-installation" },
-      "session-2",
+      "rakazo-local-install:two",
     );
     expect(await store.devices("user-1")).toEqual([]);
     expect(await store.devices("user-2")).toHaveLength(1);
   });
-  it("rejects late registration after sign-out", async () => {
-    const { store, endSession } = fixture();
-    endSession();
+  it("rejects retired account-session identifiers", async () => {
+    const { store } = fixture();
     await expect(store.saveDevice("user-1", registration, "session-1")).rejects.toBeInstanceOf(
       PushSessionEndedError,
     );
@@ -132,12 +125,12 @@ describe("call push registrations", () => {
   });
   it("invalidates one transport without deleting a replacement or another transport", async () => {
     const { store } = fixture();
-    await store.saveDevice("user-1", registration, "session-1");
+    await store.saveDevice("user-1", registration, "rakazo-local-install:one");
     const old = (await store.devices("user-1"))[0]!;
     await store.saveDevice(
       "user-1",
       { ...registration, voipToken: "replacement-token" },
-      "session-1",
+      "rakazo-local-install:one",
     );
     await store.removeDevice("user-1", registration.deviceId, old.revision, "voip");
     const current = (await store.devices("user-1"))[0]!;
@@ -148,15 +141,15 @@ describe("call push registrations", () => {
   });
   it("applies both transports' invalidations taken from the same revision", async () => {
     const { store } = fixture();
-    await store.saveDevice("user-1", registration, "session-1");
+    await store.saveDevice("user-1", registration, "rakazo-local-install:one");
     const { revision } = (await store.devices("user-1"))[0]!;
     await store.removeDevice("user-1", registration.deviceId, revision, "voip");
     await store.removeDevice("user-1", registration.deviceId, revision, "expo");
     expect(await store.devices("user-1")).toEqual([]);
   });
-  it("revokes only the session's devices", async () => {
+  it("revokes only the installation's devices", async () => {
     const { store } = fixture();
-    await store.saveDevice("user-1", registration, "session-1");
+    await store.saveDevice("user-1", registration, "rakazo-local-install:one");
     await store.saveDevice(
       "user-1",
       {
@@ -165,11 +158,11 @@ describe("call push registrations", () => {
         expoToken: "ExponentPushToken[second]",
         voipToken: "second-voip-token",
       },
-      "session-2",
+      "rakazo-local-install:two",
     );
-    await store.endSession("user-1", "session-1");
+    await store.endSession("user-1", "rakazo-local-install:one");
     expect((await store.devices("user-1")).map((device) => device.sessionId)).toEqual([
-      "session-2",
+      "rakazo-local-install:two",
     ]);
   });
 });

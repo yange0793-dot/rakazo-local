@@ -13,6 +13,9 @@ const catalogDir = path.join(mobileDir, "e2e", "ios-screenshots");
 /** Screens the catalog cannot reach yet, and why. Capture one and remove it here. */
 const UNCOVERED: Record<string, string> = {
   "integration-setup": "redirects to Integrations",
+  "semantic-memory": "local semantic-memory review has no native screenshot flow yet",
+  "signup-survey": "optional onboarding survey has no native screenshot flow",
+  server: "server configuration is handled by the workspace-launch helper",
   share: "Android only: iOS has no share extension yet",
 };
 

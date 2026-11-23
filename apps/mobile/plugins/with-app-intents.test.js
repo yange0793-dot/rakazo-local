@@ -13,7 +13,7 @@ describe("RakazoIntents", () => {
   it("reads the secure-store keys the app writes", () => {
     const swift = read("ios-intents/RakazoIntents.swift");
     for (const [file, name] of [
-      ["lib/session.ts", "SESSION_KEY"],
+      ["lib/session.ts", "INSTALL_KEY"],
       ["lib/server-config.ts", "API_BASE_STORAGE_KEY"],
       ["lib/api.ts", "SPACE_KEY"],
       ["lib/last-bot.ts", "LAST_BOT_KEY"],

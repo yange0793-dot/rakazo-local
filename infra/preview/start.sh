@@ -13,8 +13,6 @@ PG_BIN=${PG_BIN:-/usr/lib/postgresql/18/bin}
 PORT=${PORT:-8080}
 HOST=${PREVIEW_HOST:-${FLY_APP_NAME:?Set PREVIEW_HOST or FLY_APP_NAME}.fly.dev}
 ROOT=$(cd "$(dirname "$0")/../.." && pwd)
-OWNER_EMAIL=preview@example.com
-OWNER_PASSWORD=rakazo-preview-demo
 PGDATA="$DATA/postgres"
 IMAGE_ID=$(cat "$ROOT/infra/preview/image-id" 2> /dev/null || true)
 INITIALIZED_IMAGE="$PGDATA/.preview-image"
@@ -81,13 +79,6 @@ migrate() {
     _ "$ROOT"
 }
 
-demo_account_exists() {
-  PGPASSWORD=$PG_OWNER_PASSWORD "$PG_BIN/psql" -qtA -v ON_ERROR_STOP=1 \
-    -v owner_email="$OWNER_EMAIL" -h 127.0.0.1 -U rakazo -d rakazo <<'SQL' | grep -qx t
-SELECT EXISTS (SELECT 1 FROM "user" WHERE email = :'owner_email' AND "emailVerified");
-SQL
-}
-
 shutdown() {
   kill $(jobs -pr) 2> /dev/null || true
   wait || true
@@ -108,7 +99,6 @@ waiting=$!
 
 [[ -f "$PGDATA/PG_VERSION" ]] || init_database
 start_database
-setup_required=
 if [[ -z $IMAGE_ID || $(cat "$INITIALIZED_IMAGE" 2> /dev/null || true) != "$IMAGE_ID" ]]; then
   rm -f "$INITIALIZED_IMAGE"
   if ! migrate; then
@@ -121,16 +111,6 @@ if [[ -z $IMAGE_ID || $(cat "$INITIALIZED_IMAGE" 2> /dev/null || true) != "$IMAG
     start_database
     migrate
   fi
-  setup_required=1
-fi
-if [[ -n $setup_required ]] || ! demo_account_exists; then
-  rm -f "$INITIALIZED_IMAGE"
-  OWNER_EMAIL=$OWNER_EMAIL OWNER_PASSWORD=$OWNER_PASSWORD \
-    gosu node bash -c 'cd "$1/apps/api" && node dist/cli/bootstrap-owner.js' _ "$ROOT"
-  if [[ -n $IMAGE_ID ]]; then
-    printf '%s\n' "$IMAGE_ID" > "$INITIALIZED_IMAGE.tmp"
-    mv "$INITIALIZED_IMAGE.tmp" "$INITIALIZED_IMAGE"
-  fi
 fi
 
 gosu node bash -c 'cd "$1/apps/api" && exec node --enable-source-maps dist/index.js' _ "$ROOT" &
@@ -142,6 +122,10 @@ for _ in $(seq 1 120); do
 done
 # Exit rather than serve a page whose API never came up; the host restarts the machine.
 [[ -n $ready ]] || { log "The API did not become ready"; exit 1; }
+if [[ -n $IMAGE_ID ]]; then
+  printf '%s\n' "$IMAGE_ID" > "$INITIALIZED_IMAGE.tmp"
+  mv "$INITIALIZED_IMAGE.tmp" "$INITIALIZED_IMAGE"
+fi
 kill "$waiting"
 wait "$waiting" 2> /dev/null || true
 (

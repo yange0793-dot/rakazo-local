@@ -132,7 +132,8 @@ function fixture(
       run: {
         findUnique: async () => ({ ...run }),
         findUniqueOrThrow: async () => ({ ...run }),
-        findFirst: async () => null,
+        findFirst: async ({ where }: { where: { id?: string } }) =>
+          where.id === run.id ? { ...run } : null,
         updateMany: async ({ data }: { data: object }) => {
           Object.assign(run, data);
           return { count: 1 };
@@ -825,7 +826,7 @@ describe("executor paused transcript", () => {
       await model.close();
     }
   });
-  it("drops an earlier saved turn when a helper pauses for approval", async () => {
+  it("keeps the parent's latest saved turn after delegating a helper", async () => {
     const model = await startModelEmulator({
       steps: [
         {
@@ -867,7 +868,7 @@ describe("executor paused transcript", () => {
       await state.executor.continueRun(state.run.id, "fixture-worker");
       model.assertComplete();
       expect(state.pauseRunForInput).toHaveBeenCalledTimes(2);
-      expect(state.effects.some((effect) => effect.kind === "runtime_checkpoint")).toBe(false);
+      expect(state.effects.some((effect) => effect.kind === "runtime_checkpoint")).toBe(true);
     } finally {
       await model.close();
     }

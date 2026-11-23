@@ -36,7 +36,10 @@ function makeDeps(options: { admin?: boolean; computerSettingsEnabled?: boolean 
       findUnique: vi.fn(async () => ({ email: "admin@example.com", emailVerified: true })),
     },
     deploymentSettings: {
-      findUnique: vi.fn(async () => state.settings),
+      findUnique: vi.fn(async () => ({
+        ...state.settings,
+        ownerUserId: options.admin === false ? "another-owner" : "user-1",
+      })),
       upsert: vi.fn(async ({ update }: { update: Record<string, string | null> }) => {
         state.settings = {
           computerProvider: null,

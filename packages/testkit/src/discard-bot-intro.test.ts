@@ -47,7 +47,6 @@ describe("discardBotIntroRun", () => {
       "/rpc/threads/stop",
       expect.objectContaining({
         headers: expect.objectContaining({
-          cookie: "session",
           "x-rakazo-space-id": "space-support",
         }),
         body: JSON.stringify({ json: { botId: "bot-1" } }),

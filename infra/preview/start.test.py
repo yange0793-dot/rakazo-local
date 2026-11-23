@@ -26,20 +26,13 @@ elif name == "createdb":
     assert not (data / "postgres/.preview-image").exists(), "Stale setup marker"
     (data / "postgres/database").touch()
 elif name == "psql":
-    if any(a.startswith("owner_email=") for a in args):
-        print("t" if (data / "postgres/demo-account").exists() else "f")
-    else:
-        if (data / "postgres/database").exists(): print("1")
+    if (data / "postgres/database").exists(): print("1")
 elif name == "node" and any("migrate-database" in a for a in args):
     with (data / "calls").open("a") as f: f.write("migrate\n")
     fail = data / "fail-migrate"
     if fail.exists():
         fail.unlink()
         sys.exit(1)
-elif name == "node" and any("bootstrap-owner" in a for a in args):
-    with (data / "calls").open("a") as f: f.write("bootstrap\n")
-    if (data / "fail-bootstrap").exists(): sys.exit(1)
-    (data / "postgres/demo-account").touch()
 elif name == "node":
     if "preview" in args:
         (data / "serving").touch()
@@ -92,7 +85,11 @@ class PreviewBoot(unittest.TestCase):
         finally:
             if process.poll() is None:
                 os.killpg(process.pid, signal.SIGTERM)
-            output = process.communicate(timeout=3)[0].decode()
+            try:
+                output = process.communicate(timeout=3)[0].decode()
+            except subprocess.TimeoutExpired:
+                os.killpg(process.pid, signal.SIGKILL)
+                output = process.communicate(timeout=3)[0].decode()
             if succeeds:
                 self.assertIn("[preview] Ready", output)
 
@@ -101,22 +98,14 @@ class PreviewBoot(unittest.TestCase):
 
     def test_first_boot_then_wake_then_new_image_and_rollback(self):
         self.boot()
-        self.assertEqual(self.calls(), ["migrate", "bootstrap"])
+        self.assertEqual(self.calls(), ["migrate"])
         self.boot()
-        self.assertEqual(self.calls(), ["migrate", "bootstrap"])
+        self.assertEqual(self.calls(), ["migrate"])
         self.image.write_text("second-image\n")
         self.boot()
         self.image.write_text("first-image\n")
         self.boot()
-        self.assertEqual(self.calls(), ["migrate", "bootstrap"] * 3)
-
-    def test_failed_setup_is_retried(self):
-        (self.data / "fail-bootstrap").touch()
-        self.boot(succeeds=False)
-        self.assertFalse((self.data / "postgres/.preview-image").exists())
-        (self.data / "fail-bootstrap").unlink()
-        self.boot()
-        self.assertEqual(self.calls(), ["migrate", "bootstrap"] * 2)
+        self.assertEqual(self.calls(), ["migrate"] * 3)
 
     def test_migration_failure_resets_disposable_database(self):
         self.boot()
@@ -126,47 +115,28 @@ class PreviewBoot(unittest.TestCase):
         (self.data / "fail-migrate").touch()
         self.boot()
         self.assertFalse(old_file.exists())
-        self.assertEqual(self.calls(), ["migrate", "bootstrap", "migrate", "migrate", "bootstrap"])
+        self.assertEqual(self.calls(), ["migrate", "migrate", "migrate"])
         self.boot()
-        self.assertEqual(len(self.calls()), 5)
+        self.assertEqual(len(self.calls()), 3)
 
     def test_missing_image_id_keeps_local_boots_working(self):
         self.image.unlink()
         self.boot()
         self.boot()
-        self.assertEqual(self.calls(), ["migrate", "bootstrap"] * 2)
+        self.assertEqual(self.calls(), ["migrate"] * 2)
 
     def test_replaced_database_needs_setup_again(self):
         self.boot()
         shutil.rmtree(self.data / "postgres")
         self.boot()
-        self.assertEqual(self.calls(), ["migrate", "bootstrap"] * 2)
+        self.assertEqual(self.calls(), ["migrate"] * 2)
 
     def test_recreated_database_in_existing_cluster_needs_setup_again(self):
         self.boot()
         (self.data / "postgres/database").unlink()
-        (self.data / "postgres/demo-account").unlink()
         self.assertTrue((self.data / "postgres/.preview-image").exists())
         self.boot()
-        self.assertEqual(self.calls(), ["migrate", "bootstrap"] * 2)
-
-    def test_deleted_demo_account_is_restored_without_migrations(self):
-        self.boot()
-        (self.data / "postgres/demo-account").unlink()
-        self.boot()
-        self.assertTrue((self.data / "postgres/demo-account").exists())
-        self.assertEqual(self.calls(), ["migrate", "bootstrap", "bootstrap"])
-
-    def test_failed_demo_account_recovery_is_retried(self):
-        self.boot()
-        (self.data / "postgres/demo-account").unlink()
-        (self.data / "fail-bootstrap").touch()
-        self.boot(succeeds=False)
-        self.assertFalse((self.data / "postgres/.preview-image").exists())
-        (self.data / "fail-bootstrap").unlink()
-        self.boot()
-        self.assertTrue((self.data / "postgres/demo-account").exists())
-        self.assertEqual(self.calls(), ["migrate", "bootstrap", "bootstrap", "migrate", "bootstrap"])
+        self.assertEqual(self.calls(), ["migrate"] * 2)
 
 
 if __name__ == "__main__":

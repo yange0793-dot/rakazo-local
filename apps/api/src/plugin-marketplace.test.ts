@@ -35,6 +35,7 @@ function setup(approvedRows: (typeof approved)[] = [], pluginRepoFetcher?: Plugi
     prisma: {
       pluginSubmission: { findMany: async () => approvedRows },
       user: { findUnique: async () => ({ email: actor.email, emailVerified: true }) },
+      deploymentSettings: { findUnique: async () => ({ ownerUserId: "deployment-owner" }) },
     } as never,
     pluginMarketplaceRead: read,
     pluginRepoFetcher,

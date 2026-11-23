@@ -73,7 +73,7 @@ if (process.env.VERIFY_DATABASE) {
   if (process.env.COPY_TEST_DATABASE) {
     const owner = new URL(process.env.DATABASE_MIGRATION_URL!);
     const template = owner.pathname.slice(1);
-    const copy = `${template}_${randomUUID().replaceAll("-", "")}`;
+    const copy = `rkz_${randomUUID().replaceAll("-", "")}`;
     owner.pathname = "/postgres";
     const admin = createPool(owner.href);
     try {
