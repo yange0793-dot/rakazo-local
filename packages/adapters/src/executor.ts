@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import type { AgentRunRequest, ComputerRef, SemanticMemoryProvider } from "@rakazo/adapter-kit";
 import { DEFAULT_CONTEXT_STRATEGY, runContinueJob } from "@rakazo/adapter-kit";
 import type { MessageBlock, RunStatus } from "@rakazo/contracts";
@@ -44,8 +45,8 @@ import {
 } from "@rakazo/db";
 import { enrichLogContext, getLogger } from "@rakazo/logging";
 import { formatAgentEnvironmentInstruction } from "./agent-environment.js";
-import { createApprovedEffectReplayQueue } from "./approval-effect.js";
-import { PARTIAL_REPLY_NOTE } from "./automated-messages.js";
+import { createApprovedEffectReplayQueue, isToolPauseResult } from "./approval-effect.js";
+import { automated, PARTIAL_REPLY_NOTE } from "./automated-messages.js";
 import { backgroundHelpersAllowed } from "./background-helpers.js";
 import { loadBotMessageContext } from "./bot-messages.js";
 import {
@@ -90,6 +91,7 @@ import { sanitizeConnectorError } from "./connector-safety.js";
 import { formatCurrentTimeInstruction } from "./current-time.js";
 import { resolveDeploymentModel } from "./deployment-model.js";
 import type { ExecutorDeps } from "./executor-deps.js";
+import { createFileDeliveryJudge } from "./file-delivery-judge.js";
 import type { FleetRun } from "./fleet-tools.js";
 import { loadBotGroupDirectory, loadGroupContext } from "./group-handoff.js";
 import { groupTurnBlocked, retryGroupTurnLater } from "./group-turn.js";
@@ -128,6 +130,14 @@ import { loadReplyContext, messageToAgentHistoryText } from "./reply-context.js"
 import { backOffRoutineAfterAccountError } from "./routine-backoff.js";
 import { lateRoutineRunDueAt, lateRoutineRunInstruction } from "./routine-lateness.js";
 import { lazyRunComputer } from "./run-computer.js";
+import type {
+  RunConfigurationManifestInput,
+  RunConfigurationModel,
+} from "./run-configuration-manifest.js";
+import {
+  persistRunConfigurationManifest,
+  recordRunConfigurationModelChange,
+} from "./run-configuration-manifest.js";
 import type {
   RunComputerUseState,
   RunContext,
@@ -169,6 +179,7 @@ import {
 } from "./run-model.js";
 import { runModelBackups, startRunModel } from "./run-model-start.js";
 import { createReplyState } from "./run-progress.js";
+import { observedMemorySources } from "./run-reflection.js";
 import {
   DELEGATED_EMPTY_NOTICE,
   GROUP_UNADDRESSED_REPLY_GUIDANCE,
@@ -181,6 +192,16 @@ import {
   retryRoutineRun,
   wakeRoutine,
 } from "./run-routines.js";
+import type { SkillComponentPhase } from "./run-skill-components.js";
+import { runSkillComponents } from "./run-skill-components.js";
+import type { RunStageRecallTrigger } from "./run-stage-recall.js";
+import { createRunStageRecall } from "./run-stage-recall.js";
+import {
+  ensureRunTicketWorkState,
+  runTicketProgressCheck,
+  saveRunTicketPendingCall,
+  ticketEnvironment,
+} from "./run-ticket-state.js";
 import {
   BUILTIN_AGENT_TOOL_NAMES,
   followUpsOffered,
@@ -219,6 +240,7 @@ import {
   takeoverContinuePlan,
 } from "./takeover-resume.js";
 import { TASK_CATALOG_GUIDANCE } from "./task-catalog.js";
+import type { TaughtSkillRevision } from "./taught-skill-revisions.js";
 import {
   listPinnedTaughtSkillRevisions,
   pinTaughtSkillRevisionToRun,
@@ -235,9 +257,17 @@ import {
   recentThreadFilesInstruction,
 } from "./thread-artifacts.js";
 import { loadAgentTicketContext } from "./ticket-context.js";
+import {
+  createTicketFinalizationEvidence,
+  ticketFinalizationEvents,
+  ticketFinalizationRequest,
+} from "./ticket-finalization.js";
+import { TICKET_PROGRESS_REPLAN_NOTE } from "./ticket-progress.js";
+import { createTicketProgressJudge } from "./ticket-progress-judge.js";
 import { ticketReceiptsEnabled } from "./ticket-receipt-config.js";
 import { appendToolCompletionAudit, toolCompletionOutcome } from "./tool-completion-audit.js";
 import { toolResultFingerprint } from "./tool-loop.js";
+import { toolResultError } from "./tool-result-error.js";
 import { restoreTurnCheckpoint } from "./turn-checkpoint.js";
 import { createWebProvider } from "./web-provider-factory.js";
 
@@ -956,6 +986,16 @@ export function createRunExecutor(executorDeps: ExecutorDeps) {
                 spaceId: run.spaceId,
                 text: task.prompt,
                 ticketId: run.ticketId,
+                ...(run.ticketId && ticketReceiptsEnabled()
+                  ? {
+                      workState: {
+                        runId,
+                        userId: run.userId,
+                        botId: bot.id,
+                        environment: ticketEnvironment(bot.computer, deps.runtime.describe()),
+                      },
+                    }
+                  : {}),
                 ...(run.trigger === "user" &&
                 sourceMessage?.authorUserId === run.userId &&
                 !channelId &&
@@ -1312,6 +1352,32 @@ export function createRunExecutor(executorDeps: ExecutorDeps) {
           ...resolvedModelRunFields(resolved),
           thinkingLevel: thinkingLevel ?? resolved.thinkingLevel ?? null,
         };
+        if (
+          !scripted &&
+          !nonOwnerChatRun &&
+          deps.ticketBoardEnabled &&
+          ticketReceiptsEnabled() &&
+          !deps.fileDeliveryJudge
+        ) {
+          deps = {
+            ...deps,
+            fileDeliveryJudge: createFileDeliveryJudge({
+              runtime: deps.runtime,
+              model: mainRunModel,
+              budget: { maxTotalTokens: 64_000, timeoutMs: 120_000 },
+              onUsage: (event, judgeContext) =>
+                recordUsage(deps.prisma, event, {
+                  spaceId: run.spaceId,
+                  userId: run.userId,
+                  botId: bot.id,
+                  runId,
+                  parentRunId: runId,
+                  operationKind: "setup",
+                  operationId: judgeContext.operationId,
+                }),
+            }),
+          };
+        }
         // Saved identities win on resume, including when the setting was cleared meanwhile.
         const computerModel =
           pinnedComputerModels?.computer ??
@@ -1676,6 +1742,16 @@ export function createRunExecutor(executorDeps: ExecutorDeps) {
           settleRunningHelpers: settleHelpers,
           stopHeartbeatAfterCompletion,
         };
+        if (fence > 1 && semanticMemory && !nonOwnerChatRun) {
+          try {
+            const recovered = await observedMemorySources(deps.prisma, run, context.signal);
+            ctx.memory.observedFacts = recovered.sources;
+            ctx.memory.recoveryUnavailable = !recovered.complete;
+          } catch {
+            ctx.memory.recoveryUnavailable = true;
+            getLogger().warn("run memory sources unavailable", { "run.id": runId });
+          }
+        }
         const pluginLine =
           connectedPlugins.length > 0
             ? `Connected plugins: ${connectedPlugins.map((row) => `${row.displayName} (${row.connectorId}:${row.provider})`).join(", ")}. Prefer those plugin tools over the computer browser or web search when reading app data (repos, releases, mail, calendar, and similar).`
@@ -1713,10 +1789,10 @@ export function createRunExecutor(executorDeps: ExecutorDeps) {
         );
         let basePrompt = taskPrompt;
         const revisionActor = { spaceId: run.spaceId, userId: run.userId };
-        const pinned =
-          !nonOwnerChatRun && (ticketReceiptsEnabled() || fence > 1)
-            ? await listPinnedTaughtSkillRevisions(deps.prisma, revisionActor, run.id)
-            : [];
+        const pinsRead = !nonOwnerChatRun && (ticketReceiptsEnabled() || fence > 1);
+        const pinned = pinsRead
+          ? await listPinnedTaughtSkillRevisions(deps.prisma, revisionActor, run.id)
+          : [];
         if (!nonOwnerChatRun && (ticketReceiptsEnabled() || pinned.length > 0)) {
           if (
             ticketReceiptsEnabled() &&
@@ -1811,16 +1887,25 @@ export function createRunExecutor(executorDeps: ExecutorDeps) {
           });
         }
         const recalledMemory = recallBlock?.text ?? "";
-        const lessonNotes = lessonRecall?.ok
-          ? buildLessonNotes(
-              lessonRecall.value.flatMap((result) =>
+        const lessonNotes = buildLessonNotes(
+          lessonRecall?.ok
+            ? lessonRecall.value.flatMap((result) =>
                 result.id && result.revision !== undefined
                   ? [{ id: result.id, revision: result.revision, content: result.memory }]
                   : [],
-              ),
-              runSecrets,
-            )
-          : { shown: [] };
+              )
+            : [],
+          runSecrets,
+        );
+        if (lessonRecall?.ok) {
+          getLogger().info("lesson context selected", {
+            "run.id": runId,
+            "memory.matched": lessonRecall.value.length,
+            "memory.shown": lessonNotes.shown.length,
+            "memory.omitted": lessonNotes.omitted.map((note) => note.reason),
+            "memory.bytes": lessonNotes.bytes,
+          });
+        }
         if (lessonNotes.shown.length > 0) {
           await recordLessonUse(deps.prisma, {
             spaceId: run.spaceId,
@@ -1829,6 +1914,34 @@ export function createRunExecutor(executorDeps: ExecutorDeps) {
             lessons: lessonNotes.shown,
           });
         }
+        const recallStage = createRunStageRecall(
+          {
+            provider: semanticMemory,
+            botId: bot.id,
+            threadId: thread.id,
+            secrets: runSecrets,
+            external: externalRecall,
+          },
+          context,
+        );
+        const stageNotes = async (trigger: RunStageRecallTrigger) => {
+          const recalled = await recallStage(trigger);
+          getLogger().info("lesson stage recall", { "run.id": runId, ...recalled.audit });
+          if (recalled.audit.references.length)
+            await recordLessonUse(deps.prisma, {
+              spaceId: run.spaceId,
+              botId: bot.id,
+              runId,
+              lessons: recalled.audit.references,
+            }).catch(() => {
+              getLogger().warn("lesson stage recall audit unavailable", { "run.id": runId });
+            });
+          return recalled.addition;
+        };
+        const recoveryLessons =
+          fence > 1 && !checkpointLoadError
+            ? await stageNotes({ stage: "recovery", task: task.prompt })
+            : undefined;
         // Recalled facts and notes change every turn, so they ride at the end of the current turn
         // rather than the front of history: a moved first message rewrites the cached prefix.
         const prompt = [
@@ -1844,6 +1957,7 @@ export function createRunExecutor(executorDeps: ExecutorDeps) {
           sharedSpaceNote,
           recalledMemory || undefined,
           lessonNotes.text,
+          recoveryLessons,
         ]
           .filter(Boolean)
           .join("\n\n");
@@ -1987,6 +2101,16 @@ export function createRunExecutor(executorDeps: ExecutorDeps) {
 
         try {
           if (checkpointLoadError) throw checkpointLoadError;
+          const finalizationEvidence =
+            ticketReceiptsEnabled() && deps.ticketBoardEnabled
+              ? createTicketFinalizationEvidence(runSecrets)
+              : undefined;
+          let usageOperationId = runId;
+          let configurationRecorded = false;
+          let configurationPublication: Promise<void> | undefined;
+          let modelChangeSequence = 0;
+          let progressBoundary: string | undefined;
+          const appliedComponentRevisions = new Set<string>();
           const runtimeRequest: AgentRunRequest = {
             botId: bot.id,
             verbatimMcpServers,
@@ -2001,7 +2125,7 @@ export function createRunExecutor(executorDeps: ExecutorDeps) {
                 userId: run.userId,
                 runId,
                 parentRunId: runId,
-                operationId: runId,
+                operationId: usageOperationId,
               });
             },
             prompt,
@@ -2133,8 +2257,18 @@ export function createRunExecutor(executorDeps: ExecutorDeps) {
               if (!roleModel && !fallbackModelIds.has(fallbackKey(provider, modelId))) {
                 throw new Error("Model is not selected");
               }
+              await configurationPublication;
               // The run's model is what retries and pins rerun; computer mode is a detour from it.
-              if (!computerMode) {
+              if (configurationRecorded) {
+                await recordRunConfigurationModelChange(
+                  deps.prisma,
+                  { runId, attemptId: attempt.id, spaceId: run.spaceId },
+                  { owner: workerId, fence },
+                  ++modelChangeSequence,
+                  usageOperationId,
+                  { provider, modelId, computerMode },
+                );
+              } else if (!computerMode) {
                 const updated = await deps.prisma.run.updateMany({
                   where: {
                     id: runId,
@@ -2165,7 +2299,40 @@ export function createRunExecutor(executorDeps: ExecutorDeps) {
             executeTool: scripted
               ? undefined
               : async (name, args, executionId, route, observer) => {
-                  const result = await applyTool(ctx, name, args, executionId, route, observer);
+                  let result = await applyTool(ctx, name, args, executionId, route, observer);
+                  if (
+                    name === "skill_read" &&
+                    args.taughtSkillId &&
+                    args.inspect !== true &&
+                    !isToolPauseResult(result) &&
+                    toolResultError(result) === undefined
+                  ) {
+                    const revision = (
+                      await listPinnedTaughtSkillRevisions(deps.prisma, revisionActor, runId)
+                    ).find((entry) => entry.skillId === String(args.taughtSkillId));
+                    if (revision) {
+                      const prepared = await preparePinnedComponents(revision, "tool_result");
+                      if (prepared?.pauseResult) return prepared.pauseResult;
+                      if (prepared) {
+                        result = {
+                          kind: "agent_tool_result",
+                          content: [
+                            { type: "text", text: JSON.stringify(result) },
+                            { type: "text", text: prepared.instructions },
+                          ],
+                          details: result,
+                        };
+                      }
+                    }
+                  }
+                  if (
+                    !configurationRecorded &&
+                    ticketReceiptsEnabled() &&
+                    deps.ticketBoardEnabled &&
+                    run.ticketId
+                  ) {
+                    await publishConfiguration();
+                  }
                   // Checked after a tool, before the next model call. A paused tool belongs
                   // to the user now, so its run finishes as a pause, not a yield.
                   if (
@@ -2176,6 +2343,56 @@ export function createRunExecutor(executorDeps: ExecutorDeps) {
                     yieldedToWaitingUser = true;
                     ctx.runtimeAbortController.abort();
                   }
+                  if (!isToolPauseResult(result) && !ctx.runtimeAbortController.signal.aborted) {
+                    const failed =
+                      toolCompletionOutcome({ name, executionId, durationMs: 0, result }) ===
+                      "failed";
+                    const details = (result as { details?: unknown } | null)?.details ?? result;
+                    const acceptance =
+                      name === "ticket_update" && args.result !== undefined
+                        ? (
+                            details as {
+                              acceptance?: {
+                                status: string;
+                                results: Array<{ status: string; reason: string }>;
+                              };
+                            } | null
+                          )?.acceptance
+                        : undefined;
+                    const gaps =
+                      acceptance?.status === "unknown"
+                        ? acceptance.results
+                            .filter((item) => item.status === "unknown")
+                            .slice(0, 20)
+                            .map((item) => item.reason)
+                        : undefined;
+                    const addition = failed
+                      ? await stageNotes({
+                          stage: "tool_failure",
+                          toolName: name,
+                          error: toolResultError(result) ?? "Observed nonzero exit status.",
+                        })
+                      : gaps?.length
+                        ? await stageNotes({ stage: "acceptance_gap", task: task.prompt, gaps })
+                        : undefined;
+                    if (addition) {
+                      const envelope = result as { kind?: string; content?: unknown[] };
+                      result =
+                        envelope?.kind === "agent_tool_result" && Array.isArray(envelope.content)
+                          ? {
+                              ...envelope,
+                              content: [...envelope.content, { type: "text", text: addition }],
+                            }
+                          : {
+                              kind: "agent_tool_result",
+                              content: [
+                                { type: "text", text: JSON.stringify(result) ?? "No tool output." },
+                                { type: "text", text: addition },
+                              ],
+                              details: result,
+                            };
+                    }
+                  }
                   return result;
                 },
             resolveModel: scripted
@@ -2185,6 +2402,11 @@ export function createRunExecutor(executorDeps: ExecutorDeps) {
                     runSecrets.push(...values),
                   ),
             onToolCompleted: (completion) => {
+              finalizationEvidence?.observe(completion);
+              if (!completion.paused)
+                progressBoundary = createHash("sha256")
+                  .update(completion.executionId)
+                  .digest("hex");
               if (effects.restoredPending?.executionId === completion.executionId)
                 effects.restoredPending = undefined;
               if (!completion.paused) effects.pendingTurnCheckpoints.delete(completion.executionId);
@@ -2226,15 +2448,236 @@ export function createRunExecutor(executorDeps: ExecutorDeps) {
                 },
               );
               ctx.state.steeringClaimed += claimed.filter((item) => item.origin === "user").length;
+              if (
+                run.ticketId &&
+                deps.ticketBoardEnabled &&
+                !nonOwnerChatRun &&
+                progressBoundary &&
+                usageOperationId === runId &&
+                !ctx.state.approval.pausePending &&
+                !ctx.runtimeAbortController.signal.aborted
+              ) {
+                const boundaryId = `${runId}:${attempt.id}:tools:${progressBoundary}`;
+                const noteId = `ticket-progress:${boundaryId}`;
+                if (!seenIds.includes(noteId)) {
+                  const progress = await runTicketProgressCheck(ctx, {
+                    boundaryId,
+                    ...(progressJudge ? { judge: progressJudge } : {}),
+                  });
+                  if (progress?.revision !== null && progress?.decision.action === "replan")
+                    claimed.push({
+                      id: noteId,
+                      messageId: noteId,
+                      text: automated(TICKET_PROGRESS_REPLAN_NOTE),
+                    });
+                }
+              }
               return claimed;
             },
+          };
+          const preparePinnedComponents = async (
+            revision: TaughtSkillRevision,
+            phase: SkillComponentPhase,
+          ) => {
+            if (!revision.snapshot.components || appliedComponentRevisions.has(revision.id))
+              return undefined;
+            appliedComponentRevisions.add(revision.id);
+            let pauseResult: unknown;
+            const prepared = await runSkillComponents({
+              revision,
+              runId,
+              attemptId: attempt.id,
+              phase,
+              instructions: "",
+              offeredTools: runtimeRequest.tools,
+              runtimeCapabilities: deps.runtime.describe().capabilities,
+              executeTool: runtimeRequest.executeTool
+                ? async (name, args, executionId, route, observer) => {
+                    const started = performance.now();
+                    const result = await runtimeRequest.executeTool!(
+                      name,
+                      args,
+                      executionId,
+                      route,
+                      observer,
+                    );
+                    const paused = isToolPauseResult(result);
+                    if (paused) pauseResult = result;
+                    await runtimeRequest.onToolCompleted?.({
+                      name,
+                      executionId,
+                      durationMs: performance.now() - started,
+                      result,
+                      paused,
+                    });
+                    return result;
+                  }
+                : undefined,
+            });
+            if (!prepared.paused && !ctx.state.approval.pausePending)
+              await deps.events.append({
+                spaceId: run.spaceId,
+                threadId: thread.id,
+                botId: bot.id,
+                runId,
+                type: "effect.recorded",
+                payload: {
+                  kind: "skill_components",
+                  attemptId: attempt.id,
+                  phase,
+                  eligible: prepared.eligible,
+                  receipts: prepared.receipts,
+                },
+              });
+            return { ...prepared, pauseResult };
           };
           const runtimeContext = {
             ...context,
             signal: AbortSignal.any([context.signal, ctx.runtimeAbortController.signal]),
           };
+          const progressJudge =
+            !scripted &&
+            !nonOwnerChatRun &&
+            run.ticketId &&
+            deps.ticketBoardEnabled &&
+            ticketReceiptsEnabled()
+              ? createTicketProgressJudge({
+                  runtime: deps.runtime,
+                  model: mainRunModel,
+                  context: { ...runtimeContext, botId: bot.id, threadId: thread.id },
+                  goal: task.prompt,
+                  secrets: runSecrets,
+                  recordUsage: (operationId, event) =>
+                    recordUsage(deps.prisma, event, {
+                      spaceId: run.spaceId,
+                      userId: run.userId,
+                      botId: bot.id,
+                      runId,
+                      parentRunId: runId,
+                      operationKind: "learning",
+                      operationId,
+                    }),
+                  onAssessment: async (assessment) => {
+                    await deps.events.append({
+                      spaceId: run.spaceId,
+                      threadId: thread.id,
+                      botId: bot.id,
+                      runId,
+                      type: "effect.recorded",
+                      payload: { kind: "ticket_progress_assessment", assessment },
+                    });
+                  },
+                })
+              : undefined;
+          const requestedModel: RunConfigurationModel | null = hasModelOverride
+            ? {
+                provider: modelChoice.modelProvider!,
+                modelId: modelChoice.modelId!,
+                reasoningLevel: modelChoice.thinkingLevel ?? null,
+              }
+            : main
+              ? {
+                  provider: main.provider,
+                  modelId: main.modelId,
+                  reasoningLevel: modelChoice.thinkingLevel ?? main.thinkingLevel ?? null,
+                }
+              : selectedProvider && selectedModelId
+                ? {
+                    provider: selectedProvider,
+                    modelId: selectedModelId,
+                    reasoningLevel: selected.thinkingLevel ?? null,
+                  }
+                : null;
+          const deliveredModel: RunConfigurationModel = {
+            provider: runtimeRequest.model.provider,
+            modelId: runtimeRequest.model.id,
+            reasoningLevel: runtimeRequest.model.thinkingLevel ?? null,
+          };
+          // Capture entry values before any tool can bind work or the runtime can switch models.
+          const configurationInput: RunConfigurationManifestInput | undefined =
+            artifacts && !nonOwnerChatRun
+              ? {
+                  runId,
+                  attemptId: attempt.id,
+                  deploymentRevision: process.env.GIT_SHA ?? process.env.RAKAZO_GIT_SHA ?? null,
+                  model: {
+                    requested: requestedModel,
+                    deliveredAtStart: deliveredModel,
+                    computerModel: computerModel
+                      ? {
+                          provider: computerModel.provider,
+                          modelId: computerModel.id,
+                          reasoningLevel: computerModel.thinkingLevel ?? null,
+                        }
+                      : null,
+                    effectiveReasoningLevel: null,
+                    allowedFallbacks: fallbackModels.map((candidate) => ({
+                      provider: candidate.provider,
+                      modelId: candidate.modelId,
+                      reasoningLevel: candidate.thinkingLevel ?? null,
+                    })),
+                    actualFallbacks: requestedModel
+                      ? requestedModel.provider === deliveredModel.provider &&
+                        requestedModel.modelId === deliveredModel.modelId
+                        ? []
+                        : [{ ...deliveredModel, source: "startup-selection" }]
+                      : null,
+                  },
+                  runtime: deps.runtime.describe(),
+                  contextPolicy: {
+                    requestedStrategy: deps.contextStrategy ?? null,
+                    deliveredStrategy: runtimeRequest.contextStrategy ?? null,
+                    effectiveStrategy: null,
+                    revision: null,
+                    recallRevision: null,
+                  },
+                  pinnedTaughtSkills: pinsRead
+                    ? pinned.map((revision) => ({
+                        skillId: revision.skillId,
+                        revisionId: revision.id,
+                      }))
+                    : null,
+                  shownLessons: lessonNotes.shown.map(({ id, revision }) => ({
+                    lessonId: id,
+                    revision,
+                  })),
+                }
+              : undefined;
+          const publishConfiguration = (): Promise<void> => {
+            if (!artifacts || !configurationInput) return Promise.resolve();
+            configurationPublication ??= persistRunConfigurationManifest(
+              deps.prisma,
+              artifacts,
+              runtimeContext,
+              configurationInput,
+              { owner: workerId, fence },
+            ).then(async () => {
+              configurationRecorded = true;
+              if (run.ticketId) await ensureRunTicketWorkState(ctx);
+            });
+            return configurationPublication;
+          };
+          if (
+            (ticketReceiptsEnabled() && deps.ticketBoardEnabled && run.ticketId) ||
+            pinned.length > 0 ||
+            lessonNotes.shown.length > 0
+          ) {
+            await publishConfiguration();
+          }
+          for (const revision of pinned) {
+            const prepared = await preparePinnedComponents(
+              revision,
+              turnCheckpoint ? "restored_turn" : "before_model",
+            );
+            if (!prepared) continue;
+            if (prepared.paused || ctx.state.approval.pausePending) return;
+            if (prepared.instructions)
+              runtimeRequest.instructions += `\n\n${prepared.instructions}`;
+            runtimeRequest.tools = prepared.tools;
+          }
           const runtimeEvents = deps.runtime.run(runtimeRequest, runtimeContext);
           if (await consumeRunEvents(ctx, runtimeEvents)) return;
+          await configurationPublication;
           if (yieldedToWaitingUser) {
             // Queued again with no retry timer; releasing the computer starts the person's run.
             await requeueRunAfterShutdown(deps, runId, workerId, fence).catch((error) =>
@@ -2243,6 +2686,10 @@ export function createRunExecutor(executorDeps: ExecutorDeps) {
             return;
           }
           if (await interruptedByShutdown()) return;
+          if (run.ticketId && deps.ticketBoardEnabled) {
+            await saveRunTicketPendingCall(ctx, null);
+            await runTicketProgressCheck(ctx);
+          }
           if (ticketReceiptsEnabled() && run.ticketId) {
             const work = await deps.prisma.ticket.findFirst({
               where: {
@@ -2270,19 +2717,21 @@ export function createRunExecutor(executorDeps: ExecutorDeps) {
                 });
               if (!(await delivered())) {
                 const draft = state.reply.assembled || state.reply.lastDiscardedMidTurnNarration;
-                const deliveryEvents = deps.runtime.run(
-                  {
-                    ...runtimeRequest,
-                    prompt: `The work has not been delivered to its original conversation. Read ticket_get for ticket ${work.id}, then call ticket_update with id and result. Preserve verified findings; use unknown for missing evidence. Return the result through that tool before ending. Do not start a different task.`,
-                    history: [
-                      ...runtimeHistory,
-                      ...(draft ? [{ role: "assistant" as const, content: draft }] : []),
-                    ],
-                    turnCheckpoint: undefined,
-                    resumeToolResult: undefined,
-                    resumeFromCheckpoint: undefined,
-                  },
-                  runtimeContext,
+                const deliveryRequest = ticketFinalizationRequest(runtimeRequest, {
+                  ticketId: work.id,
+                  evidence: finalizationEvidence?.text() ?? "No observations were retained.",
+                  draft,
+                });
+                usageOperationId = `${runId}:ticket-finalize`;
+                getLogger().info("run.phase.started", {
+                  "run.id": runId,
+                  "run.phase": "finalize",
+                  "phase.reason": "missing_work_receipt",
+                  "operation.id": usageOperationId,
+                });
+                const deliveryEvents = ticketFinalizationEvents(
+                  deps.runtime.run(deliveryRequest, runtimeContext),
+                  deliveryRequest.onUsage!,
                 );
                 if (await consumeRunEvents(ctx, deliveryEvents)) return;
                 if (await interruptedByShutdown()) return;

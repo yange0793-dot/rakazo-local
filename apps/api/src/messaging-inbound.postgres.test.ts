@@ -1,14 +1,125 @@
 import type { MessagingInboundMessage } from "@rakazo/adapter-kit";
-import type { PrismaClient } from "@rakazo/db";
-import { createDb, createThreadEvents, runAsSystem } from "@rakazo/db";
+import type { PrismaClient, ProvisionedMessagingIdentity } from "@rakazo/db";
+import {
+  asSystem,
+  createDb,
+  createThreadEvents,
+  provisionMessagingIdentity,
+  runAsSystem,
+} from "@rakazo/db";
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import { createMessagingInboundHandler } from "./messaging-inbound.js";
+import type { MessagingReceipts } from "./messaging-receipts.js";
 
 const databaseUrl = process.env.DATABASE_URL;
 const enabled = process.env.VERIFY_DATABASE === "1" && Boolean(databaseUrl);
 
 /** One deadline for every poll of a barrier, inside the transaction's 20s budget. */
 const BARRIER_POLL_BUDGET_MS = 4_000;
+
+describe.skipIf(!enabled)("outbound acceptance ACK (PostgreSQL)", () => {
+  it("waits for completion and actual acceptance, including legacy nullable rows", async () => {
+    const db = createDb(databaseUrl!);
+    const prisma = asSystem(db.prisma);
+    const address = `ack-${process.pid}-${Date.now()}`;
+    let owner: ProvisionedMessagingIdentity | undefined;
+    const outboundIds: string[] = [];
+    try {
+      await runAsSystem("messaging ACK fixture", async () => {
+        owner = await provisionMessagingIdentity(db.prisma, { provider: "test", address });
+        const acknowledge = vi.fn<MessagingReceipts["acknowledge"]>();
+        const handler = createMessagingInboundHandler({
+          prisma,
+          events: createThreadEvents(db.prisma),
+          jobs: { enqueue: vi.fn(async () => undefined) },
+          sandbox: {} as never,
+          provision: vi.fn(),
+          openSignup: false,
+          acknowledge,
+        });
+        await handler({
+          type: "message",
+          provider: "test",
+          handle: "inbound-1",
+          threadId: "test:dm",
+          isDirect: true,
+          from: address,
+          fromLabel: null,
+          channelName: null,
+          participants: [],
+          content: "hello",
+          mediaUrl: null,
+        });
+        const handled = acknowledge.mock.calls[0]![2];
+        const run = await prisma.run.findFirstOrThrow({ where: { threadId: owner.threadId } });
+        await prisma.run.update({
+          where: { id: run.id },
+          data: { status: "waiting_input", messagingMirroredAt: new Date() },
+        });
+        await expect(handled()).resolves.toBe(false);
+        const reply = await prisma.message.create({
+          data: {
+            threadId: owner.threadId,
+            runId: run.id,
+            botId: owner.botId,
+            role: "bot",
+            seq: 2,
+            blocks: [{ kind: "text", text: "reply" }],
+          },
+        });
+        const outbound = await prisma.messagingOutbound.create({
+          data: {
+            kind: "dm",
+            body: "reply",
+            idempotencyKey: `msg:${reply.id}`,
+            sourceMessageId: reply.id,
+          },
+        });
+        outboundIds.push(outbound.id);
+        await prisma.run.update({ where: { id: run.id }, data: { status: "completed" } });
+        await expect(handled()).resolves.toBe(false);
+        // The previous worker's exact claim write is translated by the migration.
+        await prisma.messagingOutbound.updateMany({
+          where: { id: outbound.id, status: "pending" },
+          data: { status: "sent" },
+        });
+        await expect(handled()).resolves.toBe(false);
+        await prisma.messagingOutbound.update({
+          where: { id: outbound.id },
+          data: { providerHandle: "provider-receipt" },
+        });
+        await expect(handled()).resolves.toBe(true);
+        const legacy = await prisma.messagingOutbound.create({
+          data: {
+            kind: "dm",
+            body: "old reply",
+            status: "sent",
+            idempotencyKey: `legacy:${reply.id}`,
+            sourceMessageId: reply.id,
+          },
+        });
+        outboundIds.push(legacy.id);
+        expect(legacy.deliveryState).toBeNull();
+        await expect(handled()).resolves.toBe(false);
+        await prisma.messagingOutbound.delete({ where: { id: legacy.id } });
+        await prisma.messagingOutbound.update({
+          where: { id: outbound.id },
+          data: { status: "failed" },
+        });
+        await expect(handled()).resolves.toBe(false);
+      });
+    } finally {
+      await prisma.messagingOutbound.deleteMany({ where: { id: { in: outboundIds } } });
+      if (owner) {
+        await prisma.messagingIdentity.deleteMany({ where: { address } });
+        await prisma.organization.deleteMany({ where: { id: owner.spaceId } });
+        await prisma.user.deleteMany({ where: { id: owner.userId } });
+      }
+      await db.prisma.$disconnect();
+      await db.pool.end();
+    }
+  });
+});
 
 /**
  * Two group events of one channel processed out of order, as a webhook retry and the

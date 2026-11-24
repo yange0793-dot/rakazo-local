@@ -1,10 +1,22 @@
 import { createHash, randomUUID } from "node:crypto";
-import type { Actor, SkillPlaybook } from "@rakazo/contracts";
-import { SkillPlaybookSchema } from "@rakazo/contracts";
+import type { AgentRuntimeCapabilities } from "@rakazo/adapter-kit";
+import type {
+  Actor,
+  ImprovementComponent,
+  ImprovementComponentSet,
+  SkillPlaybook,
+} from "@rakazo/contracts";
+import {
+  disabledBuiltinToolSet,
+  ImprovementComponentReceiptSchema,
+  ImprovementComponentSetSchema,
+  SkillPlaybookSchema,
+} from "@rakazo/contracts";
 import type { Prisma, PrismaClient } from "@rakazo/db";
 import { IsolationError, openTaughtSkillSnapshot, sealTaughtSkillSnapshot } from "@rakazo/db";
 import { z } from "zod";
 import { emptyRecording, parsePlaybook } from "./teaching-session.js";
+import { capabilityToolName, workImprovementComponentHash } from "./work-improvement-components.js";
 
 const ScopeSchema = z
   .object({
@@ -15,6 +27,22 @@ const ScopeSchema = z
     taskFamilies: z.array(z.string().min(1)).optional(),
   })
   .strict();
+const HashSchema = z.string().regex(/^[a-f0-9]{64}$/);
+const ComponentProofSchema = z.strictObject({
+  eligible: z.boolean(),
+  componentSetHash: HashSchema,
+  candidateRevision: z.string().min(1),
+  expectedRuns: z.number().int().positive(),
+  runs: z
+    .array(
+      z.strictObject({
+        caseId: z.string().min(1),
+        runId: z.string().min(1),
+        receipts: z.array(ImprovementComponentReceiptSchema),
+      }),
+    )
+    .min(1),
+});
 
 export type TaughtSkillRevisionScope = z.infer<typeof ScopeSchema>;
 export type TaughtSkillRevisionContext = TaughtSkillRevisionScope;
@@ -27,6 +55,8 @@ const TrialSchema = z
     baselineRevisionId: z.string().min(1),
     baselineGeneration: z.number().int().nonnegative(),
     candidatePlaybookHash: z.string().length(64),
+    candidateSnapshotHash: HashSchema.optional(),
+    componentProof: ComponentProofSchema.optional(),
     outcome: z.enum(["improved", "tie", "insufficient", "regressed"]),
     improvedCases: z.number().int().nonnegative(),
     protectedCasesPassed: z.boolean(),
@@ -44,6 +74,7 @@ const SnapshotSchema = z
     name: z.string(),
     goal: z.string(),
     playbook: SkillPlaybookSchema,
+    components: ImprovementComponentSetSchema.optional(),
     scope: ScopeSchema,
     trial: TrialSchema.optional(),
   })
@@ -114,6 +145,7 @@ const ChangesSchema = z
     skillId: z.string().min(1),
     name: z.string().optional(),
     playbook: SkillPlaybookSchema.optional(),
+    components: ImprovementComponentSetSchema.optional(),
     scope: ScopeSchema.optional(),
   })
   .strict();
@@ -143,6 +175,127 @@ export function taughtSkillPlaybookHash(playbook: SkillPlaybook): string {
       }),
     )
     .digest("hex");
+}
+
+export function taughtSkillComponentSetHash(components: ImprovementComponentSet): string {
+  return createHash("sha256")
+    .update(
+      JSON.stringify({
+        schemaVersion: components.schemaVersion,
+        items: components.items.map(workImprovementComponentHash),
+      }),
+    )
+    .digest("hex");
+}
+
+/** Includes every behavior-bearing component while reusing the established playbook hash. */
+export function taughtSkillRevisionHash(
+  playbook: SkillPlaybook,
+  components?: ImprovementComponentSet,
+): string {
+  const playbookHash = taughtSkillPlaybookHash(playbook);
+  if (!components) return playbookHash;
+  return createHash("sha256")
+    .update(
+      JSON.stringify({
+        playbookHash,
+        componentSetHash: taughtSkillComponentSetHash(components),
+      }),
+    )
+    .digest("hex");
+}
+
+function componentCapabilityIds(component: ImprovementComponent): string[] {
+  switch (component.kind) {
+    case "plugin":
+    case "tool_guidance":
+      return [component.capabilityId];
+    case "script":
+      return [...new Set(component.steps.map((step) => step.capabilityId))];
+    default:
+      return [];
+  }
+}
+
+function componentProofStatus(
+  revision: TaughtSkillRevision,
+  trial: TaughtSkillRevisionTrial,
+): "valid" | "missing" | "unqualified" {
+  const { components, playbook } = revision.snapshot;
+  if (!components) return "valid";
+  const proof = trial.componentProof;
+  if (
+    !proof ||
+    !trial.candidateSnapshotHash ||
+    trial.candidateSnapshotHash !== taughtSkillRevisionHash(playbook, components) ||
+    proof.componentSetHash !== taughtSkillComponentSetHash(components)
+  )
+    return "missing";
+  if (!proof.eligible) return "unqualified";
+  if (proof.runs.length !== proof.expectedRuns) return "missing";
+
+  const expected = new Map(components.items.map((component) => [component.id, component]));
+  const seenRunIds = new Set<string>();
+  for (const run of proof.runs) {
+    if (seenRunIds.has(run.runId)) return "missing";
+    seenRunIds.add(run.runId);
+    if (run.receipts.length !== components.items.length) return "missing";
+    const seenComponents = new Set<string>();
+    for (const receipt of run.receipts) {
+      const component = expected.get(receipt.componentId);
+      if (
+        !component ||
+        seenComponents.has(component.id) ||
+        receipt.runId !== run.runId ||
+        receipt.skillRevision !== proof.candidateRevision ||
+        receipt.skillHash !== taughtSkillPlaybookHash(playbook) ||
+        receipt.componentRevision !== component.revision ||
+        receipt.componentKind !== component.kind ||
+        receipt.componentHash !== workImprovementComponentHash(component)
+      )
+        return "missing";
+      seenComponents.add(component.id);
+      const expectedCapabilityIds = componentCapabilityIds(component);
+      if (
+        receipt.capabilities.length !== expectedCapabilityIds.length ||
+        receipt.capabilities.some(
+          (capability, index) => capability.id !== expectedCapabilityIds[index],
+        )
+      )
+        return "missing";
+      if (receipt.status === "unsupported" || receipt.status === "unexecuted") return "unqualified";
+      const expectedStatus =
+        component.kind === "plugin"
+          ? "loaded"
+          : component.kind === "script"
+            ? "executed"
+            : "applied";
+      if (receipt.status !== expectedStatus) return "missing";
+      if (
+        (component.kind === "plugin" || component.kind === "script") &&
+        (receipt.executions.length === 0 ||
+          receipt.executions.some(
+            (execution) =>
+              !execution.observedByRuntime ||
+              execution.status !== "succeeded" ||
+              !(component.kind === "plugin"
+                ? execution.capabilityId === component.capabilityId
+                : component.steps.some((step) => step.capabilityId === execution.capabilityId)),
+          ))
+      )
+        return "unqualified";
+      if (
+        component.kind === "script" &&
+        (receipt.executions.length !== component.steps.length ||
+          receipt.executions.some(
+            (execution, index) => execution.capabilityId !== component.steps[index]?.capabilityId,
+          ))
+      )
+        return "missing";
+    }
+    if (seenComponents.size !== expected.size) return "missing";
+  }
+  return seenRunIds.size ? "valid" : "missing";
 }
 
 /** Exact structured matching. Paths and family tags must come from the caller's task context. */
@@ -310,11 +463,13 @@ export async function saveTaughtSkillRevision(
     const previous =
       skill.status === "saved" ? await currentRevision(prisma, tx, actor, skill) : null;
     const scope = changes.scope ?? previous?.snapshot.scope ?? {};
+    const components = changes.components ?? previous?.snapshot.components;
     if (changes.scope) await checkProjectScope(tx, actor, skill, changes.scope);
     const revision = await appendRevision(prisma, tx, skill, actor.userId, previous?.id ?? null, {
       name: changes.name ?? skill.name,
       goal: skill.goal,
       playbook: changes.playbook ?? parsePlaybook(skill.playbook),
+      ...(components ? { components } : {}),
       scope,
     });
     await applyRevision(tx, actor, skill, revision);
@@ -347,11 +502,13 @@ export async function snapshotTaughtSkillRevision(
     )
       throw new TaughtSkillRevisionConflictError();
     const scope = changes.scope ?? current.snapshot.scope;
+    const components = changes.components ?? current.snapshot.components;
     if (changes.scope) await checkProjectScope(tx, actor, skill, changes.scope);
     return appendRevision(prisma, tx, skill, actor.userId, current.id, {
       name: changes.name ?? current.snapshot.name,
       goal: current.snapshot.goal,
       playbook: changes.playbook ?? current.snapshot.playbook,
+      ...(components ? { components } : {}),
       scope,
       ...(changes.trial ? { trial: changes.trial } : {}),
     });
@@ -361,7 +518,12 @@ export async function snapshotTaughtSkillRevision(
 export async function activateTaughtSkillRevision(
   prisma: PrismaClient,
   actor: RevisionActor,
-  input: { skillId: string; revisionId: string; expectedCurrentRevisionId: string },
+  input: {
+    skillId: string;
+    revisionId: string;
+    expectedCurrentRevisionId: string;
+    runtimeCapabilities?: Pick<AgentRuntimeCapabilities, "tools" | "scripted">;
+  },
 ): Promise<TaughtSkillRevisionActivation> {
   return prisma.$transaction(async (tx) => {
     const skill = await lockedSkill(tx, actor, input.skillId);
@@ -380,6 +542,18 @@ export async function activateTaughtSkillRevision(
     if (trial.outcome !== "improved") return { status: "not_adopted", reason: trial.outcome };
     if (trial.candidatePlaybookHash !== taughtSkillPlaybookHash(revision.snapshot.playbook))
       return { status: "not_adopted", reason: "missing_evidence" };
+    if (
+      trial.candidateSnapshotHash &&
+      trial.candidateSnapshotHash !==
+        taughtSkillRevisionHash(revision.snapshot.playbook, revision.snapshot.components)
+    )
+      return { status: "not_adopted", reason: "missing_evidence" };
+    const componentProof = componentProofStatus(revision, trial);
+    if (componentProof !== "valid")
+      return {
+        status: "not_adopted",
+        reason: componentProof === "missing" ? "missing_evidence" : "unqualified",
+      };
     if (
       !trial.improvedCases ||
       !trial.protectedCasesPassed ||
@@ -401,6 +575,33 @@ export async function activateTaughtSkillRevision(
       select: { id: true },
     });
     if (!evidence) return { status: "not_adopted", reason: "missing_evidence" };
+
+    const components = revision.snapshot.components;
+    if (components) {
+      const runtime = input.runtimeCapabilities;
+      if (!runtime || runtime.scripted) return { status: "not_adopted", reason: "unqualified" };
+      const bot = await tx.bot.findFirst({
+        where: { id: skill.botId, spaceId: actor.spaceId, archivedAt: null },
+        select: { disabledBuiltinTools: true },
+      });
+      if (!bot) return { status: "not_adopted", reason: "unqualified" };
+
+      const disabled = disabledBuiltinToolSet(bot.disabledBuiltinTools);
+      const available = new Set<string>();
+      if (runtime.tools) {
+        for (const component of components.items) {
+          if (component.kind !== "plugin") continue;
+          const name = capabilityToolName(component.capabilityId);
+          if (name && !disabled.has(name)) available.add(component.capabilityId);
+        }
+      }
+      if (
+        components.items.some((component) =>
+          componentCapabilityIds(component).some((id) => !available.has(id)),
+        )
+      )
+        return { status: "not_adopted", reason: "unqualified" };
+    }
     await applyRevision(tx, actor, skill, revision);
     return { status: "activated", revision };
   });

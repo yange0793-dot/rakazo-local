@@ -17,10 +17,10 @@ vi.mock("@rakazo/db", async (importOriginal) => {
   return {
     ...scopes,
     SemanticFactStore: class {
-      pendingIndexWork(limit: number, spaceId?: string) {
+      pendingIndexWork(limit: number, spaceId?: string, eligibleSpaceIds?: readonly string[]) {
         // Capture before Vitest's async mock dispatcher enters its own execution context.
         observedScopes.push(scopes.currentDbContext());
-        return pendingIndexWork(limit, spaceId);
+        return pendingIndexWork(limit, spaceId, eligibleSpaceIds);
       }
     },
   };
@@ -39,7 +39,7 @@ describe("semantic index synchronization", () => {
     pendingIndexWork.mockResolvedValue([]);
     const memoryProviders = { resolve: vi.fn() };
     await syncSemanticMemorySpace({ prisma, memoryProviders }, "space-a");
-    expect(pendingIndexWork).toHaveBeenCalledWith(1, "space-a");
+    expect(pendingIndexWork).toHaveBeenCalledWith(1, "space-a", undefined);
     expect(memoryProviders.resolve).not.toHaveBeenCalled();
   });
 
@@ -114,9 +114,10 @@ describe("semantic index synchronization", () => {
       jobs: { enqueue } as unknown as JobPublisher,
     });
     expect(configured.spaceMemoryConfig.findMany).toHaveBeenCalledWith({
-      where: { spaceId: { in: ["space-a", "space-b"] }, provider: LOCAL_MEMORY_PROVIDER_ID },
+      where: { provider: LOCAL_MEMORY_PROVIDER_ID },
       select: { spaceId: true },
     });
+    expect(pendingIndexWork).toHaveBeenCalledWith(100, undefined, ["space-a", "space-b"]);
     expect(enqueue).toHaveBeenCalledTimes(2);
     expect(enqueue.mock.calls.map(([job]) => job.payload)).toEqual([
       { spaceId: "space-a" },
@@ -136,5 +137,38 @@ describe("semantic index synchronization", () => {
       jobs: { enqueue } as unknown as JobPublisher,
     });
     expect(enqueue).not.toHaveBeenCalled();
+    expect(pendingIndexWork).not.toHaveBeenCalled();
+  });
+
+  it("finds the 101st space when the first 100 pending spaces are disconnected", async () => {
+    const connected = { id: "work-101", spaceId: "space-101", userId: "user-101" };
+    const backlog = [
+      ...Array.from({ length: 100 }, (_, index) => ({
+        id: `work-${index}`,
+        spaceId: `disconnected-${index}`,
+        userId: "user-a",
+      })),
+      connected,
+    ];
+    const configured = {
+      spaceMemoryConfig: {
+        findMany: vi.fn(async () => [{ spaceId: "space-101" }]),
+      },
+    } as unknown as PrismaClient;
+    pendingIndexWork.mockImplementation(
+      async (limit: number, _spaceId?: string, eligibleSpaceIds?: readonly string[]) =>
+        backlog
+          .filter((work) => !eligibleSpaceIds || eligibleSpaceIds.includes(work.spaceId))
+          .slice(0, limit),
+    );
+    const enqueue = vi.fn(async (_job: BackgroundJob) => undefined);
+
+    await reconcileSemanticMemoryIndex({
+      prisma: configured,
+      jobs: { enqueue } as unknown as JobPublisher,
+    });
+
+    expect(pendingIndexWork).toHaveBeenCalledWith(100, undefined, ["space-101"]);
+    expect(enqueue.mock.calls.map(([job]) => job.payload)).toEqual([{ spaceId: "space-101" }]);
   });
 });

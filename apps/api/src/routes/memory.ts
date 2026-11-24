@@ -146,6 +146,7 @@ export function memoryRoutes(ctx: RouterContext) {
               runId: draft.block.runId,
               threadId: bot.thread.id,
               messageId: draft.messageId,
+              ...(draft.block.derivedFrom ? { derivedFrom: draft.block.derivedFrom } : {}),
               harness: {
                 domainKey: draft.block.domainKey ?? "",
                 signals: draft.block.signals ?? [],

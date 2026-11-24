@@ -6,7 +6,7 @@ import type {
   AgentToolExecutionResult,
   ScriptedTurn,
 } from "@rakazo/adapter-kit";
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   FILE_DELIVERY_OUTPUT_CONTRACT,
   FILE_DELIVERY_PLAYBOOKS,
@@ -25,6 +25,8 @@ import {
 type Arm = "baseline" | "candidate";
 type Tool = NonNullable<ScriptedTurn["toolCalls"]>[number];
 type UsageEvent = Extract<AgentRuntimeEvent, { type: "usage" }>;
+
+afterEach(() => vi.useRealTimers());
 
 function comparisonInput(): WorkImprovementInput {
   return {
@@ -71,6 +73,9 @@ class DeliveryReplayRuntime implements AgentRuntime {
   observeCalls = false;
   useCallIds = true;
   secondModelCall = false;
+  componentAware = false;
+  readonly omittedToolNames = new Set<string>();
+  readonly observedComponentPrompts: unknown[] = [];
   outputFor = (arm: Arm, id: string): string =>
     JSON.stringify(FILE_DELIVERY_SCRIPTED_REPLIES[arm][id]);
   toolsFor = (_arm: Arm, id: string): Tool[] => {
@@ -119,10 +124,21 @@ class DeliveryReplayRuntime implements AgentRuntime {
     if (!id) throw new Error("Unknown replay task");
     const publicInstructions = JSON.parse(request.instructions.split("\n").at(-1)!) as {
       playbook: WorkImprovementInput["baseline"]["playbook"];
+      components?: {
+        guidance: Array<{ id: string; revision: string; hash: string; text: string }>;
+        scriptOutputs: Array<{
+          componentId: string;
+          executions: Array<{ result: unknown }>;
+        }>;
+      };
     };
-    const arm: Arm =
-      publicInstructions.playbook.howToCheck ===
-      FILE_DELIVERY_PLAYBOOKS.baseline.playbook.howToCheck
+    if (publicInstructions.components) this.observedComponentPrompts.push(publicInstructions);
+    const arm: Arm = this.componentAware
+      ? request.tools.some((tool) => tool.name === "list_files")
+        ? "candidate"
+        : "baseline"
+      : publicInstructions.playbook.howToCheck ===
+          FILE_DELIVERY_PLAYBOOKS.baseline.playbook.howToCheck
         ? "baseline"
         : "candidate";
     const failure = this.failureFor(arm, id);
@@ -138,8 +154,15 @@ class DeliveryReplayRuntime implements AgentRuntime {
       maxOutputTokens: request.model.maxTokens!,
     };
     const reservation = this.observeCalls ? await observer.beforeCall(call) : undefined;
+    const availableTools = new Set(request.tools.map((tool) => tool.name));
     const script: ScriptedTurn[] = [
-      { toolCalls: this.toolsFor(arm, id) },
+      {
+        toolCalls: this.toolsFor(arm, id).filter(
+          (tool) =>
+            (!this.componentAware || availableTools.has(tool.name)) &&
+            !this.omittedToolNames.has(tool.name),
+        ),
+      },
       { assistant: this.outputFor(arm, id), complete: true },
     ];
     for await (let event of this.scripted.run({ ...request, script }, context)) {
@@ -186,6 +209,13 @@ describe("isolated work improvement comparison", () => {
     expect(artifact.retainedRevision).toBe(input.candidate.revision);
     expect(artifact.execution.kind).toBe("scripted");
     expect(artifact.scorerVersion).toBe("work-improvement.scorer.v3");
+    expect(artifact.componentEligibility).toEqual({
+      baseline: { eligible: true, issues: [] },
+      candidate: { eligible: true, issues: [] },
+    });
+    expect(
+      artifact.cases.every((fixture) => fixture.candidate.componentReceipts.length === 0),
+    ).toBe(true);
     expect(artifact.summary.baseline).toMatchObject({
       runs: 9,
       passed: 5,
@@ -262,6 +292,197 @@ describe("isolated work improvement comparison", () => {
       ),
     ).toBe(true);
     expect(JSON.parse(JSON.stringify(artifact))).toEqual(artifact);
+  });
+
+  it("executes guidance, scripts and selected capabilities as immutable skill components", async () => {
+    const input = comparisonInput();
+    input.baseline.playbook = structuredClone(input.candidate.playbook);
+    input.baseline.components = {
+      schemaVersion: "improvement-components.v1",
+      items: [
+        {
+          id: "baseline-reader",
+          revision: "1",
+          kind: "plugin",
+          capabilityId: "isolated.snapshot.read_file",
+        },
+      ],
+    };
+    input.candidate.components = {
+      schemaVersion: "improvement-components.v1",
+      items: [
+        {
+          id: "task-guidance",
+          revision: "3",
+          kind: "task_guidance",
+          text: "Compare each installed path with the manifest.",
+        },
+        {
+          id: "system-strategy",
+          revision: "2",
+          kind: "system_strategy",
+          text: "Keep evidence sets sorted before returning them.",
+        },
+        {
+          id: "reader",
+          revision: "1",
+          kind: "plugin",
+          capabilityId: "isolated.snapshot.read_file",
+        },
+        {
+          id: "tree-listing",
+          revision: "4",
+          kind: "plugin",
+          capabilityId: "isolated.snapshot.list_files",
+        },
+        {
+          id: "listing-guidance",
+          revision: "2",
+          kind: "tool_guidance",
+          capabilityId: "isolated.snapshot.list_files",
+          text: "Enumerate the complete installed tree.",
+        },
+        {
+          id: "request-script",
+          revision: "5",
+          kind: "script",
+          language: "tool-sequence.v1",
+          steps: [
+            {
+              capabilityId: "isolated.snapshot.read_file",
+              input: { path: "request.json" },
+            },
+          ],
+        },
+      ],
+    };
+    const runtime = new DeliveryReplayRuntime();
+    runtime.callbackTools = true;
+    runtime.componentAware = true;
+    const artifact = await compareWorkImprovement(input, { runtime });
+
+    expect(artifact.decision).toBe("adopt");
+    expect(artifact.componentEligibility.baseline.eligible).toBe(true);
+    expect(artifact.componentEligibility.candidate.eligible).toBe(true);
+    const baselineRequest = runtime.requests.find(
+      (request) => request.tools.map((tool) => tool.name).join(",") === "read_file",
+    )!;
+    expect(baselineRequest.instructions).not.toContain(
+      "Compare each installed path with the manifest.",
+    );
+    expect(
+      runtime.requests.some(
+        (request) =>
+          request.tools.map((tool) => tool.name).join(",") === "read_file,list_files" &&
+          request.tools[1]!.description.includes("Enumerate the complete installed tree."),
+      ),
+    ).toBe(true);
+    const observed = runtime.observedComponentPrompts.find((value) =>
+      JSON.stringify(value).includes("Compare each installed path with the manifest."),
+    ) as {
+      components: {
+        guidance: Array<{ id: string; revision: string; hash: string; text: string }>;
+        scriptOutputs: Array<{
+          componentId: string;
+          executions: Array<{ result: { content: string } }>;
+        }>;
+      };
+    };
+    expect(observed.components.guidance).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          id: "task-guidance",
+          revision: "3",
+          text: "Compare each installed path with the manifest.",
+        }),
+        expect.objectContaining({
+          id: "system-strategy",
+          revision: "2",
+          text: "Keep evidence sets sorted before returning them.",
+        }),
+      ]),
+    );
+    expect(observed.components.scriptOutputs[0]!.executions[0]!.result.content).toBe(
+      input.cases[0]!.input.materials["request.json"],
+    );
+    expect(
+      runtime.requests.some((request) => request.instructions.includes("cannot change identity")),
+    ).toBe(true);
+    const run = caseResult(artifact, "clean").candidate;
+    const scriptReceipt = run.componentReceipts.find(
+      (receipt) => receipt.componentId === "request-script",
+    )!;
+    expect(scriptReceipt).toMatchObject({
+      status: "executed",
+      componentRevision: "5",
+      runId: run.runId,
+      skillRevision: input.candidate.revision,
+      skillHash: run.skillHash,
+      instructionsHash: expect.stringMatching(/^[a-f0-9]{64}$/),
+      executions: [
+        {
+          capabilityId: "isolated.snapshot.read_file",
+          status: "succeeded",
+          observedByRuntime: true,
+        },
+      ],
+    });
+    expect(scriptReceipt.componentHash).toMatch(/^[a-f0-9]{64}$/);
+    expect(scriptReceipt.executions[0]!.outputHash).toMatch(/^[a-f0-9]{64}$/);
+    expect(scriptReceipt.capabilities[0]).toMatchObject({
+      id: "isolated.snapshot.read_file",
+      adapterId: "work-improvement-isolated-tools",
+      schemaHash: expect.stringMatching(/^[a-f0-9]{64}$/),
+      toolHash: expect.stringMatching(/^[a-f0-9]{64}$/),
+    });
+  });
+
+  it("does not qualify unknown or unexecuted components", async () => {
+    const unknownInput = comparisonInput();
+    unknownInput.candidate.components = {
+      schemaVersion: "improvement-components.v1",
+      items: [
+        {
+          id: "unregistered",
+          revision: "1",
+          kind: "plugin",
+          capabilityId: "isolated.snapshot.not-registered",
+        },
+      ],
+    };
+    const unknownRuntime = new DeliveryReplayRuntime();
+    unknownRuntime.callbackTools = true;
+    const unknown = await compareWorkImprovement(unknownInput, { runtime: unknownRuntime });
+    expect(unknown.decision).toBe("inconclusive");
+    expect(unknown.componentEligibility.candidate.eligible).toBe(false);
+    expect(unknown.componentEligibility.candidate.issues).toEqual(
+      expect.arrayContaining([expect.objectContaining({ reason: "unsupported" })]),
+    );
+    expect(caseResult(unknown, "clean").candidate.componentReceipts[0]!.status).toBe("unsupported");
+
+    const unloadedInput = comparisonInput();
+    unloadedInput.candidate.components = {
+      schemaVersion: "improvement-components.v1",
+      items: [
+        {
+          id: "tree-listing",
+          revision: "1",
+          kind: "plugin",
+          capabilityId: "isolated.snapshot.list_files",
+        },
+      ],
+    };
+    const unloadedRuntime = new DeliveryReplayRuntime();
+    unloadedRuntime.callbackTools = true;
+    unloadedRuntime.componentAware = true;
+    unloadedRuntime.omittedToolNames.add("list_files");
+    const unloaded = await compareWorkImprovement(unloadedInput, { runtime: unloadedRuntime });
+    expect(unloaded.decision).toBe("inconclusive");
+    expect(unloaded.componentEligibility.candidate.eligible).toBe(false);
+    expect(unloaded.componentEligibility.candidate.issues).toEqual(
+      expect.arrayContaining([expect.objectContaining({ reason: "unexecuted" })]),
+    );
+    expect(caseResult(unloaded, "clean").candidate.componentReceipts[0]!.status).toBe("unexecuted");
   });
 
   it("returns real isolated read results through the model executeTool interface", async () => {
@@ -685,6 +906,54 @@ describe("isolated work improvement comparison", () => {
     expect(runtime.requests.every((request) => request.model.maxTokens === 65_536)).toBe(true);
   });
 
+  it("does not impose a tool-call limit when the evaluation budget omits one", async () => {
+    const input = comparisonInput();
+    input.cases = input.cases.slice(0, 1);
+    input.execution.budget = {};
+    const runtime = new DeliveryReplayRuntime();
+    runtime.toolsFor = () =>
+      Array.from({ length: 12 }, () => ({ name: "read_file", args: { path: "request.json" } }));
+
+    const evaluated = await evaluateWorkImprovementRevision(input, input.candidate, { runtime });
+    const run = evaluated[0]!.run;
+
+    expect(run.tools).toHaveLength(12);
+    expect(run.tools.every((tool) => tool.status === "succeeded")).toBe(true);
+    expect(run.errors.map((error) => error.code)).not.toContain("tool_budget_exhausted");
+  });
+
+  it("runs without a task timeout and still honors the caller's stop signal", async () => {
+    vi.useFakeTimers();
+    const input = comparisonInput();
+    input.cases = input.cases.slice(0, 1);
+    input.execution.budget = {};
+    const controller = new AbortController();
+    const aborted: string[] = [];
+    const runtime: AgentRuntime = {
+      describe: () => new DeliveryReplayRuntime().describe(),
+      abort: async (runId) => {
+        aborted.push(runId);
+      },
+      async *run() {
+        await new Promise<void>(() => {});
+      },
+    };
+
+    const evaluation = evaluateWorkImprovementRevision(input, input.candidate, {
+      runtime,
+      context: { signal: controller.signal },
+    });
+    await Promise.resolve();
+    await vi.advanceTimersByTimeAsync(91_000);
+    expect(aborted).toEqual([]);
+    controller.abort(new Error("Evaluation interrupted"));
+
+    const evaluated = await evaluation;
+    const run = evaluated[0]!.run;
+    expect(run.errors.map((error) => error.code)).toContain("cancelled");
+    expect(aborted).toHaveLength(1);
+  });
+
   it("leaves an unspecified output limit to the runtime in comparison and single-revision runs", async () => {
     const input = comparisonInput();
     delete input.execution.budget.maxTotalTokens;
@@ -965,6 +1234,48 @@ describe("isolated work improvement comparison", () => {
     expect(artifact.decision).toBe("adopt");
   });
 
+  it("keeps first-attempt tools and unknown usage after a successful retry", async () => {
+    const replay = new DeliveryReplayRuntime();
+    replay.callbackTools = true;
+    replay.usageFor = (_arm, _id, usage) => ({ ...usage, costUsd: 0.01 });
+    const attempted = new Set<string>();
+    const runtime: AgentRuntime = {
+      describe: () => replay.describe(),
+      abort: (id) => replay.abort(id),
+      async *run(request, context) {
+        const key = `${request.prompt}:${request.instructions}`;
+        if (!attempted.has(key)) {
+          attempted.add(key);
+          const executionId = `${request.runId}:first-read`;
+          await request.executeTool!("read_file", { path: "request.json" }, executionId);
+          yield {
+            type: "tool",
+            name: "read_file",
+            args: { path: "request.json" },
+            executionId,
+          };
+          throw new Error("Synthetic disconnect after tool execution");
+        }
+        yield* replay.run(request, context);
+      },
+    };
+    const artifact = await compareWorkImprovement(comparisonInput(), { runtime });
+    for (const arm of ["baseline", "candidate"] as const) {
+      const runs = artifact.cases.map((fixture) => fixture[arm]);
+      const summary = artifact.summary[arm];
+      expect(runs.every((run) => run.previousAttempt?.tools.length === 1)).toBe(true);
+      expect(summary.toolCalls).toBe(runs.reduce((sum, run) => sum + run.tools.length + 1, 0));
+      expect(summary.durationMs).toBe(
+        runs.reduce((sum, run) => sum + run.durationMs + run.previousAttempt!.durationMs, 0),
+      );
+      expect(summary.totalTokens).toBeNull();
+      expect(summary.knownTotalTokens).toBe(468);
+      expect(summary.costUsd).toBeNull();
+      expect(summary.knownCostUsd).toBeCloseTo(0.09);
+    }
+    expect(artifact.summary.candidate.passed).toBe(9);
+  });
+
   it("gives an arm one fresh try after an answer wrapped in prose, then leaves it unknown", async () => {
     const wrapped = (always: boolean) => {
       const runtime = new DeliveryReplayRuntime();
@@ -980,6 +1291,16 @@ describe("isolated work improvement comparison", () => {
     const run = caseResult(recovered, "clean").candidate;
     expect(run.score.verdict).toBe("pass");
     expect(run.previousAttempt?.errors.map((error) => error.code)).toEqual(["invalid_output"]);
+    expect(recovered.summary.candidate.toolCalls).toBe(
+      recovered.cases.reduce(
+        (sum, fixture) =>
+          sum +
+          fixture.candidate.tools.length +
+          (fixture.candidate.previousAttempt?.tools.length ?? 0),
+        0,
+      ),
+    );
+    expect(recovered.summary.candidate.totalTokens).toBe(520);
     expect(recovered.decision).toBe("adopt");
     const stuck = await compareWorkImprovement(comparisonInput(), { runtime: wrapped(true) });
     expect(caseResult(stuck, "clean").candidate.score.verdict).toBe("unknown");

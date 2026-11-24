@@ -79,6 +79,7 @@ export async function startMessagingRuntime({
     sandbox,
     provision: (request) => provisionMessagingIdentity(prisma, request),
     openSignup: false,
+    ticketBoardEnabled: env.ticketBoardEnabled,
     acknowledge: receipts.acknowledge,
     storeAttachment: ({ spaceId, userId, ...input }) =>
       storeInboundAttachment(
@@ -142,6 +143,7 @@ export async function startMessagingRuntime({
         ),
       providerId: "slack",
       botId,
+      ticketBoardEnabled: env.ticketBoardEnabled,
       workspaceId: installation?.workspaceId,
       conversationPrefix: installation ? `slack~${installation.id}:` : undefined,
       onUnavailable: installation

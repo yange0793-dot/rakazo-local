@@ -1,9 +1,21 @@
+import type { Prisma } from "@rakazo/db";
+
 export type TakeoverResumeCheckpoint = "takeover" | "takeover-skipped";
 
 export const TAKEOVER_RESUME_CHECKPOINTS: readonly TakeoverResumeCheckpoint[] = [
   "takeover",
   "takeover-skipped",
 ];
+
+/** A wake only notifies: a held takeover needs new work, handback, or a durable setup retry. */
+export const RESUMABLE_TAKEOVER_WHERE = {
+  status: "waiting_takeover",
+  OR: [
+    { checkpoint: { in: [...TAKEOVER_RESUME_CHECKPOINTS] } },
+    { steeringMessages: { some: { claimedAt: null } } },
+    { wakeAt: { not: null } },
+  ],
+} satisfies Prisma.RunWhereInput;
 
 /** Shown when desktop tools are gated because the user still holds the screen. */
 export const DESKTOP_HELD_FOR_TAKEOVER_MESSAGE =
@@ -54,11 +66,16 @@ export function takeoverContinuePlan(run: {
   };
 }
 
-/** Observed status and checkpoint so a concurrent release cannot be claimed away. */
-export function continueRunClaimFence(run: { status: string; checkpoint: string | null }) {
+/** Pin the observed attempt and pause state so a concurrent resume cannot be claimed away. */
+export function continueRunClaimFence(run: {
+  status: string;
+  checkpoint: string | null;
+  leaseFence: number;
+}) {
   return {
     status: run.status,
     checkpoint: run.checkpoint,
+    leaseFence: run.leaseFence,
   };
 }
 

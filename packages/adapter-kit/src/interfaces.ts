@@ -83,6 +83,7 @@ import type {
   SemanticMemoryCapabilities,
   SemanticMemoryForgetRequest,
   SemanticMemoryPurgeHistoryRequest,
+  SemanticMemoryReadRequest,
   SemanticMemoryRecallRequest,
   SemanticMemoryResponse,
   SemanticMemoryResult,
@@ -347,6 +348,11 @@ export interface SemanticMemoryProvider {
     request: SemanticMemoryRecallRequest,
     context: AdapterContext,
   ): Promise<SemanticMemoryResponse<SemanticMemoryResult[]>>;
+  /** Exact active revision read; absent when a provider cannot resolve citations. */
+  read?(
+    request: SemanticMemoryReadRequest,
+    context: AdapterContext,
+  ): Promise<SemanticMemoryResponse<SemanticMemoryResult>>;
   save(
     request: SemanticMemorySaveRequest,
     context: AdapterContext,

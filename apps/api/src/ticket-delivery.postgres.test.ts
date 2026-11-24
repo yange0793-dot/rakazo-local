@@ -1,4 +1,4 @@
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -52,10 +52,7 @@ async function ticketFixture() {
   const dataDir = await mkdtemp(join(tmpdir(), "ticket-recovery-"));
   const address = `work-${randomUUID()}@example.test`;
   const identity = await runAsSystem("ticket fixture", () =>
-    provisionMessagingIdentity(
-      prisma,
-      { provider: "email", address },
-    ),
+    provisionMessagingIdentity(prisma, { provider: "email", address }),
   );
   const actor = {
     spaceId: identity.spaceId,
@@ -112,6 +109,583 @@ async function ticketFixture() {
 }
 
 pg("chat ticket work delivery", () => {
+  it.each([
+    { allFiles: true, revise: false },
+    { allFiles: false, revise: false },
+    { allFiles: false, revise: true },
+  ])(
+    "settles fixed requirements and replays their original acceptance (allFiles=$allFiles, revise=$revise)",
+    async ({ allFiles, revise }) => {
+      const f = await ticketFixture();
+      try {
+        await runAsTenant(f.actor, async () => {
+          const sent = await sendThreadMessage(f.base, f.actor, f.target, {
+            text: "Deliver report.txt and index.txt.",
+            clientNonce: randomUUID(),
+          });
+          const requirements = {
+            version: 1,
+            items: ["report", "index"].map((id) => ({
+              id,
+              kind: "artifact",
+              description: `Deliver ${id}.txt.`,
+              name: `${id}.txt`,
+            })),
+          };
+          let ticketId = "";
+          const runtime = {
+            describe: () => ({
+              ...new ScriptedAgentRuntime().describe(),
+              capabilities: {
+                ...new ScriptedAgentRuntime().describe().capabilities,
+                scripted: false,
+              },
+            }),
+            abort: async () => {},
+            async *run(request: AgentRunRequest) {
+              const made = (await request.executeTool!(
+                "ticket_create",
+                {
+                  title: "File delivery",
+                  fileDeliveryRequirements: requirements,
+                },
+                "create-file-work",
+              )) as { ticket: { id: string } };
+              ticketId = made.ticket.id;
+              const files = [];
+              for (const id of allFiles ? ["report", "index"] : ["report"]) {
+                const attached = await attachWorkspaceFileToThread(f.base, {
+                  spaceId: f.actor.spaceId,
+                  userId: f.actor.userId,
+                  botId: f.identity.botId,
+                  runId: sent.runId,
+                  filePath: `${id}.txt`,
+                  name: `${id}.txt`,
+                  bytes: Buffer.from(`Actual ${id} content.`),
+                  operationId: `${sent.runId}:${id}`,
+                });
+                const artifact = await f.prisma.artifact.findUniqueOrThrow({
+                  where: { id: attached.artifactId },
+                });
+                files.push({ requirementId: id, artifact });
+              }
+              const deliveryInput = {
+                id: ticketId,
+                result: {
+                  previousVersion: 0,
+                  summary: "Files delivered.",
+                  findings: [
+                    {
+                      outcome: "pass",
+                      conclusion: "Delivery complete.",
+                      evidence: "Attached files.",
+                    },
+                  ],
+                  artifactIds: files.map(({ artifact }) => artifact.id),
+                  fileDelivery: {
+                    requirementsVersion: 1,
+                    evidenceRefs: files.map(({ requirementId, artifact }) => ({
+                      requirementId,
+                      kind: "artifact",
+                      artifactId: artifact.id,
+                      version: artifact.version,
+                      hash: artifact.hash,
+                    })),
+                  },
+                },
+              };
+              const delivered = await request.executeTool!(
+                "ticket_update",
+                deliveryInput,
+                "deliver-files",
+              );
+              expect(delivered).toMatchObject({
+                ok: true,
+                status: allFiles ? "done" : "review",
+                acceptance: {
+                  status: allFiles ? "verified" : "unknown",
+                  requirementsVersion: 1,
+                },
+              });
+              expect(
+                await request.executeTool!("ticket_update", deliveryInput, "replay-files"),
+              ).toEqual(delivered);
+              if (revise) {
+                const attached = await attachWorkspaceFileToThread(f.base, {
+                  spaceId: f.actor.spaceId,
+                  userId: f.actor.userId,
+                  botId: f.identity.botId,
+                  runId: sent.runId,
+                  filePath: "index.txt",
+                  bytes: Buffer.from("Actual index content."),
+                  operationId: `${sent.runId}:index`,
+                });
+                const index = await f.prisma.artifact.findUniqueOrThrow({
+                  where: { id: attached.artifactId },
+                });
+                expect(
+                  await request.executeTool!(
+                    "ticket_update",
+                    {
+                      id: ticketId,
+                      result: {
+                        ...deliveryInput.result,
+                        previousVersion: 1,
+                        artifactIds: [...deliveryInput.result.artifactIds, index.id],
+                        fileDelivery: {
+                          requirementsVersion: 1,
+                          evidenceRefs: [
+                            ...deliveryInput.result.fileDelivery.evidenceRefs,
+                            {
+                              requirementId: "index",
+                              kind: "artifact",
+                              artifactId: index.id,
+                              version: index.version,
+                              hash: index.hash,
+                            },
+                          ],
+                        },
+                      },
+                    },
+                    "deliver-revision",
+                  ),
+                ).toMatchObject({
+                  ok: true,
+                  version: 2,
+                  status: "done",
+                  acceptance: { status: "verified" },
+                });
+                expect(
+                  await request.executeTool!("ticket_update", deliveryInput, "replay-old-version"),
+                ).toEqual(delivered);
+                expect(
+                  await f.prisma.message.count({
+                    where: {
+                      threadId: f.target.threadId,
+                      clientNonce: { startsWith: `work-receipt:${ticketId}:` },
+                    },
+                  }),
+                ).toBe(2);
+              }
+              yield { type: "done" as const, text: "Receipt delivered." };
+            },
+          };
+          await createRunExecutor({ ...f.workerDeps, runtime }).continueRun(
+            sent.runId,
+            "file-verifier",
+          );
+          const run = await f.prisma.run.findUniqueOrThrow({ where: { id: sent.runId } });
+          expect(run.status).toBe("completed");
+          const configurations = await f.prisma.externalEffect.findMany({
+            where: {
+              runId: sent.runId,
+              kind: "runtime_configuration",
+              request: { path: ["phase"], equals: "start" },
+            },
+          });
+          expect(configurations).toHaveLength(1);
+          const reference = configurations[0]!.result as { storageKey: string; sha256: string };
+          const configurationBytes = await f.base.artifacts.get(reference.storageKey, {
+            operationId: "verify-configuration",
+            traceId: "verify-configuration",
+            ...f.actor,
+            signal: new AbortController().signal,
+          });
+          expect(createHash("sha256").update(configurationBytes).digest("hex")).toBe(
+            reference.sha256,
+          );
+          expect(JSON.parse(new TextDecoder().decode(configurationBytes))).toMatchObject({
+            format: "rakazo-run-configuration-manifest",
+            runId: sent.runId,
+            attemptId: (configurations[0]!.request as { attemptId: string }).attemptId,
+            model: {
+              deliveredAtStart: { provider: expect.any(String), modelId: expect.any(String) },
+              effectiveReasoningLevel: null,
+            },
+          });
+          const ticket = await f.prisma.ticket.findUniqueOrThrow({ where: { id: ticketId } });
+          expect(ticket.fileDeliveryRequirements).toEqual(requirements);
+          expect(ticket.status).toBe(allFiles || revise ? "done" : "review");
+          const receipt = await f.prisma.artifact.findFirstOrThrow({
+            where: { runId: sent.runId, name: `work-${ticketId}.json`, version: 1 },
+          });
+          const bytes = await f.base.artifacts.get(receipt.storageKey, {
+            operationId: "verify-receipt",
+            traceId: "verify-receipt",
+            ...f.actor,
+            signal: new AbortController().signal,
+          });
+          const body = JSON.parse(new TextDecoder().decode(bytes));
+          expect(body.requirements).toEqual(requirements);
+          expect(body.acceptance.status).toBe(allFiles ? "verified" : "unknown");
+          expect(body.acceptance.results).toHaveLength(2);
+          if (!allFiles)
+            expect(body.acceptance.results[1]).toMatchObject({
+              requirementId: "index",
+              status: "unknown",
+              reason: "missing_evidence",
+            });
+        });
+      } finally {
+        await f.close();
+      }
+    },
+    60_000,
+  );
+
+  it("revises requirements through the tool and API CAS while preserving each receipt's acceptance", async () => {
+    const f = await ticketFixture();
+    try {
+      await runAsTenant(f.actor, async () => {
+        const sent = await sendThreadMessage(f.base, f.actor, f.target, {
+          text: "Deliver report.txt, then include index.txt when I revise the requirements.",
+          clientNonce: randomUUID(),
+        });
+        const reportRequirement = {
+          id: "report",
+          kind: "artifact",
+          description: "Deliver report.txt.",
+          name: "report.txt",
+        };
+        const revisedItems = [
+          reportRequirement,
+          { id: "index", kind: "artifact", description: "Deliver index.txt.", name: "index.txt" },
+        ];
+        let ticketId = "";
+        const runtime = {
+          describe: () => ({
+            ...new ScriptedAgentRuntime().describe(),
+            capabilities: {
+              ...new ScriptedAgentRuntime().describe().capabilities,
+              scripted: false,
+            },
+          }),
+          abort: async () => {},
+          async *run(request: AgentRunRequest) {
+            const made = (await request.executeTool!(
+              "ticket_create",
+              {
+                title: "Revised file delivery",
+                fileDeliveryRequirements: { version: 1, items: [reportRequirement] },
+              },
+              "create-revised-file-work",
+            )) as { ticket: { id: string } };
+            ticketId = made.ticket.id;
+            const files = [];
+            for (const name of ["report", "index"]) {
+              const attached = await attachWorkspaceFileToThread(f.base, {
+                spaceId: f.actor.spaceId,
+                userId: f.actor.userId,
+                botId: f.identity.botId,
+                runId: sent.runId,
+                filePath: `${name}.txt`,
+                bytes: Buffer.from(`Actual ${name} content.`),
+                operationId: `${sent.runId}:${name}`,
+              });
+              files.push(
+                await f.prisma.artifact.findUniqueOrThrow({ where: { id: attached.artifactId } }),
+              );
+            }
+            const report = files[0]!;
+            const original = {
+              id: ticketId,
+              result: {
+                previousVersion: 0,
+                summary: "Report delivered.",
+                findings: [
+                  { outcome: "pass", conclusion: "File delivered.", evidence: "Attached report." },
+                ],
+                artifactIds: [report.id],
+                fileDelivery: {
+                  requirementsVersion: 1,
+                  evidenceRefs: [
+                    {
+                      requirementId: "report",
+                      kind: "artifact",
+                      artifactId: report.id,
+                      version: report.version,
+                      hash: report.hash,
+                    },
+                  ],
+                },
+              },
+            };
+            const delivered = await request.executeTool!("ticket_update", original, "deliver-v1");
+            expect(delivered).toMatchObject({
+              ok: true,
+              version: 1,
+              requirementsVersion: 1,
+              status: "done",
+            });
+            expect(
+              await request.executeTool!(
+                "ticket_update",
+                {
+                  id: ticketId,
+                  expectedRequirementsVersion: 1,
+                  fileDeliveryRequirements: { items: revisedItems },
+                },
+                "requirements-v2",
+              ),
+            ).toMatchObject({
+              ticket: { status: "review", completedAt: null },
+              delivery: { previousVersion: 1, requirements: { version: 2, items: revisedItems } },
+            });
+            expect(
+              await request.executeTool!(
+                "ticket_update",
+                original,
+                "replay-v1-after-requirements-change",
+              ),
+            ).toEqual(delivered);
+            expect(
+              await f.prisma.ticket.findUniqueOrThrow({ where: { id: ticketId } }),
+            ).toMatchObject({ status: "review", completedAt: null, receiptVersion: 1 });
+            expect(
+              await request.executeTool!(
+                "ticket_update",
+                {
+                  ...original,
+                  result: { ...original.result, previousVersion: 1 },
+                },
+                "reject-obsolete-evidence",
+              ),
+            ).toHaveProperty("error", expect.stringContaining("Requirements changed"));
+            const updates = await Promise.all(
+              [0, 1].map(() =>
+                updateTicket(f.base, {
+                  spaceId: f.actor.spaceId,
+                  userId: f.actor.userId,
+                  id: ticketId,
+                  expectedRequirementsVersion: 2,
+                  fileDeliveryRequirements: { items: revisedItems },
+                }),
+              ),
+            );
+            expect(updates.filter((value) => "ticket" in value)).toHaveLength(1);
+            expect(updates.filter((value) => "error" in value)).toEqual([
+              { error: "Requirements changed. Read ticket_get before revising them." },
+            ]);
+            expect(
+              await request.executeTool!("ticket_get", { ref: ticketId }, "read-requirements-v3"),
+            ).toHaveProperty("delivery.requirements.version", 3);
+            expect(
+              await request.executeTool!(
+                "ticket_update",
+                {
+                  id: ticketId,
+                  result: {
+                    ...original.result,
+                    previousVersion: 1,
+                    artifactIds: files.map((file) => file.id),
+                    fileDelivery: {
+                      requirementsVersion: 3,
+                      evidenceRefs: files.map((file, index) => ({
+                        requirementId: index === 0 ? "report" : "index",
+                        kind: "artifact",
+                        artifactId: file.id,
+                        version: file.version,
+                        hash: file.hash,
+                      })),
+                    },
+                  },
+                },
+                "deliver-v3",
+              ),
+            ).toMatchObject({
+              ok: true,
+              version: 2,
+              requirementsVersion: 3,
+              status: "done",
+              acceptance: { status: "verified", requirementsVersion: 3 },
+            });
+            expect(
+              await request.executeTool!("ticket_update", original, "replay-v1-after-new-receipt"),
+            ).toEqual(delivered);
+            yield { type: "done" as const, text: "Revised files delivered." };
+          },
+        };
+        await createRunExecutor({ ...f.workerDeps, runtime }).continueRun(
+          sent.runId,
+          "requirements-revision",
+        );
+        expect(await f.prisma.run.findUniqueOrThrow({ where: { id: sent.runId } })).toMatchObject({
+          status: "completed",
+          error: null,
+        });
+        expect(await f.prisma.ticket.findUniqueOrThrow({ where: { id: ticketId } })).toMatchObject({
+          status: "done",
+          receiptVersion: 2,
+          fileDeliveryRequirements: { version: 3, items: revisedItems },
+        });
+        const receipts = await f.prisma.artifact.findMany({
+          where: { name: `work-${ticketId}.json`, runId: sent.runId },
+          orderBy: { version: "asc" },
+        });
+        expect(receipts).toHaveLength(2);
+        for (const [index, receipt] of receipts.entries()) {
+          const bytes = await f.base.artifacts.get(receipt.storageKey, {
+            operationId: "read-versioned-receipts",
+            traceId: "read-versioned-receipts",
+            ...f.actor,
+            signal: new AbortController().signal,
+          });
+          expect(JSON.parse(new TextDecoder().decode(bytes))).toMatchObject({
+            version: index + 1,
+            requirements: { version: index === 0 ? 1 : 3 },
+            acceptance: { requirementsVersion: index === 0 ? 1 : 3, status: "verified" },
+          });
+        }
+      });
+    } finally {
+      await f.close();
+    }
+  }, 60_000);
+
+  it("rolls back receipt, message, and completion when requirements change during artifact observation", async () => {
+    const f = await ticketFixture();
+    try {
+      await runAsTenant(f.actor, async () => {
+        const sent = await sendThreadMessage(f.base, f.actor, f.target, {
+          text: "Deliver report.txt.",
+          clientNonce: randomUUID(),
+        });
+        const sourceRun = await f.prisma.run.findUniqueOrThrow({ where: { id: sent.runId } });
+        const requirement = {
+          id: "report",
+          kind: "artifact",
+          description: "Report",
+          name: "report.txt",
+        };
+        const created = await createTicket(f.base, {
+          spaceId: f.actor.spaceId,
+          userId: f.actor.userId,
+          botId: f.identity.botId,
+          title: "Concurrent requirement change",
+          fileDeliveryRequirements: { version: 1, items: [requirement] },
+          origin: {
+            threadId: sourceRun.threadId,
+            messageId: sourceRun.sourceMessageId!,
+            runId: sourceRun.id,
+            key: `${sourceRun.id}:requirements-race`,
+          },
+        });
+        if (!("ticket" in created)) throw new Error("Missing requirements fixture ticket.");
+        const ticketId = created.ticket.id;
+        const run = await f.prisma.run.findUniqueOrThrow({ where: { id: sent.runId } });
+        const lease = await claimRun(
+          { ...f.workerDeps, runtime: new ScriptedAgentRuntime() } as ExecutorDeps,
+          run,
+          "requirements-race",
+        );
+        if (!lease) throw new Error("Missing requirements fixture lease.");
+        const attached = await attachWorkspaceFileToThread(f.base, {
+          spaceId: f.actor.spaceId,
+          userId: f.actor.userId,
+          botId: f.identity.botId,
+          runId: run.id,
+          filePath: "report.txt",
+          bytes: Buffer.from("Observed report."),
+          operationId: `${run.id}:report`,
+        });
+        const file = await f.prisma.artifact.findUniqueOrThrow({
+          where: { id: attached.artifactId },
+        });
+        let observed!: () => void;
+        const observing = new Promise<void>((resolve) => {
+          observed = resolve;
+        });
+        let resume!: () => void;
+        const resumed = new Promise<void>((resolve) => {
+          resume = resolve;
+        });
+        const get = f.base.artifacts.get.bind(f.base.artifacts);
+        const spy = vi.spyOn(f.base.artifacts, "get").mockImplementationOnce(async (...args) => {
+          const bytes = await get(...args);
+          observed();
+          await resumed;
+          return bytes;
+        });
+        const pending = deliverTicketWork(
+          {
+            ...f.base,
+            runLease: { runId: run.id, owner: "requirements-race", fence: lease.fence },
+          },
+          run,
+          {
+            id: ticketId,
+            ownerAuthored: true,
+            secrets: [],
+            result: {
+              previousVersion: 0,
+              summary: "Report ready.",
+              findings: [{ outcome: "pass", conclusion: "Done", evidence: "Report" }],
+              artifactIds: [file.id],
+              fileDelivery: {
+                requirementsVersion: 1,
+                evidenceRefs: [
+                  {
+                    requirementId: "report",
+                    kind: "artifact",
+                    artifactId: file.id,
+                    version: file.version,
+                    hash: file.hash,
+                  },
+                ],
+              },
+            },
+          },
+        );
+        try {
+          await Promise.race([
+            observing,
+            pending.then(() => {
+              throw new Error("Delivery ended before observing evidence.");
+            }),
+          ]);
+          expect(
+            await updateTicket(f.base, {
+              spaceId: f.actor.spaceId,
+              userId: f.actor.userId,
+              id: ticketId,
+              expectedRequirementsVersion: 1,
+              fileDeliveryRequirements: {
+                items: [{ ...requirement, description: "Updated report" }],
+              },
+            }),
+          ).toHaveProperty("delivery.requirements.version", 2);
+        } finally {
+          resume();
+          spy.mockRestore();
+        }
+        expect(await pending).toHaveProperty("error", expect.stringContaining("requirements"));
+        expect(await f.prisma.ticket.findUniqueOrThrow({ where: { id: ticketId } })).toMatchObject({
+          status: "review",
+          completedAt: null,
+          receiptVersion: 0,
+          fileDeliveryRequirements: { version: 2 },
+        });
+        expect(await f.prisma.artifact.count({ where: { name: `work-${ticketId}.json` } })).toBe(0);
+        expect(
+          await f.prisma.message.count({
+            where: { clientNonce: { startsWith: `work-receipt:${ticketId}:` } },
+          }),
+        ).toBe(0);
+        expect(
+          await f.prisma.event.count({
+            where: {
+              runId: run.id,
+              type: "thread.message.created",
+              payload: { path: ["role"], equals: "bot" },
+            },
+          }),
+        ).toBe(0);
+      });
+    } finally {
+      await f.close();
+    }
+  }, 60_000);
+
   it.each([true, false])(
     "requires a receipt after a plain final, with one repair turn (deliver=%s)",
     async (deliver) => {
@@ -146,12 +720,11 @@ pg("chat ticket work delivery", () => {
                 )) as { ticket: { id: string } };
                 ticketId = made.ticket.id;
               } else if (deliver) {
-                expect(request.prompt).toContain("has not been delivered");
+                expect(request.prompt).toContain("Finalize the missing work receipt");
                 expect(
                   await request.executeTool!(
-                    "ticket_update",
+                    "deliver_work",
                     {
-                      id: ticketId,
                       result: {
                         previousVersion: 0,
                         summary: "Directory observation is still needed.",
@@ -204,10 +777,7 @@ pg("chat ticket work delivery", () => {
     const dataDir = await mkdtemp(join(tmpdir(), "work-delivery-"));
     try {
       const identity = await runAsSystem("work delivery fixture", () =>
-        provisionMessagingIdentity(
-          prisma,
-          { provider: "email", address },
-        ),
+        provisionMessagingIdentity(prisma, { provider: "email", address }),
       );
       const actor = {
         spaceId: identity.spaceId,
@@ -867,168 +1437,218 @@ pg("chat ticket work delivery", () => {
     }
   }, 60000);
 
-  it("reclaims an abandoned running lease after receipt commit without repeating the delivery", async () => {
-    const f = await ticketFixture();
-    try {
-      await runAsTenant(f.actor, async () => {
-        const peer = await createRepos(f.prisma).createBot(f.actor, {
-          name: "Worker",
-          description: "",
-          instructions: "",
-          notifyOnFinish: false,
-        });
-        const sent = await sendThreadMessage(f.base, f.actor, f.target, {
-          text: "Return the retained comparison here.",
-          clientNonce: randomUUID(),
-        });
-        const origin = await f.prisma.run.findUniqueOrThrow({ where: { id: sent.runId } });
-        const made = await createTicket(f.base, {
-          ...f.actor,
-          botId: f.identity.botId,
-          title: "Recover client comparison",
-          ownerBotId: peer.id,
-          origin: {
-            threadId: f.target.threadId,
-            messageId: origin.sourceMessageId!,
-            runId: origin.id,
-            key: `${origin.id}:recover`,
-          },
-        });
-        if (!("ticket" in made)) throw new Error("Missing recovery ticket");
-        const ticket = made.ticket;
-        const assigned = await f.prisma.run.findFirstOrThrow({
-          where: { ticketId: ticket.id, botId: peer.id },
-        });
-        const lease = await claimRun(
-          { ...f.workerDeps, runtime: new ScriptedAgentRuntime() } as ExecutorDeps,
-          assigned,
-          "lost-worker",
-        );
-        if (!lease) throw new Error("Missing first worker lease");
-        await f.prisma.run.update({ where: { id: assigned.id }, data: { startedAt: new Date() } });
-        await f.prisma.task.update({ where: { id: assigned.taskId }, data: { status: "running" } });
-        const evidence = await attachWorkspaceFileToThread(f.base, {
-          spaceId: f.actor.spaceId,
-          userId: f.actor.userId,
-          botId: peer.id,
-          runId: assigned.id,
-          filePath: "recovered-comparison.md",
-          bytes: new TextEncoder().encode("Retained comparison completed."),
-          operationId: `evidence:${assigned.id}`,
-        });
-        const result = {
-          previousVersion: 0,
-          summary: "The retained comparison is ready.",
-          findings: [
-            {
-              outcome: "pass",
-              conclusion: "Both retained client inventories were compared.",
-              evidence: "Retained inventories v1 and v2.",
-            },
-          ],
-          artifactIds: [evidence.artifactId],
-        };
-        const lostDeps = {
-          ...f.base,
-          runLease: { runId: assigned.id, owner: "lost-worker", fence: lease.fence },
-        };
-        const delivered = await deliverTicketWork(lostDeps, assigned, {
-          id: ticket.id,
-          result,
-          ownerAuthored: false,
-          secrets: [],
-        });
-        expect(delivered).toMatchObject({ ok: true, version: 1, status: "done" });
-        // These are the durable records left when a process disappears after delivery and
-        // before completion. Recovery must claim this running lease, not answer an ask card.
-        await f.prisma.run.update({
-          where: { id: assigned.id },
-          data: { leaseExpiresAt: new Date(Date.now() - 1000) },
-        });
-        expect(await f.prisma.run.findUniqueOrThrow({ where: { id: assigned.id } })).toMatchObject({
-          status: "running",
-          leaseOwner: "lost-worker",
-          leaseFence: 1,
-          completedAt: null,
-        });
-        let replay: unknown;
-        const runtime = {
-          describe: () => ({
-            ...new ScriptedAgentRuntime().describe(),
-            capabilities: {
-              ...new ScriptedAgentRuntime().describe().capabilities,
-              scripted: false,
-              ready: true,
-            },
-          }),
-          abort: async () => {},
-          async *run(request: AgentRunRequest) {
-            replay = await request.executeTool!(
-              "ticket_update",
-              { id: ticket.id, result },
-              "deliver-after-restart",
-            );
-            yield { type: "done" as const, text: "" };
-          },
-        };
-        await createRunExecutor({ ...f.workerDeps, runtime }).continueRun(
-          assigned.id,
-          "replacement-worker",
-        );
-        expect(await f.prisma.run.findUniqueOrThrow({ where: { id: assigned.id } })).toMatchObject({
-          status: "completed",
-          error: null,
-          leaseFence: 2,
-        });
-        expect(replay).toEqual(delivered);
-        expect(
-          await f.prisma.message.count({
-            where: {
+  it.each([false, true])(
+    "reclaims an abandoned lease without repeating delivery (requirements=%s)",
+    async (withRequirements) => {
+      const f = await ticketFixture();
+      try {
+        await runAsTenant(f.actor, async () => {
+          const peer = await createRepos(f.prisma).createBot(f.actor, {
+            name: "Worker",
+            description: "",
+            instructions: "",
+            notifyOnFinish: false,
+          });
+          const sent = await sendThreadMessage(f.base, f.actor, f.target, {
+            text: "Return the retained comparison here.",
+            clientNonce: randomUUID(),
+          });
+          const origin = await f.prisma.run.findUniqueOrThrow({ where: { id: sent.runId } });
+          const made = await createTicket(f.base, {
+            ...f.actor,
+            botId: f.identity.botId,
+            title: "Recover client comparison",
+            ownerBotId: peer.id,
+            ...(withRequirements
+              ? {
+                  fileDeliveryRequirements: {
+                    version: 1,
+                    items: [
+                      {
+                        id: "comparison",
+                        kind: "artifact",
+                        description: "Return the comparison.",
+                        name: "recovered-comparison.md",
+                      },
+                    ],
+                  },
+                }
+              : {}),
+            origin: {
               threadId: f.target.threadId,
-              clientNonce: { startsWith: `work-receipt:${ticket.id}:` },
+              messageId: origin.sourceMessageId!,
+              runId: origin.id,
+              key: `${origin.id}:recover`,
             },
-          }),
-        ).toBe(1);
-        expect(
-          await f.prisma.artifact.count({
-            where: { botId: f.identity.botId, name: `work-${ticket.id}.json` },
-          }),
-        ).toBe(1);
-        expect(
-          await f.prisma.artifact.count({
-            where: { botId: f.identity.botId, name: "recovered-comparison.md" },
-          }),
-        ).toBe(1);
-        await expect(
-          deliverTicketWork(lostDeps, assigned, {
+          });
+          if (!("ticket" in made)) throw new Error("Missing recovery ticket");
+          const ticket = made.ticket;
+          const assigned = await f.prisma.run.findFirstOrThrow({
+            where: { ticketId: ticket.id, botId: peer.id },
+          });
+          const lease = await claimRun(
+            { ...f.workerDeps, runtime: new ScriptedAgentRuntime() } as ExecutorDeps,
+            assigned,
+            "lost-worker",
+          );
+          if (!lease) throw new Error("Missing first worker lease");
+          await f.prisma.run.update({
+            where: { id: assigned.id },
+            data: { startedAt: new Date() },
+          });
+          await f.prisma.task.update({
+            where: { id: assigned.taskId },
+            data: { status: "running" },
+          });
+          const evidence = await attachWorkspaceFileToThread(f.base, {
+            spaceId: f.actor.spaceId,
+            userId: f.actor.userId,
+            botId: peer.id,
+            runId: assigned.id,
+            filePath: "recovered-comparison.md",
+            bytes: new TextEncoder().encode("Retained comparison completed."),
+            operationId: `evidence:${assigned.id}`,
+          });
+          const sourceFile = await f.prisma.artifact.findUniqueOrThrow({
+            where: { id: evidence.artifactId },
+          });
+          const result = {
+            previousVersion: 0,
+            summary: "The retained comparison is ready.",
+            findings: [
+              {
+                outcome: "pass",
+                conclusion: "Both retained client inventories were compared.",
+                evidence: "Retained inventories v1 and v2.",
+              },
+            ],
+            artifactIds: [evidence.artifactId],
+            ...(withRequirements
+              ? {
+                  fileDelivery: {
+                    requirementsVersion: 1,
+                    evidenceRefs: [
+                      {
+                        requirementId: "comparison",
+                        kind: "artifact",
+                        artifactId: sourceFile.id,
+                        version: sourceFile.version,
+                        hash: sourceFile.hash,
+                      },
+                    ],
+                  },
+                }
+              : {}),
+          };
+          const lostDeps = {
+            ...f.base,
+            runLease: { runId: assigned.id, owner: "lost-worker", fence: lease.fence },
+          };
+          const delivered = await deliverTicketWork(lostDeps, assigned, {
             id: ticket.id,
-            result: {
-              ...result,
-              previousVersion: 1,
-              summary: "A stale worker tried to revise this.",
-            },
+            result,
             ownerAuthored: false,
             secrets: [],
-          }),
-        ).rejects.toThrow("Run cannot write thread history");
-        expect(await f.prisma.ticket.findUniqueOrThrow({ where: { id: ticket.id } })).toMatchObject(
-          { receiptVersion: 1, status: "done" },
-        );
-        expect(
-          await f.prisma.artifact.count({
-            where: { botId: f.identity.botId, name: `work-${ticket.id}.json` },
-          }),
-        ).toBe(1);
-        expect(
-          await f.prisma.artifact.count({
-            where: { botId: f.identity.botId, name: "recovered-comparison.md" },
-          }),
-        ).toBe(1);
-      });
-    } finally {
-      await f.close();
-    }
-  }, 60000);
+          });
+          expect(delivered).toMatchObject({ ok: true, version: 1, status: "done" });
+          if (withRequirements)
+            expect(delivered).toMatchObject({ acceptance: { status: "verified" } });
+          // These are the durable records left when a process disappears after delivery and
+          // before completion. Recovery must claim this running lease, not answer an ask card.
+          await f.prisma.run.update({
+            where: { id: assigned.id },
+            data: { leaseExpiresAt: new Date(Date.now() - 1000) },
+          });
+          expect(
+            await f.prisma.run.findUniqueOrThrow({ where: { id: assigned.id } }),
+          ).toMatchObject({
+            status: "running",
+            leaseOwner: "lost-worker",
+            leaseFence: 1,
+            completedAt: null,
+          });
+          let replay: unknown;
+          const runtime = {
+            describe: () => ({
+              ...new ScriptedAgentRuntime().describe(),
+              capabilities: {
+                ...new ScriptedAgentRuntime().describe().capabilities,
+                scripted: false,
+                ready: true,
+              },
+            }),
+            abort: async () => {},
+            async *run(request: AgentRunRequest) {
+              replay = await request.executeTool!(
+                "ticket_update",
+                { id: ticket.id, result },
+                "deliver-after-restart",
+              );
+              yield { type: "done" as const, text: "" };
+            },
+          };
+          await createRunExecutor({ ...f.workerDeps, runtime }).continueRun(
+            assigned.id,
+            "replacement-worker",
+          );
+          expect(
+            await f.prisma.run.findUniqueOrThrow({ where: { id: assigned.id } }),
+          ).toMatchObject({
+            status: "completed",
+            error: null,
+            leaseFence: 2,
+          });
+          expect(replay).toEqual(delivered);
+          expect(
+            await f.prisma.message.count({
+              where: {
+                threadId: f.target.threadId,
+                clientNonce: { startsWith: `work-receipt:${ticket.id}:` },
+              },
+            }),
+          ).toBe(1);
+          expect(
+            await f.prisma.artifact.count({
+              where: { botId: f.identity.botId, name: `work-${ticket.id}.json` },
+            }),
+          ).toBe(1);
+          expect(
+            await f.prisma.artifact.count({
+              where: { botId: f.identity.botId, name: "recovered-comparison.md" },
+            }),
+          ).toBe(1);
+          await expect(
+            deliverTicketWork(lostDeps, assigned, {
+              id: ticket.id,
+              result: {
+                ...result,
+                previousVersion: 1,
+                summary: "A stale worker tried to revise this.",
+              },
+              ownerAuthored: false,
+              secrets: [],
+            }),
+          ).rejects.toThrow("Run cannot write thread history");
+          expect(
+            await f.prisma.ticket.findUniqueOrThrow({ where: { id: ticket.id } }),
+          ).toMatchObject({ receiptVersion: 1, status: "done" });
+          expect(
+            await f.prisma.artifact.count({
+              where: { botId: f.identity.botId, name: `work-${ticket.id}.json` },
+            }),
+          ).toBe(1);
+          expect(
+            await f.prisma.artifact.count({
+              where: { botId: f.identity.botId, name: "recovered-comparison.md" },
+            }),
+          ).toBe(1);
+        });
+      } finally {
+        await f.close();
+      }
+    },
+    60000,
+  );
 
   it("copies delegated private files into the original group without exposing another group's files", async () => {
     const f = await ticketFixture();

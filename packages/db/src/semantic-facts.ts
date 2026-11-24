@@ -3,8 +3,10 @@ import type {
   AdapterContext,
   DurableMemoryScope,
   MemoryExtractionChange,
+  MemorySourceFact,
   SemanticMemoryForgetRequest,
   SemanticMemoryPurgeHistoryRequest,
+  SemanticMemoryReadRequest,
   SemanticMemoryRecallRequest,
   SemanticMemoryResult,
   SemanticMemorySaveRequest,
@@ -303,7 +305,7 @@ export class SemanticFactStore {
   /** Lessons live in their own per-bot namespace; every management path picks it this way. */
   private scopeNamespace(
     request: { botId: string; scope: DurableMemoryScope; kind?: SemanticFact["kind"] },
-    ctx: AdapterContext,
+    ctx: Pick<AdapterContext, "spaceId">,
   ): string {
     return request.kind === "lesson"
       ? lessonFactNamespace(ctx.spaceId, request.botId)
@@ -530,6 +532,131 @@ export class SemanticFactStore {
       select: { id: true },
     });
     if (retired) throw new Error("This memory source or scope has been retired.");
+  }
+
+  /**
+   * Resolve dependencies through the same tenant, namespace and exact revision authority as
+   * recall. The bounded flat result also carries upstream citations when deriving from a lesson.
+   */
+  async derivationSources(
+    sources: readonly MemorySourceFact[],
+    ctx: AdapterContext,
+    tx?: Tx,
+  ): Promise<MemorySourceFact[] | null> {
+    return this.inTenant(ctx, async () => {
+      const db = tx ?? this.prisma;
+      for (const botId of new Set(
+        sources.map((source) =>
+          source.scope === "shared" ? (ctx.botId ?? source.botId) : source.botId,
+        ),
+      )) {
+        try {
+          await this.requireScope(db, botId, ctx);
+        } catch (error) {
+          if (error instanceof IsolationError) return null;
+          throw error;
+        }
+      }
+      return this.currentDerivationSources(db, sources, ctx.spaceId, ctx.botId);
+    });
+  }
+
+  private async currentDerivationSources(
+    db: Tx | PrismaClient,
+    sources: readonly MemorySourceFact[],
+    spaceId: string,
+    readerBotId?: string,
+  ): Promise<MemorySourceFact[] | null> {
+    const pending = [...sources];
+    const resolved = new Map<string, MemorySourceFact>();
+    const now = new Date();
+    for (let index = 0; index < pending.length; index += 1) {
+      const source = pending[index]!;
+      const botId = source.scope === "shared" ? (readerBotId ?? source.botId) : source.botId;
+      if (readerBotId && source.scope === "isolated" && botId !== readerBotId) return null;
+      const namespace = this.scopeNamespace({ ...source, botId }, { spaceId });
+      const key = `${namespace}:${source.id}`;
+      const seen = resolved.get(key);
+      if (seen) {
+        if (seen.revision !== source.revision) return null;
+        continue;
+      }
+      if (resolved.size >= 64) return null;
+      const row = await db.semanticFact.findFirst({
+        where: { id: source.id, spaceId, namespace },
+      });
+      if (
+        !row ||
+        row.revision !== source.revision ||
+        row.kind !== source.kind ||
+        !activeAt(row, now)
+      )
+        return null;
+      const retired = await db.semanticMemoryRetirement.findFirst({
+        where: {
+          namespace,
+          OR: [
+            { kind: "scope" },
+            ...(source.kind === "history"
+              ? [
+                  {
+                    kind: "history",
+                    botId,
+                    generation: source.historyGeneration,
+                    OR: [{ threadId: null }, { threadId: source.threadId }],
+                  },
+                ]
+              : []),
+          ],
+        },
+        select: { id: true },
+      });
+      if (retired) return null;
+      if (source.kind === "history") {
+        if (
+          row.botId !== botId ||
+          row.sourceThreadId !== source.threadId ||
+          row.sourceGeneration !== source.historyGeneration
+        )
+          return null;
+        const thread = await db.thread.findFirst({
+          where: {
+            id: source.threadId,
+            spaceId,
+            helperBotId: null,
+            externalConversationId: null,
+          },
+          select: { historyCompactionGeneration: true, botId: true, groupId: true },
+        });
+        if (!thread || thread.historyCompactionGeneration !== source.historyGeneration) return null;
+        if (
+          thread.botId !== botId &&
+          (!thread.groupId ||
+            !(await db.chatGroupMember.findFirst({
+              where: { groupId: thread.groupId, botId },
+              select: { botId: true },
+            })))
+        )
+          return null;
+      }
+      resolved.set(key, source);
+      const upstream = factValue(row).provenance.derivedFrom;
+      if (upstream) pending.push(...upstream);
+    }
+    return [...resolved.values()].sort(
+      (left, right) =>
+        left.scope.localeCompare(right.scope) ||
+        left.botId.localeCompare(right.botId) ||
+        left.id.localeCompare(right.id),
+    );
+  }
+
+  private async derivationCurrent(db: Tx | PrismaClient, row: FactRecord): Promise<boolean> {
+    const sources = factValue(row).provenance.derivedFrom;
+    return (
+      !sources ||
+      (await this.currentDerivationSources(db, sources, row.spaceId, row.botId)) !== null
+    );
   }
 
   private async rememberSource(tx: Tx, row: FactRecord, sourceKey: string): Promise<void> {
@@ -763,17 +890,53 @@ export class SemanticFactStore {
         select: { id: true },
       });
       if (!run) throw new IsolationError();
+      if (input.replaces) {
+        const previous = await tx.semanticFact.findFirst({
+          where: { id: input.replaces.id, spaceId: ctx.spaceId, namespace },
+        });
+        if (
+          previous &&
+          (previous.revision === input.replaces.expectedRevision ||
+            (previous.revision === input.replaces.expectedRevision + 1 &&
+              previous.content === content))
+        ) {
+          const inherited = factValue(previous).provenance.derivedFrom;
+          if (inherited?.length) {
+            const fresh = new Set((provenance.derivedFrom ?? []).map((source) => source.id));
+            provenance.derivedFrom = [
+              ...inherited.filter((source) => !fresh.has(source.id)),
+              ...(provenance.derivedFrom ?? []),
+            ];
+          }
+        }
+      }
+      if (provenance.derivedFrom) {
+        if (provenance.derivedFrom.some((source) => source.id === input.replaces?.id))
+          throw new Error("A lesson replacement cannot depend on its own previous revision.");
+        const sources = await this.derivationSources(
+          provenance.derivedFrom,
+          { ...ctx, botId: input.botId },
+          tx,
+        );
+        if (!sources) throw new Error("A lesson source is no longer current or accessible.");
+        provenance.derivedFrom = sources;
+      }
       await this.lockNamespace(tx, namespace);
       await this.requireNotRetired(tx, namespace, input.botId);
       const sourceKey = await this.sourceKey(ctx.spaceId, [
         "lesson",
         input.provenance.runId,
         content,
+        ...(provenance.derivedFrom ? [provenance.derivedFrom] : []),
         ...(input.replaces
           ? ["correction", input.replaces.id, input.replaces.expectedRevision]
           : []),
       ]);
-      const contentKey = await this.sourceKey(ctx.spaceId, ["lesson-content", content]);
+      const contentKey = await this.sourceKey(ctx.spaceId, [
+        "lesson-content",
+        content,
+        ...(provenance.derivedFrom ? [provenance.derivedFrom] : []),
+      ]);
       await this.lockSource(tx, namespace, sourceKey);
       await this.lockSource(tx, namespace, contentKey);
       // A replay of the same run, or the same wording from another run, keeps the first row.
@@ -1253,6 +1416,7 @@ export class SemanticFactStore {
         if (!rows.length) return { supported: true, items, nextCursor: null };
         for (const row of rows) {
           cursor = row.id;
+          if (!includeHistory && !(await this.derivationCurrent(this.prisma, row))) continue;
           if (!includeHistory && row.kind === "history") {
             const liveThread =
               row.sourceThreadId && row.sourceGeneration !== null
@@ -1441,6 +1605,24 @@ export class SemanticFactStore {
     );
   }
 
+  /** Resolve an exact citation through the same authority checks, without an index lookup. */
+  async read(
+    request: SemanticMemoryReadRequest,
+    ctx: AdapterContext,
+  ): Promise<SemanticMemoryResult> {
+    positiveRevision(request.expectedRevision);
+    if (!request.id.trim() || (request.kind === "lesson" && request.scope !== "isolated"))
+      throw new IsolationError();
+    const { id, expectedRevision, ...scope } = request;
+    const [result] = await this.resolveCandidates(
+      { ...scope, query: "", limit: 1 },
+      [{ id, revision: expectedRevision, score: 1 }],
+      ctx,
+    );
+    if (!result) throw new IsolationError();
+    return result;
+  }
+
   async resolveCandidates(
     request: SemanticMemoryRecallRequest,
     candidates: Array<{ id: string; revision: number; score: number }>,
@@ -1474,7 +1656,7 @@ export class SemanticFactStore {
       if (!ids.length) return [];
       const now = new Date();
       const rows = await this.prisma.semanticFact.findMany({
-        where: { id: { in: ids }, namespace, status: "active" },
+        where: { id: { in: ids }, spaceId: ctx.spaceId, namespace, status: "active" },
       });
       const byId = new Map(rows.map((row) => [row.id, row]));
       const seen = new Set<string>();
@@ -1491,10 +1673,12 @@ export class SemanticFactStore {
             row.sourceGeneration !== generation)
         )
           continue;
+        if (!(await this.derivationCurrent(this.prisma, row))) continue;
         seen.add(row.id);
         const fact = factValue(row);
         results.push({
           id: fact.id,
+          kind: fact.kind,
           revision: fact.revision,
           memory: fact.content,
           score: candidate.score,
@@ -1628,6 +1812,7 @@ export class SemanticFactStore {
             : null;
         current = Boolean(thread);
       }
+      if (current) current = await this.derivationCurrent(db, row!);
       if (current) content = row!.content;
       else action = "delete";
     }
@@ -1655,12 +1840,20 @@ export class SemanticFactStore {
   async pendingIndexWork(
     limit: number,
     spaceId?: string,
+    eligibleSpaceIds?: readonly string[],
   ): Promise<Array<{ id: string; spaceId: string; userId: string }>> {
     if (!Number.isSafeInteger(limit) || limit < 1 || limit > 1000)
       throw new Error("Invalid index work limit.");
+    if (eligibleSpaceIds && !eligibleSpaceIds.length) return [];
+    const selectedSpaceIds = spaceId
+      ? [spaceId]
+      : eligibleSpaceIds
+        ? [...eligibleSpaceIds]
+        : undefined;
+    if (spaceId && eligibleSpaceIds && !eligibleSpaceIds.includes(spaceId)) return [];
     return runAsSystem("find pending managed-memory index revision pointers", () =>
       this.prisma.semanticMemoryIndexOutbox.findMany({
-        where: spaceId ? { spaceId } : undefined,
+        where: selectedSpaceIds ? { spaceId: { in: selectedSpaceIds } } : undefined,
         distinct: spaceId ? undefined : ["spaceId"],
         orderBy: [{ createdAt: "asc" }, { id: "asc" }],
         take: limit,

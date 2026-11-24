@@ -1,4 +1,5 @@
 import { ATTACHMENT_MAX_COUNT } from "@rakazo/contracts";
+import * as db from "@rakazo/db";
 import { SpaceDeletionInProgressError } from "@rakazo/db";
 import { describe, expect, it, vi } from "vitest";
 import type { MessagingInboundDeps } from "./messaging-inbound.js";
@@ -8,6 +9,7 @@ import {
   wakeMessageRoutines,
 } from "./messaging-inbound.js";
 import type { MessagingReceipts } from "./messaging-receipts.js";
+import * as ticketSources from "./ticket-source-events.js";
 import { inboundDeliveryClientNonce, messagingWakeIdempotencyKey } from "./webhook-inbound.js";
 
 function createDeps(
@@ -238,15 +240,13 @@ function createDeps(
     },
     messagingOutbound: {
       count: vi.fn(
-        async ({
-          where,
-        }: {
-          where: { sourceMessageId: { in: string[] }; status: { not: string } };
-        }) =>
+        async ({ where }: { where: { sourceMessageId: { in: string[] }; OR: unknown[] } }) =>
           outboundRows.filter(
             (row) =>
               where.sourceMessageId.in.includes(row.sourceMessageId as string) &&
-              (row.status ?? "pending") !== where.status.not,
+              (row.status !== "sent" ||
+                (row.deliveryState != null && row.deliveryState !== "accepted") ||
+                (row.deliveryState == null && !row.providerHandle)),
           ).length,
       ),
       findFirst: vi.fn(
@@ -398,6 +398,91 @@ const groupEvent = {
 };
 
 describe("createMessagingInboundHandler DM routing", () => {
+  it.each(["queued", "waiting_input"] as const)(
+    "passes persisted source references to subscriptions and only wakes %s when permitted",
+    async (status) => {
+      const deps = createDeps();
+      const resolved = vi.spyOn(db, "resolveTicketSubscription").mockResolvedValue({
+        status: "matched",
+        ticketId: "ticket-1",
+        subscriptionId: "subscription-1",
+        botId: "bot-1",
+        sourceThreadId: "thread-1",
+      });
+      const routed = vi.spyOn(ticketSources, "routeThreadTicketSource").mockResolvedValue({
+        run: { id: "ticket-run", taskId: "ticket-task", status },
+      });
+      const tx = {} as never;
+      vi.mocked(deps.events.sendUserMessage).mockImplementationOnce(async (input) => {
+        expect(input.routeSourceEvent).toBeTypeOf("function");
+        const source = await input.routeSourceEvent!(tx, { id: "persisted-message", seq: 19 });
+        return {
+          messageId: "persisted-message",
+          seq: 19,
+          taskId: source!.run!.taskId,
+          runId: source!.run!.id,
+          runStatus: source!.run!.status,
+        };
+      });
+      try {
+        await createMessagingInboundHandler({ ...deps, ticketBoardEnabled: true })({
+          ...dmEvent,
+          provider: "sendblue",
+          handle: "provider-event-1",
+          threadId: "provider-dm",
+          from: "+15551111111",
+          content: "New evidence for the task",
+          isDirect: true,
+        });
+        expect(routed).toHaveBeenCalledWith(
+          tx,
+          expect.objectContaining({
+            spaceId: "ws-1",
+            userId: "user-1",
+            botId: "bot-1",
+            threadId: "thread-1",
+            ticketBoardEnabled: true,
+          }),
+          { id: "persisted-message", seq: 19 },
+        );
+        expect(deps.jobs.enqueue).toHaveBeenCalledTimes(status === "queued" ? 1 : 0);
+        expect(deps.prisma.routine.findMany).not.toHaveBeenCalled();
+      } finally {
+        resolved.mockRestore();
+        routed.mockRestore();
+      }
+    },
+  );
+
+  it.each(["unknown", "ambiguous"] as const)(
+    "keeps the ordinary message path for %s subscription ownership",
+    async (status) => {
+      const deps = createDeps();
+      const resolved = vi.spyOn(db, "resolveTicketSubscription").mockResolvedValue({ status });
+      try {
+        await createMessagingInboundHandler({ ...deps, ticketBoardEnabled: true })({
+          ...dmEvent,
+          provider: "sendblue",
+          handle: "ordinary-event",
+          threadId: "provider-dm",
+          from: "+15551111111",
+          content: "Ordinary chat",
+          isDirect: true,
+        });
+        expect(deps.events.sendUserMessage).toHaveBeenCalledWith(
+          expect.objectContaining({
+            prompt: "Ordinary chat",
+            trigger: "messaging",
+            routeSourceEvent: expect.any(Function),
+          }),
+        );
+        expect(deps.jobs.enqueue).toHaveBeenCalledOnce();
+      } finally {
+        resolved.mockRestore();
+      }
+    },
+  );
+
   it("drops a message for a bot whose Space is being deleted instead of failing the delivery", async () => {
     const deps = createDeps();
     deps.sendUserMessage.mockRejectedValueOnce(new SpaceDeletionInProgressError());
@@ -966,14 +1051,12 @@ describe("createMessagingInboundHandler DM routing", () => {
     const handle = createMessagingInboundHandler(deps);
     await handle(dmEvent);
 
-    expect(deps.provision).toHaveBeenCalledWith(
-      {
-        provider: "sendblue",
-        address: "+15551111111",
-        dmThreadId: "sendblue:dm-1",
-        displayName: null,
-      },
-    );
+    expect(deps.provision).toHaveBeenCalledWith({
+      provider: "sendblue",
+      address: "+15551111111",
+      dmThreadId: "sendblue:dm-1",
+      displayName: null,
+    });
     expect(deps.sendUserMessage).toHaveBeenCalledWith(
       expect.objectContaining({
         spaceId: "ws-new",
@@ -1244,6 +1327,8 @@ describe("inbound receipt", () => {
     deps.runs.get("run-1")!.messagingMirroredAt = new Date("2026-01-01T00:00:00Z");
     await expect(handled()).resolves.toBe(false);
     deps.runs.get("run-2")!.messagingMirroredAt = new Date("2026-01-01T00:00:00Z");
+    await expect(handled()).resolves.toBe(false);
+    deps.runs.get("run-2")!.status = "completed";
     await expect(handled()).resolves.toBe(true);
   });
 
@@ -1260,9 +1345,20 @@ describe("inbound receipt", () => {
       status: "pending",
     });
     deps.runs.get("run-1")!.messagingMirroredAt = new Date("2026-01-01T00:00:00Z");
+    deps.runs.get("run-1")!.status = "completed";
     await expect(handled()).resolves.toBe(false);
 
     deps.outboundRows[0]!.status = "sent";
+    await expect(handled()).resolves.toBe(false);
+    for (const deliveryState of ["claimed", "unknown", "retryable", "rejected"]) {
+      deps.outboundRows[0]!.deliveryState = deliveryState;
+      await expect(handled()).resolves.toBe(false);
+    }
+    deps.outboundRows[0]!.deliveryState = "accepted";
+    deps.outboundRows[0]!.providerHandle = "accepted-1";
+    await expect(handled()).resolves.toBe(true);
+    // An actual handle also supports old writers that predate deliveryState.
+    deps.outboundRows[0]!.deliveryState = null;
     await expect(handled()).resolves.toBe(true);
   });
 

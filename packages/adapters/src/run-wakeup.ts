@@ -13,10 +13,10 @@ import { getLogger, runCorrelatedJob } from "@rakazo/logging";
 import type { Pool } from "pg";
 import { RunExecutionHost } from "./run-execution.js";
 import { findRunRecoveryBlockers } from "./run-recovery.js";
+import { RESUMABLE_TAKEOVER_WHERE } from "./takeover-resume.js";
 
 const RUN_READY_TOPIC = "runs:ready";
 const INTERACTIVE_QUEUE_WARNING_MS = 30_000;
-const RESUMABLE = ["queued", "waiting_input", "waiting_takeover"];
 
 /**
  * Starts runs in this process the moment they become due, each as its own task, so no
@@ -152,15 +152,15 @@ export class RunJobPublisher implements JobPublisher {
 
   async enqueue(job: BackgroundJob): Promise<void> {
     if (job.name !== "run.continue") return this.background.enqueue(job);
-    await this.prisma.run.updateMany({
+    const scheduled = await this.prisma.run.updateMany({
       where: {
         id: job.payload.runId,
-        status: { in: RESUMABLE },
+        OR: [{ status: "queued" }, RESUMABLE_TAKEOVER_WHERE],
         ...(job.keepExisting ? { wakeAt: null } : {}),
       },
       data: { wakeAt: job.availableAt ?? new Date() },
     });
-    this.starter.start(job.payload.runId, job.availableAt);
+    if (scheduled.count === 1) this.starter.start(job.payload.runId, job.availableAt);
   }
 
   async cancel(key: string): Promise<void> {
@@ -391,7 +391,7 @@ export class RunWorkerHost implements JobWorkerHost {
         OR: [
           { status: "queued", AND: [due] },
           { status: { in: ["leased", "running"] }, leaseExpiresAt: { lte: now } },
-          { status: { in: ["waiting_input", "waiting_takeover"] }, wakeAt: { lte: now } },
+          { ...RESUMABLE_TAKEOVER_WHERE, AND: [due] },
         ],
       },
       orderBy: [{ createdAt: "asc" }, { id: "asc" }],

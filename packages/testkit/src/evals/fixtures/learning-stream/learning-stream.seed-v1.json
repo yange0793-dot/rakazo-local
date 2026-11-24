@@ -1,0 +1,26 @@
+{
+  "schemaVersion": "learning-stream.seed.v1",
+  "fixtureVersion": "synthetic-package-delivery.v1",
+  "defaultSeed": 104729,
+  "projectId": "project-temporal-example",
+  "packageIdPrefix": "package-example",
+  "fileContents": {
+    "app/main.txt": "synthetic application entry point\n",
+    "data/settings.json": "{\"mode\":\"synthetic\"}\n"
+  },
+  "runtimePath": "cache/session.log",
+  "runtimeContents": "synthetic runtime cache\n",
+  "extraPath": "legacy/old.txt",
+  "extraContents": "synthetic unexpected file\n",
+  "wrongHashContents": "synthetic changed file\n",
+  "archetypes": [
+    "clean",
+    "unexpected_file",
+    "missing_upload_receipt",
+    "incomplete_inventory",
+    "hash_mismatch",
+    "runtime_exclusion",
+    "wrong_project"
+  ],
+  "baselineRevision": "manifest-hashes.v1"
+}

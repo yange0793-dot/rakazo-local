@@ -10,6 +10,14 @@ const context: AdapterContext = {
   signal: new AbortController().signal,
 };
 
+function authorized() {
+  return {
+    spaceMember: { findFirst: vi.fn(async () => ({ id: "membership" })) },
+    space: { findFirst: vi.fn(async () => ({ deletingAt: null })) },
+    bot: { findFirst: vi.fn(async () => ({ id: "bot-1" })) },
+  };
+}
+
 describe("memory store contract shape", () => {
   it("reads the most recently updated documents first", async () => {
     const updatedAt = new Date("2026-08-16T10:00:00.000Z");
@@ -18,7 +26,10 @@ describe("memory store contract shape", () => {
       .mockResolvedValue([
         { id: "memory-1", path: "facts.md", content: "A fact", revision: 3, updatedAt },
       ]);
-    const store = new MarkdownMemoryStore({ memoryDocument: { findMany } } as never);
+    const store = new MarkdownMemoryStore({
+      ...authorized(),
+      memoryDocument: { findMany },
+    } as never);
 
     await expect(store.read({ scope: "bot", botId: "bot-1" }, context)).resolves.toEqual({
       documents: [
@@ -43,7 +54,10 @@ describe("memory store contract shape", () => {
 
   it("removes one document by scope, bot and path inside the caller's space", async () => {
     const deleteMany = vi.fn().mockResolvedValue({ count: 1 });
-    const store = new MarkdownMemoryStore({ memoryDocument: { deleteMany } } as never);
+    const store = new MarkdownMemoryStore({
+      ...authorized(),
+      memoryDocument: { deleteMany },
+    } as never);
     await expect(
       store.remove(
         { id: "memory-9", scope: "bot", botId: "bot-1", path: "projects/retired.md" },
@@ -63,7 +77,10 @@ describe("memory store contract shape", () => {
 
   it("returns false for a missing user document without touching bot memory", async () => {
     const deleteMany = vi.fn().mockResolvedValue({ count: 0 });
-    const store = new MarkdownMemoryStore({ memoryDocument: { deleteMany } } as never);
+    const store = new MarkdownMemoryStore({
+      ...authorized(),
+      memoryDocument: { deleteMany },
+    } as never);
     await expect(
       store.remove({ id: "missing", scope: "user", path: "projects/retired.md" }, context),
     ).resolves.toEqual({ removed: false });

@@ -5,7 +5,7 @@ import { Id, ThinkingLevelSchema } from "./ids.js";
 import { McpTransportSchema } from "./mcp.js";
 import { McpAppCspSchema } from "./mcp-app.js";
 import { PAGE_TITLE_MAX_LENGTH } from "./pages.js";
-import { LessonEvidenceSchema } from "./semantic-memory.js";
+import { LessonEvidenceSchema, MemorySourceFactsSchema } from "./semantic-memory.js";
 
 export const ProductEventType = z.enum([
   "thread.message.created",
@@ -326,6 +326,8 @@ export const MessageBlock = z.discriminatedUnion("kind", [
     domainKey: z.string().max(120).optional(),
     signals: z.array(z.string().max(40)).max(8).optional(),
     replaces: z.object({ id: Id, expectedRevision: z.number().int().positive() }).optional(),
+    /** Host-observed exact reads retained until this draft is confirmed. */
+    derivedFrom: MemorySourceFactsSchema.optional(),
     status: z.enum(["draft", "saved"]),
   }),
   ChartBlock,

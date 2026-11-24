@@ -225,6 +225,7 @@ export * from "./team-chat-messaging.js";
 export * from "./third-party-connector-emulator.js";
 export * from "./ticket-changes.js";
 export { ticketReceiptsEnabled } from "./ticket-receipt-config.js";
+export * from "./ticket-subscriptions.js";
 export * from "./ticket-tools.js";
 export { dispatcherFetch } from "./undici-fetch.js";
 export * from "./user-device-emulator.js";

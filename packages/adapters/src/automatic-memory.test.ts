@@ -422,26 +422,59 @@ describe("archiveConversationMemory", () => {
     expect(store.applyBatch).toHaveBeenCalledWith(expect.any(Object), [change], context);
   });
 
-  it("does not spend a model call on an acknowledgement-only turn", async () => {
-    const batch = makeBatch({
-      messages: [
+  it.each([
+    { text: "我姓王", changes: [{ content: "用户姓王", category: "reference" as const }] },
+    {
+      text: "改姓李",
+      changes: [
         {
-          id: "message-a",
-          role: "user",
-          content: "谢谢",
-          createdAt: "2026-11-17T09:00:00.000Z",
-          isNew: true,
+          content: "用户姓李",
+          category: "reference" as const,
+          replacesId: "fact-1",
+          expectedRevision: 3,
         },
       ],
-      newSources: [{ id: "message-a", text: "谢谢", createdAt: "2026-11-17T09:00:00.000Z" }],
-    });
-    const { deps, extract } = setup({ batches: [batch, null] });
+    },
+    { text: "谢谢", changes: [] },
+    { text: "好的", changes: [] },
+  ])(
+    "lets the extractor decide whether the short source '$text' changes memory",
+    async ({ text, changes }) => {
+      const batch = makeBatch({
+        messages: [
+          {
+            id: "message-a",
+            role: "user",
+            content: text,
+            createdAt: "2026-11-17T09:00:00.000Z",
+            isNew: true,
+          },
+        ],
+        newSources: [{ id: "message-a", text, createdAt: "2026-11-17T09:00:00.000Z" }],
+      });
+      const proposed = changes.map((change) => ({
+        ...change,
+        sourceMessageId: "message-a",
+        sourceQuote: text,
+      }));
+      const { deps, extract } = setup({
+        batches: [batch, null],
+        changes: proposed,
+        recalled: [{ memory: "用户姓王", score: 0.9, id: "fact-1", revision: 3 }],
+      });
 
-    await archiveConversationMemory(deps, target, context);
+      await archiveConversationMemory(deps, target, context);
 
-    expect(extract).not.toHaveBeenCalled();
-    expect(store.applyBatch).toHaveBeenCalledWith(batch, [], context);
-  });
+      expect(extract).toHaveBeenCalledExactlyOnceWith(
+        expect.objectContaining({ messages: batch.messages }),
+        context,
+      );
+      expect(extract.mock.invocationCallOrder[0]!).toBeLessThan(
+        store.applyBatch.mock.invocationCallOrder[0]!,
+      );
+      expect(store.applyBatch).toHaveBeenCalledWith(batch, proposed, context);
+    },
+  );
 
   it("queries recall with the tail of a message longer than the index accepts", async () => {
     const long = `${"前缀".repeat(10_000)}最后的偏好`;

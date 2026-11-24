@@ -16,6 +16,7 @@ import {
   sendThreadMessage,
   threadHead,
 } from "./thread-target.js";
+import * as ticketSources from "./ticket-source-events.js";
 
 // Passthrough mock: every hint derives for real except the sentinel that
 // exercises the "derivation must never cost the send" path.
@@ -50,6 +51,91 @@ describe("threadHead", () => {
       select: { seq: true },
     });
   });
+});
+
+describe("thread subscription ingress", () => {
+  it.each(["queued", "waiting_input", "unknown", "ambiguous"])(
+    "routes persisted events before ordinary chat work for %s",
+    async (status) => {
+      const routedRun = { id: "ticket-run", taskId: "ticket-task", status };
+      const routed = vi
+        .spyOn(ticketSources, "routeThreadTicketSource")
+        .mockResolvedValue(
+          status === "unknown" || status === "ambiguous" ? null : { run: routedRun },
+        );
+      const tx = {
+        $queryRaw: vi.fn(async () => []),
+        $executeRaw: vi.fn(async () => 0),
+        space: { findUnique: vi.fn(async () => null) },
+        user: { findMany: vi.fn(async () => []) },
+        spaceMember: { count: vi.fn(async () => 1) },
+        thread: {
+          update: vi.fn(async ({ data }: { data: { nextMessageSeq?: unknown } }) =>
+            data.nextMessageSeq ? { nextMessageSeq: 8 } : { nextEventSeq: 3 },
+          ),
+        },
+        message: {
+          create: vi.fn(async () => ({
+            id: "source-7",
+            threadId: "thread-1",
+            seq: 7,
+            role: "user",
+            blocks: [{ kind: "text", text: "Evidence changed" }],
+            createdAt: new Date(),
+          })),
+          update: vi.fn(),
+        },
+        run: {
+          findMany: vi.fn(async () => []),
+          findUnique: vi.fn(async () => ({
+            status: status === "waiting_input" ? status : "queued",
+          })),
+          create: vi.fn(async () => ({ id: "chat-run", taskId: "chat-task", status: "queued" })),
+          updateMany: vi.fn(async () => ({ count: 0 })),
+        },
+        task: { create: vi.fn(async () => ({ id: "chat-task" })) },
+        event: { create: vi.fn(async () => ({ id: "event-1", seq: 2 })) },
+      };
+      const prisma = {
+        $transaction: vi.fn(async (fn: (client: typeof tx) => unknown) => fn(tx)),
+      } as unknown as PrismaClient;
+      const enqueue = vi.fn(async () => undefined);
+      try {
+        const sent = await sendThreadMessage(
+          {
+            prisma,
+            ticketBoardEnabled: true,
+            sandbox: {} as never,
+            events: { notify: vi.fn(async () => undefined) } as never,
+            jobs: { enqueue } as never,
+          },
+          { spaceId: "space-1", userId: "user-1" } as Actor,
+          {
+            kind: "bot",
+            botId: "bot-1",
+            threadId: "thread-1",
+          } as ThreadTarget,
+          { text: "Evidence changed" },
+        );
+        const matched = status === "queued" || status === "waiting_input";
+        expect(sent.runId).toBe(matched ? "ticket-run" : "chat-run");
+        expect(routed).toHaveBeenCalledWith(
+          tx,
+          expect.objectContaining({
+            spaceId: "space-1",
+            userId: "user-1",
+            botId: "bot-1",
+            threadId: "thread-1",
+          }),
+          expect.objectContaining({ id: "source-7", seq: 7 }),
+        );
+        expect(tx.run.create).toHaveBeenCalledTimes(matched ? 0 : 1);
+        expect(enqueue).toHaveBeenCalledTimes(status === "waiting_input" ? 0 : 1);
+      } finally {
+        routed.mockRestore();
+      }
+    },
+  );
 });
 
 describe("queued run supersession", () => {

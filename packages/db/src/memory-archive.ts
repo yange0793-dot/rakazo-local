@@ -56,6 +56,7 @@ export interface MemoryArchivePointer {
 
 type Tx = Prisma.TransactionClient;
 type ReadDb = Pick<PrismaClient, "spaceMember" | "bot" | "space" | "thread" | "spaceMemoryConfig">;
+type ArchiveScope = Pick<AdapterContext, "spaceId" | "userId" | "botId">;
 
 interface ArchiveMessageRow {
   id: string;
@@ -182,7 +183,7 @@ function provenanceValue(value: string): Record<string, unknown> {
 
 /**
  * Authority for the optional background archive of one direct personal chat. It schedules a
- * pointer after a completed user turn, reads the unscanned range, and commits extracted facts
+ * pointer with a completed user turn, reads the unscanned range, and commits extracted facts
  * and the cursor together. Postgres stores no transcript copy here.
  */
 export class MemoryArchiveStore {
@@ -207,7 +208,7 @@ export class MemoryArchiveStore {
   private async requireDirectThread(
     db: ReadDb,
     target: MemoryArchiveTarget,
-    ctx: AdapterContext,
+    ctx: ArchiveScope,
   ): Promise<{
     nextMessageSeq: number;
     historyCompactionGeneration: number;
@@ -262,7 +263,7 @@ export class MemoryArchiveStore {
   private async runSourceSeqs(
     tx: Tx,
     run: { id: string; threadId: string; botId: string; sourceMessageId: string | null },
-    ctx: AdapterContext,
+    ctx: ArchiveScope,
   ): Promise<number[]> {
     const rows = await tx.message.findMany({
       where: {
@@ -293,7 +294,7 @@ export class MemoryArchiveStore {
   private async skippedSourceSeqs(
     tx: Tx,
     run: { id: string; threadId: string; botId: string; createdAt: Date },
-    ctx: AdapterContext,
+    ctx: ArchiveScope,
   ): Promise<number[]> {
     const prior = await tx.run.findMany({
       where: {
@@ -327,79 +328,113 @@ export class MemoryArchiveStore {
    * earliest real user source, so the first schedule never imports the older conversation.
    */
   async markPending(runId: string, ctx: AdapterContext, availableAt: Date): Promise<boolean> {
+    return this.transaction(ctx, (tx) =>
+      this.markPendingInTransaction(tx, runId, ctx, availableAt),
+    );
+  }
+
+  /** Register after the completed update, before the caller removes the run's steering. */
+  async markPendingInTransaction(
+    tx: Tx,
+    runId: string,
+    ctx: ArchiveScope,
+    availableAt: Date,
+  ): Promise<boolean> {
     if (!Number.isFinite(availableAt.getTime()))
       throw new Error("Automatic memory requires a valid debounce time.");
-    return this.transaction(ctx, async (tx) => {
-      const run = await tx.run.findFirst({
-        where: { id: runId, spaceId: ctx.spaceId, userId: ctx.userId },
-        select: {
-          id: true,
-          botId: true,
-          threadId: true,
-          status: true,
-          trigger: true,
-          sourceMessageId: true,
-          createdAt: true,
+    const run = await tx.run.findFirst({
+      where: { id: runId, spaceId: ctx.spaceId, userId: ctx.userId },
+      select: {
+        id: true,
+        botId: true,
+        threadId: true,
+        status: true,
+        trigger: true,
+        sourceMessageId: true,
+        createdAt: true,
+      },
+    });
+    if (!run) return false;
+    if (ctx.botId && ctx.botId !== run.botId) throw new IsolationError();
+    if (run.status !== "completed" || !DIRECT_RUN_TRIGGERS.has(run.trigger)) return false;
+    // Serialize with message writers and clear so the seed and bound use one consistent head.
+    await tx.$queryRaw`SELECT id FROM threads WHERE id = ${run.threadId} AND "spaceId" = ${ctx.spaceId} FOR UPDATE`;
+    // Group and channel turns complete here too; they have no personal archive and this
+    // is an ordinary no-op rather than an isolation failure.
+    const thread = await tx.thread.findFirst({
+      where: { id: run.threadId, spaceId: ctx.spaceId },
+      select: {
+        userId: true,
+        botId: true,
+        helperBotId: true,
+        groupId: true,
+        externalConversationId: true,
+      },
+    });
+    if (thread && (thread.helperBotId || thread.groupId || thread.externalConversationId))
+      return false;
+    if (thread && thread.userId !== ctx.userId) {
+      // Space members share the creator's bot thread, but only its owner has a personal archive.
+      // Check the member's authority before treating this as an ineligible source.
+      if (thread.botId !== run.botId) throw new IsolationError();
+      const [membership, bot, space] = await Promise.all([
+        tx.spaceMember.findFirst({
+          where: { spaceId: ctx.spaceId, userId: ctx.userId },
+          select: { id: true },
+        }),
+        tx.bot.findFirst({
+          where: { id: run.botId, spaceId: ctx.spaceId },
+          select: { id: true },
+        }),
+        tx.space.findFirst({ where: { id: ctx.spaceId }, select: { deletingAt: true } }),
+      ]);
+      if (!membership || !bot || !space || space.deletingAt) throw new IsolationError();
+      return false;
+    }
+    const target = { threadId: run.threadId, botId: run.botId, userId: ctx.userId };
+    const authorized = await this.requireDirectThread(tx, target, ctx);
+    const seqs = await this.runSourceSeqs(tx, run, ctx);
+    if (!seqs.length) return false;
+    const generation = authorized.historyCompactionGeneration;
+    const throughSeq = authorized.nextMessageSeq - 1;
+    const existing = await tx.memoryArchiveProgress.findUnique({
+      where: { threadId: run.threadId },
+    });
+    const bound = {
+      spaceId: ctx.spaceId,
+      botId: run.botId,
+      userId: ctx.userId,
+      scope: authorized.scope,
+      generation,
+      availableAt,
+      pending: true,
+    };
+    if (!existing || existing.generation !== generation) {
+      // A thread whose first direct turn failed has no cursor yet; seeding at this run alone
+      // would step over that turn forever, so reach back over the uncompleted ones.
+      const skipped = await this.skippedSourceSeqs(tx, run, ctx);
+      // A clear retired the old range; seed from this run instead of reviving its messages.
+      await tx.memoryArchiveProgress.upsert({
+        where: { threadId: run.threadId },
+        create: {
+          threadId: run.threadId,
+          ...bound,
+          processedUpToSeq: Math.min(...seqs, ...skipped) - 1,
+          throughSeq,
+        },
+        update: {
+          ...bound,
+          processedUpToSeq: Math.min(...seqs, ...skipped) - 1,
+          throughSeq,
         },
       });
-      if (!run) return false;
-      if (ctx.botId && ctx.botId !== run.botId) throw new IsolationError();
-      if (run.status !== "completed" || !DIRECT_RUN_TRIGGERS.has(run.trigger)) return false;
-      // Serialize with message writers and clear so the seed and bound use one consistent head.
-      await tx.$queryRaw`SELECT id FROM threads WHERE id = ${run.threadId} AND "spaceId" = ${ctx.spaceId} FOR UPDATE`;
-      // Group and channel turns complete here too; they have no personal archive and this
-      // is an ordinary no-op rather than an isolation failure.
-      const thread = await tx.thread.findFirst({
-        where: { id: run.threadId, spaceId: ctx.spaceId },
-        select: { helperBotId: true, groupId: true, externalConversationId: true },
-      });
-      if (thread && (thread.helperBotId || thread.groupId || thread.externalConversationId))
-        return false;
-      const target = { threadId: run.threadId, botId: run.botId, userId: ctx.userId };
-      const authorized = await this.requireDirectThread(tx, target, ctx);
-      const seqs = await this.runSourceSeqs(tx, run, ctx);
-      if (!seqs.length) return false;
-      const generation = authorized.historyCompactionGeneration;
-      const throughSeq = authorized.nextMessageSeq - 1;
-      const existing = await tx.memoryArchiveProgress.findUnique({
+    } else {
+      await tx.memoryArchiveProgress.update({
         where: { threadId: run.threadId },
+        data: { ...bound, throughSeq: Math.max(existing.throughSeq, throughSeq) },
       });
-      const bound = {
-        spaceId: ctx.spaceId,
-        botId: run.botId,
-        userId: ctx.userId,
-        scope: authorized.scope,
-        generation,
-        availableAt,
-        pending: true,
-      };
-      if (!existing || existing.generation !== generation) {
-        // A thread whose first direct turn failed has no cursor yet; seeding at this run alone
-        // would step over that turn forever, so reach back over the uncompleted ones.
-        const skipped = await this.skippedSourceSeqs(tx, run, ctx);
-        // A clear retired the old range; seed from this run instead of reviving its messages.
-        await tx.memoryArchiveProgress.upsert({
-          where: { threadId: run.threadId },
-          create: {
-            threadId: run.threadId,
-            ...bound,
-            processedUpToSeq: Math.min(...seqs, ...skipped) - 1,
-            throughSeq,
-          },
-          update: {
-            ...bound,
-            processedUpToSeq: Math.min(...seqs, ...skipped) - 1,
-            throughSeq,
-          },
-        });
-      } else {
-        await tx.memoryArchiveProgress.update({
-          where: { threadId: run.threadId },
-          data: { ...bound, throughSeq: Math.max(existing.throughSeq, throughSeq) },
-        });
-      }
-      return true;
-    });
+    }
+    return true;
   }
 
   /**

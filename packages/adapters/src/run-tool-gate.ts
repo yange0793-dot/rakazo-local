@@ -36,7 +36,15 @@ import {
 import { normalizedHttpUrl, urlSite } from "@rakazo/core/egress";
 import { approvalEffectKey, toolEffectIdempotencyKey } from "@rakazo/core/node/approval-effect-key";
 import type { AuditEventInput } from "@rakazo/db";
-import { recordAuditEvent, runSecretKind } from "@rakazo/db";
+import {
+  ContentDecryptionError,
+  ciphertextKeyId,
+  contentEncryptionOf,
+  decryptText,
+  encryptText,
+  recordAuditEvent,
+  runSecretKind,
+} from "@rakazo/db";
 import type { ApprovalBrowserAction, FleetCardSummary } from "./approval-ask.js";
 import { buildApprovalAskBlock, MAX_FETCH_URL_LENGTH } from "./approval-ask.js";
 import {
@@ -84,7 +92,7 @@ import { notifyRun } from "./run-notifications.js";
 import { resolveCompletedSecretLeftover } from "./run-secret.js";
 import type { ToolRequest } from "./run-tool-request.js";
 import { BUILTIN_AGENT_TOOL_NAMES, READ_ONLY_AGENT_TOOLS } from "./run-tool-selection.js";
-import { callMediaTool } from "./run-tools-files.js";
+import { callMediaTool, fileTools } from "./run-tools-files.js";
 import { callPaidService } from "./run-tools-integrations.js";
 import { USER_COMPUTER_TOOLS, userComputerGate } from "./run-tools-user-computer.js";
 import { connectorTrustKeys } from "./run-trust.js";
@@ -92,6 +100,7 @@ import { watchFromTool } from "./schedule-tools.js";
 import { pagePaymentPrecheck, paysWithWallet } from "./spending-gate.js";
 import { announceTicketAttention } from "./ticket-attention.js";
 import { refusal } from "./tool-refusal.js";
+import { isFailedToolResult } from "./tool-result-error.js";
 
 export type AppliedEffect = Awaited<ReturnType<typeof recordEffect>>;
 
@@ -103,6 +112,10 @@ const HELPER_UNSUPPORTED_BROWSER_KINDS: ReadonlySet<string> = new Set([
   "fill_code",
 ]);
 const PAGE_TOOLS = ["browser_navigate", "browser_snapshot", "browser_act"];
+
+function isWorkspaceRead(name: string): name is "read_file" | "list_files" {
+  return name === "read_file" || name === "list_files";
+}
 
 type ApprovalCard = {
   reviewReason: string | undefined;
@@ -547,8 +560,11 @@ export async function gateToolCall(
       : toolEffectIdempotencyKey(runId, replayEffectToolName, args, occurrence));
   // Connector read-only hints must not bypass approval, review, or replay decisions.
   // A fetch to a new site is gated like any action, so it needs an effect to approve.
+  const workspaceReadAsks =
+    isWorkspaceRead(name) && plan === "ask" && approvalResolved.source === "require_approval";
   const applied =
     READ_ONLY_AGENT_TOOLS.has(name) &&
+    !workspaceReadAsks &&
     !durableBrowser &&
     siteGate !== "new" &&
     nextApprovedTool !== name &&
@@ -749,7 +765,7 @@ export async function gateToolCall(
           return { result: gate.result };
         }
       } else {
-        return { result: browserResultWithoutState(name, gate.result) };
+        return { result: await replayEffectResult(ctx, name, applied.effect.id, gate.result) };
       }
     }
     if (gate.action === "paused") {
@@ -795,6 +811,20 @@ export async function gateToolCall(
     const trusted = await ctx.trust.loadTrustedConnectors();
     for (const trust of connectorTrusts) trusted.add(trust);
   }
+  // The ordinary workspace handlers are read-only and do not settle effects themselves.
+  if (applied && isWorkspaceRead(name)) {
+    let outcome: "success" | "failure" = "failure";
+    try {
+      const result = await call.finish(await fileTools[name]!(ctx, call));
+      if (!isFailedToolResult(result)) outcome = "success";
+      return { result };
+    } finally {
+      await auditToolCall(ctx, name, outcome, {
+        effectId: applied.effect.id,
+        autoApproved: call.bypassApproval,
+      });
+    }
+  }
   return { call };
 }
 
@@ -838,10 +868,19 @@ function createToolCall(
   const call: ToolCall = {
     ...fields,
     claimedEffect: false,
-    persistEffectResult: (result) => {
-      if (!applied) return Promise.resolve(true);
+    persistEffectResult: async (result) => {
+      if (!applied) return true;
       let stored = result;
-      if (
+      if (isWorkspaceRead(name)) {
+        const ring = contentEncryptionOf(deps.prisma)?.ring;
+        if (ring?.encryptWrites) {
+          stored = encryptText(
+            await ring.current(ctx.run.spaceId),
+            workspaceReadResultLocation(ctx, applied.effect.id),
+            JSON.stringify(result),
+          );
+        }
+      } else if (
         PAGE_TOOLS.includes(name) &&
         ctx.providers.browser.checkpoint &&
         ctx.computer.stored.providerRef
@@ -884,7 +923,9 @@ function createToolCall(
       });
       if (current) {
         const retryGate = resolveDuplicateEffectGate(current, name);
-        if (retryGate.action === "return") return browserResultWithoutState(name, retryGate.result);
+        if (retryGate.action === "return") {
+          return replayEffectResult(ctx, name, current.id, retryGate.result);
+        }
         if (retryGate.action === "uncertain") {
           return settleToolUncertainty(ctx, call, applied!.effect.id, name);
         }
@@ -895,8 +936,25 @@ function createToolCall(
   return call;
 }
 
-/** Browser recovery metadata is server state, not part of the model's tool response. */
-function browserResultWithoutState(name: string, result: unknown): unknown {
+function workspaceReadResultLocation(ctx: RunContext, effectId: string) {
+  return { table: "external_effects", column: "result", rowId: effectId, owner: ctx.runId };
+}
+
+async function replayEffectResult(
+  ctx: RunContext,
+  name: string,
+  effectId: string,
+  result: unknown,
+): Promise<unknown> {
+  if (isWorkspaceRead(name) && typeof result === "string") {
+    const keyId = ciphertextKeyId(result);
+    if (keyId) {
+      const key = await contentEncryptionOf(ctx.deps.prisma)?.ring.byId(keyId);
+      if (key?.spaceId !== ctx.run.spaceId) throw new ContentDecryptionError();
+      return JSON.parse(decryptText(key, workspaceReadResultLocation(ctx, effectId), result));
+    }
+  }
+  // Browser recovery metadata is server state, not part of the model's tool response.
   if (!PAGE_TOOLS.includes(name) || !result || typeof result !== "object") return result;
   const { browserState: _state, ...visible } = result as Record<string, unknown>;
   return visible;
@@ -926,7 +984,8 @@ async function settleToolUncertainty(
     )
       return recovered;
   }
-  return settleUncertainEffect(ctx.deps.prisma, effectId, toolName, call.args);
+  const result = await settleUncertainEffect(ctx.deps.prisma, effectId, toolName, call.args);
+  return isWorkspaceRead(call.name) ? replayEffectResult(ctx, call.name, effectId, result) : result;
 }
 
 /** Ask the owner through an approval card. Parallel calls share the first call's pause. */

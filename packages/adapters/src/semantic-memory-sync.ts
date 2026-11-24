@@ -42,21 +42,17 @@ export async function reconcileSemanticMemoryIndex(deps: {
   prisma: PrismaClient;
   jobs: JobPublisher;
 }): Promise<void> {
-  const pending = await runAsSystem("recover pending semantic memory index work", () =>
-    new SemanticFactStore(deps.prisma).pendingIndexWork(100),
-  );
-  const spaceIds = [...new Set(pending.map((work) => work.spaceId))];
-  if (!spaceIds.length) return;
   const configured = await runAsSystem("find spaces whose memory provider drains the index", () =>
     deps.prisma.spaceMemoryConfig.findMany({
-      where: { spaceId: { in: spaceIds }, provider: LOCAL_MEMORY_PROVIDER_ID },
+      where: { provider: LOCAL_MEMORY_PROVIDER_ID },
       select: { spaceId: true },
     }),
   );
-  const usable = new Set(configured.map((row) => row.spaceId));
-  await Promise.all(
-    spaceIds
-      .filter((spaceId) => usable.has(spaceId))
-      .map((spaceId) => deps.jobs.enqueue(semanticMemorySyncJob(spaceId))),
+  const eligibleSpaceIds = configured.map((row) => row.spaceId);
+  if (!eligibleSpaceIds.length) return;
+  const pending = await runAsSystem("recover pending semantic memory index work", () =>
+    new SemanticFactStore(deps.prisma).pendingIndexWork(100, undefined, eligibleSpaceIds),
   );
+  const spaceIds = [...new Set(pending.map((work) => work.spaceId))];
+  await Promise.all(spaceIds.map((spaceId) => deps.jobs.enqueue(semanticMemorySyncJob(spaceId))));
 }

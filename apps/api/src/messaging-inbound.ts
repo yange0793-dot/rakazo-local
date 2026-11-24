@@ -25,6 +25,7 @@ import {
   crossSpaceCommunicationAllowed,
   normalizeMessagingLinkCode,
   redeemMessagingLinkCode,
+  resolveTicketSubscription,
   SpaceDeletionInProgressError,
   THREAD_LOCK_TRANSACTION_OPTIONS,
 } from "@rakazo/db";
@@ -38,6 +39,7 @@ import {
   MESSAGE_ROUTING_RESERVATION_MS,
 } from "./team-chat-startup.js";
 import { cancelThreadRuns, finishThreadStop, STOPPED_BY_MESSAGE_NOTE } from "./thread-stop.js";
+import { routeThreadTicketSource } from "./ticket-source-events.js";
 import {
   deliverWebhookEvent,
   formatUntrustedDeliveryPayload,
@@ -56,6 +58,7 @@ export interface MessagingInboundDeps {
    * Off by default — strangers' runs would bill the deployment model key.
    */
   openSignup: boolean;
+  ticketBoardEnabled?: boolean;
   acknowledge?: MessagingReceipts["acknowledge"];
   storeAttachment?: InboundAttachmentStore;
   /**
@@ -173,25 +176,30 @@ async function handleDirectEvent(
       created: false,
     };
   } else {
-    ids = await deps.provision(
-      {
-        provider: event.provider,
-        address: event.from,
-        dmThreadId: event.threadId,
-        displayName: event.fromLabel ? sanitizeMessagingLabel(event.fromLabel) : null,
-      },
-    );
+    ids = await deps.provision({
+      provider: event.provider,
+      address: event.from,
+      dmThreadId: event.threadId,
+      displayName: event.fromLabel ? sanitizeMessagingLabel(event.fromLabel) : null,
+    });
   }
 
   const stored = await storeInboundMedia(deps, ids, event);
 
+  const subscription = deps.ticketBoardEnabled
+    ? await resolveTicketSubscription(deps.prisma, {
+        ...ids,
+        source: { type: "thread", threadId: ids.threadId },
+      })
+    : null;
   // Message-trigger routines own the delivery when configured. Do not also
   // start a normal messaging continue for the same inbound handle.
   if (
-    await wakeMessageRoutines(deps, ids, event, {
+    subscription?.status !== "matched" &&
+    (await wakeMessageRoutines(deps, ids, event, {
       artifacts: stored.artifacts,
       unavailable: stored.unavailable,
-    })
+    }))
   )
     return;
   const body = [text, ...stored.unavailable].filter(Boolean).join("\n");
@@ -209,6 +217,12 @@ async function handleDirectEvent(
     prompt: promptTextForAttachments(body, stored.artifacts),
     trigger: "messaging",
     clientNonce: `messaging:${event.provider}:${event.handle}`,
+    ...(deps.ticketBoardEnabled
+      ? {
+          routeSourceEvent: (tx, message) =>
+            routeThreadTicketSource(tx, { ...ids, ticketBoardEnabled: true }, message),
+        }
+      : {}),
   });
   if (sent.runId) {
     const runId = sent.runId;
@@ -220,7 +234,7 @@ async function handleDirectEvent(
       if (!run) return false;
       // A failed or cancelled run may never be mirrored, and no reply is coming.
       if (run.status === "failed" || run.status === "cancelled") return true;
-      if (!run.messagingMirroredAt) return false;
+      if (run.status !== "completed" || !run.messagingMirroredAt) return false;
       // Mirroring only queues the reply in the outbox. It has gone out once
       // none of this run's queued rows are still waiting to be sent.
       const replies = await deps.prisma.message.findMany({
@@ -231,14 +245,25 @@ async function handleDirectEvent(
       const unsent = await deps.prisma.messagingOutbound.count({
         where: {
           sourceMessageId: { in: replies.map((reply) => reply.id) },
-          status: { not: "sent" },
+          // SQL NOT excludes nullable fields, so legacy rows need an explicit
+          // branch. Only a nonempty legacy handle is evidence of acceptance.
+          OR: [
+            { status: { not: "sent" } },
+            { deliveryState: { not: "accepted" } },
+            { deliveryState: null, OR: [{ providerHandle: null }, { providerHandle: "" }] },
+          ],
         },
       });
       return unsent === 0;
     });
-    await deps.jobs.enqueue(runContinueJob(sent.runId)).catch((error) => {
-      getLogger().error("messaging inbound run enqueue error", error);
-    });
+    if (
+      sent.runStatus === undefined ||
+      sent.runStatus === "queued" ||
+      sent.runStatus === "waiting_takeover"
+    )
+      await deps.jobs.enqueue(runContinueJob(sent.runId)).catch((error) => {
+        getLogger().error("messaging inbound run enqueue error", error);
+      });
   }
 }
 
@@ -940,7 +965,14 @@ async function handleChannelEvent(
     };
     // One member's Space being deleted must not keep the message from the others.
     try {
-      if (await wakeMessageRoutines(deps, target, event)) continue;
+      const subscription = deps.ticketBoardEnabled
+        ? await resolveTicketSubscription(deps.prisma, {
+            ...target,
+            source: { type: "thread", threadId: target.threadId },
+          })
+        : null;
+      if (subscription?.status !== "matched" && (await wakeMessageRoutines(deps, target, event)))
+        continue;
       // Group runs carry only text; a bare photo would start an empty prompt.
       if (!event.content.trim()) continue;
 
@@ -953,8 +985,19 @@ async function handleChannelEvent(
         prompt,
         trigger: "messaging",
         clientNonce: `messaging:${event.provider}:${event.handle}`,
+        ...(deps.ticketBoardEnabled
+          ? {
+              routeSourceEvent: (tx, message) =>
+                routeThreadTicketSource(tx, { ...target, ticketBoardEnabled: true }, message),
+            }
+          : {}),
       });
-      if (sent.runId) {
+      if (
+        sent.runId &&
+        (sent.runStatus === undefined ||
+          sent.runStatus === "queued" ||
+          sent.runStatus === "waiting_takeover")
+      ) {
         await deps.jobs.enqueue(runContinueJob(sent.runId)).catch((error) => {
           getLogger().error("messaging channel fan-out enqueue error", error);
         });

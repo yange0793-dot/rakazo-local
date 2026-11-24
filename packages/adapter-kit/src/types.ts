@@ -3,6 +3,7 @@ import type {
   ByokTier,
   CacheCapabilities as ConnectionCacheCapabilities,
   ConnectionCatalogItem,
+  MemoryDerivedSpan,
   ModelApiProtocol,
   ModelReasoningCapabilities,
   PurchaseCardField,
@@ -340,10 +341,15 @@ export interface ConnectorCapabilities {
 
 export type ConnectorCatalogItem = ConnectionCatalogItem;
 
+export type { MemoryDerivedSpan, MemorySourceFact } from "@rakazo/contracts";
+export { MemoryDerivedSpansSchema } from "@rakazo/contracts";
+
 export interface MemoryReadRequest {
   scope: "bot" | "user";
   botId?: string;
   path?: string;
+  /** Authenticated human editing only. Agent reads always receive the current projection. */
+  purpose?: "edit";
 }
 
 export interface MemorySnapshot {
@@ -381,6 +387,8 @@ export interface MemoryCommitRequest {
   expectedRevision?: number;
   sourceRunId?: string;
   sourceThreadId?: string;
+  /** New automatic spans in content; unchanged existing spans retain their dependencies. */
+  derivations?: MemoryDerivedSpan[];
 }
 
 export interface MemoryRemoveRequest {
@@ -425,6 +433,8 @@ export interface SemanticMemoryCapabilities {
 export interface SemanticMemoryResult {
   memory: string;
   score: number;
+  /** Authoritative kind, when the provider owns revisioned facts. */
+  kind?: SemanticFactKind;
   updatedAt?: string;
   /** Host revision of the cited fact, used for conditional correction. */
   revision?: number;
@@ -467,6 +477,13 @@ export interface SemanticMemoryRecallRequest {
   /** Omit until a thread has compacted history; the provider can then skip that namespace. */
   historyGeneration?: number;
   limit: number;
+}
+
+/** Read one current revision using the same scope and history rules as recall. */
+export interface SemanticMemoryReadRequest
+  extends Omit<SemanticMemoryRecallRequest, "query" | "limit"> {
+  id: string;
+  expectedRevision: number;
 }
 
 /** Supplied by the host from persisted source records, never arbitrary tool metadata. */
@@ -985,6 +1002,8 @@ export interface MessagingCapabilities {
   direct: boolean;
   groups: boolean;
   receipt: MessagingReceipt | null;
+  /** Provider-enforced dedupe across recovery with the same send key. Absent means none. */
+  sendIdempotency?: "none" | "provider";
   /** Sends image and file attachments. Absent means replies go out as text only. */
   files?: boolean;
 }
@@ -1001,7 +1020,7 @@ export interface MessagingPlatformDescriptor {
 export interface MessagingSendRequest {
   threadId: string;
   body: string;
-  /** Stable key so retries of the same logical send can be deduped upstream. */
+  /** Stable logical send key; only a declared provider capability guarantees dedupe. */
   idempotencyKey?: string;
   /** A file to post as this message; only sent to platforms with the `files` capability. */
   attachment?: MessagingOutboundAttachment;

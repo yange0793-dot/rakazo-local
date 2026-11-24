@@ -1,4 +1,4 @@
-import type { AdapterContext } from "@rakazo/adapter-kit";
+import type { AdapterContext, MemorySourceFact } from "@rakazo/adapter-kit";
 import { MEMORY_REVISION_CONFLICT_ERROR } from "@rakazo/adapter-kit";
 import { createLogger, createTestSink, installLogger } from "@rakazo/logging";
 import { afterEach, describe, expect, it, vi } from "vitest";
@@ -92,7 +92,9 @@ function fixture(rows: FactRecord[] = []) {
   };
   const db = {
     space: { findFirst: vi.fn(async () => ({ deletingAt: null })) },
-    spaceMember: { findFirst: vi.fn(async () => ({ id: "membership" })) },
+    spaceMember: {
+      findFirst: vi.fn(async (): Promise<{ id: string } | null> => ({ id: "membership" })),
+    },
     bot: { findFirst: vi.fn(async () => ({ userId: ctx.userId })) },
     thread: {
       findFirst: vi.fn(async () => ({
@@ -151,7 +153,10 @@ function fixture(rows: FactRecord[] = []) {
       }),
     },
     semanticMemoryRetirement: {
-      findFirst: vi.fn(async () => retired[0] ?? null),
+      findFirst: vi.fn(
+        async ({ where }: { where: Record<string, unknown> }) =>
+          retired.find((row) => matchesWhere(row as unknown as FactRecord, where)) ?? null,
+      ),
       upsert: vi.fn(async ({ create }: { create: Record<string, unknown> }) => {
         retired.push(create);
         return create;
@@ -165,7 +170,16 @@ function fixture(rows: FactRecord[] = []) {
       findUnique: vi.fn(
         async ({ where }: { where: { id: string } }) => outbox.get(where.id) ?? null,
       ),
-      findMany: vi.fn(async () => [...outbox.values()]),
+      findMany: vi.fn(
+        async (args?: { where?: { spaceId?: string | { in?: string[] } }; take?: number }) => {
+          let rows = [...outbox.values()];
+          const spaceId = args?.where?.spaceId;
+          if (typeof spaceId === "string") rows = rows.filter((row) => row.spaceId === spaceId);
+          else if (spaceId?.in)
+            rows = rows.filter((row) => spaceId.in!.includes(String(row.spaceId)));
+          return args?.take ? rows.slice(0, args.take) : rows;
+        },
+      ),
       deleteMany: vi.fn(async ({ where }: { where: { id: string } }) => ({
         count: Number(outbox.delete(where.id)),
       })),
@@ -198,6 +212,268 @@ describe("managed semantic fact authority", () => {
     installLogger(createLogger({ service: "test", level: "off", sinks: [] }));
   });
 
+  const dependency: MemorySourceFact = {
+    id: "fact-a",
+    revision: 1,
+    botId: "bot-a",
+    kind: "durable",
+    scope: "isolated",
+  };
+  const derivedLesson = (sources: MemorySourceFact[] = [dependency]) => ({
+    botId: "bot-a",
+    cue: "Working with the console",
+    lesson: "Keep the console narrow.",
+    provenance: {
+      kind: "run" as const,
+      runId: "run-a",
+      derivedFrom: sources,
+      harness: {
+        domainKey: "files",
+        signals: ["tool_error"],
+        autoApplied: true,
+        evidence: { kind: "tool_error" as const, quote: "Console failed." },
+      },
+    },
+  });
+
+  it.each(["correct", "forget"] as const)(
+    "removes an automatically derived lesson from recall, exact reads, current lists and index publication after source %s",
+    async (action) => {
+      const f = fixture([record()]);
+      const saved = (await f.store.saveLesson(derivedLesson(), ctx))!;
+      const request = {
+        id: saved.id,
+        expectedRevision: 1,
+        botId: "bot-a",
+        scope: "isolated" as const,
+        kind: "lesson" as const,
+      };
+      await expect(f.store.read(request, ctx)).resolves.toMatchObject({ id: saved.id });
+      if (action === "correct")
+        await f.store.correct(
+          {
+            id: "fact-a",
+            botId: "bot-a",
+            scope: "isolated",
+            expectedRevision: 1,
+            content: "Use a wide console.",
+          },
+          ctx,
+        );
+      else
+        await f.store.forget(
+          { id: "fact-a", botId: "bot-a", scope: "isolated", expectedRevision: 1 },
+          ctx,
+        );
+      await expect(f.store.read(request, ctx)).rejects.toBeInstanceOf(IsolationError);
+      expect(
+        await f.store.resolveCandidates(
+          { botId: "bot-a", scope: "isolated", kind: "lesson", query: "console", limit: 5 },
+          [{ id: saved.id, revision: 1, score: 1 }],
+          ctx,
+        ),
+      ).toEqual([]);
+      expect(
+        (await f.store.list({ botId: "bot-a", scope: "isolated", kind: "lesson" }, ctx)).items,
+      ).toEqual([]);
+      expect(
+        (
+          await f.store.list(
+            { botId: "bot-a", scope: "isolated", kind: "lesson", includeHistory: true },
+            ctx,
+          )
+        ).items,
+      ).toHaveLength(1);
+      expect(await f.store.getIndexWork(`sm-upsert:${saved.id}:1`)).toMatchObject({
+        action: "delete",
+        content: null,
+      });
+      expect(f.rows.find((row) => row.id === saved.id)).toMatchObject({
+        status: "active",
+        revision: 1,
+      });
+    },
+  );
+
+  it("retains manually corrected lesson text after its former source is forgotten", async () => {
+    const f = fixture([record()]);
+    const saved = (await f.store.saveLesson(derivedLesson(), ctx))!;
+    const manual = await f.store.correct(
+      {
+        id: saved.id,
+        botId: "bot-a",
+        scope: "isolated",
+        kind: "lesson",
+        expectedRevision: 1,
+        content: "My personal note.",
+      },
+      ctx,
+    );
+    expect(manual.provenance.derivedFrom).toBeUndefined();
+    await f.store.forget(
+      { id: "fact-a", botId: "bot-a", scope: "isolated", expectedRevision: 1 },
+      ctx,
+    );
+    await expect(
+      f.store.read(
+        { id: saved.id, expectedRevision: 2, botId: "bot-a", scope: "isolated", kind: "lesson" },
+        ctx,
+      ),
+    ).resolves.toMatchObject({ memory: "My personal note." });
+  });
+
+  it("keeps upstream sources when the host refines an existing derived lesson", async () => {
+    const f = fixture([record()]);
+    const saved = (await f.store.saveLesson(derivedLesson(), ctx))!;
+    const { derivedFrom: _derivedFrom, ...provenance } = derivedLesson().provenance;
+    const request = {
+      ...derivedLesson(),
+      lesson: "Check the console width first.",
+      provenance,
+      replaces: { id: saved.id, expectedRevision: 1 },
+    };
+    const refined = await f.store.saveLesson(request, ctx);
+    expect(refined?.provenance.derivedFrom).toEqual([dependency]);
+    await expect(f.store.saveLesson(request, ctx)).resolves.toMatchObject({
+      id: saved.id,
+      revision: 2,
+    });
+    await f.store.forget(
+      { id: "fact-a", botId: "bot-a", scope: "isolated", expectedRevision: 1 },
+      ctx,
+    );
+    await expect(
+      f.store.read(
+        {
+          id: saved.id,
+          expectedRevision: 2,
+          botId: "bot-a",
+          scope: "isolated",
+          kind: "lesson",
+        },
+        ctx,
+      ),
+    ).rejects.toBeInstanceOf(IsolationError);
+  });
+  it("tracks upstream revisions when deriving from a lesson and hides descendants after retirement", async () => {
+    const f = fixture([record()]);
+    const parent = (await f.store.saveLesson(derivedLesson(), ctx))!;
+    const child = (await f.store.saveLesson(
+      {
+        ...derivedLesson([{ ...dependency, id: parent.id, kind: "lesson" }]),
+        lesson: "Check width before rendering.",
+      },
+      ctx,
+    ))!;
+    expect(child.provenance.derivedFrom).toEqual(
+      [{ ...dependency, id: parent.id, kind: "lesson" }, dependency].sort((a, b) =>
+        a.id.localeCompare(b.id),
+      ),
+    );
+    await f.store.retireLesson(parent.id, ctx);
+    await expect(
+      f.store.read(
+        { id: child.id, expectedRevision: 1, botId: "bot-a", scope: "isolated", kind: "lesson" },
+        ctx,
+      ),
+    ).rejects.toBeInstanceOf(IsolationError);
+    expect(f.rows.find((row) => row.id === child.id)?.status).toBe("active");
+  });
+
+  it("checks source history generations, validity, retirement fences and reader scope", async () => {
+    const f = fixture([
+      record(),
+      record({ id: "history-a", kind: "history", sourceThreadId: "thread-a", sourceGeneration: 3 }),
+      record({ id: "other-space", spaceId: "space-b" }),
+      record({
+        id: "other-bot",
+        botId: "bot-b",
+        namespace: semanticFactNamespace(ctx.spaceId, "isolated", "bot-b"),
+      }),
+      record({ id: "expired", validTo: new Date("2000-01-01") }),
+    ]);
+    const history: MemorySourceFact = {
+      ...dependency,
+      id: "history-a",
+      kind: "history",
+      threadId: "thread-a",
+      historyGeneration: 3,
+    };
+    await expect(f.store.derivationSources([history], ctx)).resolves.toEqual([history]);
+    f.db.thread.findFirst.mockResolvedValueOnce({
+      botId: "bot-a",
+      groupId: null,
+      externalConversationId: null,
+      historyCompactionGeneration: 4,
+    });
+    await expect(f.store.derivationSources([history], ctx)).resolves.toBeNull();
+    for (const source of [
+      { ...dependency, revision: 2 },
+      { ...dependency, id: "other-space" },
+      { ...dependency, id: "other-bot", botId: "bot-b" },
+      { ...dependency, id: "expired" },
+    ]) {
+      await expect(f.store.saveLesson(derivedLesson([source]), ctx)).rejects.toThrow(/source/);
+    }
+    expect(f.db.semanticFact.create).not.toHaveBeenCalled();
+    f.retired.push({ namespace, kind: "scope" });
+    await expect(f.store.derivationSources([dependency], ctx)).resolves.toBeNull();
+  });
+
+  it("does not let a stale source or self-replacement be published as a new lesson", async () => {
+    const f = fixture([record()]);
+    const saved = (await f.store.saveLesson(derivedLesson(), ctx))!;
+    await expect(
+      f.store.saveLesson(
+        {
+          ...derivedLesson([{ ...dependency, id: saved.id, kind: "lesson" }]),
+          replaces: { id: saved.id, expectedRevision: 1 },
+        },
+        ctx,
+      ),
+    ).rejects.toThrow(/own previous revision/);
+    await f.store.correct(
+      {
+        id: "fact-a",
+        botId: "bot-a",
+        scope: "isolated",
+        expectedRevision: 1,
+        content: "Wide console.",
+      },
+      ctx,
+    );
+    await expect(f.store.saveLesson(derivedLesson(), ctx)).rejects.toThrow(/source/);
+    const current = await f.store.saveLesson(derivedLesson([{ ...dependency, revision: 2 }]), ctx);
+    expect(current?.id).not.toBe(saved.id);
+  });
+
+  it("filters obsolete candidates before the recall limit and leaves untracked historical notes untouched", async () => {
+    const f = fixture([
+      record(),
+      record({
+        id: "derived",
+        namespace: lessonFactNamespace(ctx.spaceId, "bot-a"),
+        kind: "lesson",
+        provenance: JSON.stringify({ kind: "run", derivedFrom: [{ ...dependency, revision: 2 }] }),
+      }),
+      record({
+        id: "manual",
+        namespace: lessonFactNamespace(ctx.spaceId, "bot-a"),
+        kind: "lesson",
+        content: "Legacy untracked note.",
+      }),
+    ]);
+    expect(
+      await f.store.resolveCandidates(
+        { botId: "bot-a", scope: "isolated", kind: "lesson", query: "console", limit: 1 },
+        [
+          { id: "derived", revision: 1, score: 10 },
+          { id: "manual", revision: 1, score: 1 },
+        ],
+        ctx,
+      ),
+    ).toEqual([expect.objectContaining({ id: "manual", memory: "Legacy untracked note." })]);
+  });
   it("uses exactly one isolated or shared namespace without delimiter collisions", () => {
     expect(semanticFactNamespace("space-a", "shared", "bot-a")).toBe(
       semanticFactNamespace("space-a", "shared", "bot-b"),
@@ -209,6 +485,200 @@ describe("managed semantic fact authority", () => {
     expect(semanticFactNamespace("a:b", "isolated", "c")).not.toBe(
       semanticFactNamespace("a", "isolated", "b:c"),
     );
+  });
+
+  it("reads only the active cited revision inside its exact tenant, namespace, and history generation", async () => {
+    const f = fixture([
+      record({ content: "Current fact." }),
+      record({
+        id: "lesson-a",
+        namespace: lessonFactNamespace(ctx.spaceId, "bot-a"),
+        kind: "lesson",
+        content: "cue: deployment\nlesson: check the platform.",
+        revision: 4,
+      }),
+      record({
+        id: "old-fact",
+        revision: 2,
+        status: "historical",
+      }),
+      record({ id: "forgotten-fact", status: "forgotten" }),
+      record({ id: "expired-fact", validTo: new Date("2000-01-01T00:00:00Z") }),
+      record({ id: "future-fact", validFrom: new Date("2999-01-01T00:00:00Z") }),
+      record({
+        id: "shared-fact",
+        scope: "shared",
+        namespace: semanticFactNamespace(ctx.spaceId, "shared", "bot-a"),
+      }),
+      record({
+        id: "history-a",
+        kind: "history",
+        sourceThreadId: "thread-a",
+        sourceGeneration: 3,
+        content: "History fact.",
+      }),
+      record({
+        id: "foreign-tenant",
+        spaceId: "space-other",
+        content: "Other tenant.",
+      }),
+    ]);
+
+    await expect(
+      f.store.read({ id: "fact-a", expectedRevision: 1, botId: "bot-a", scope: "isolated" }, ctx),
+    ).resolves.toMatchObject({ id: "fact-a", revision: 1, memory: "Current fact." });
+    await expect(
+      f.store.read(
+        {
+          id: "lesson-a",
+          expectedRevision: 4,
+          botId: "bot-a",
+          scope: "isolated",
+          kind: "lesson",
+        },
+        ctx,
+      ),
+    ).resolves.toMatchObject({
+      id: "lesson-a",
+      revision: 4,
+      memory: expect.stringContaining("deployment"),
+    });
+    await expect(
+      f.store.read(
+        {
+          id: "history-a",
+          expectedRevision: 1,
+          botId: "bot-a",
+          scope: "isolated",
+          threadId: "thread-a",
+          historyGeneration: 3,
+        },
+        ctx,
+      ),
+    ).resolves.toMatchObject({ id: "history-a", revision: 1 });
+    await expect(
+      f.store.read(
+        { id: "shared-fact", expectedRevision: 1, botId: "bot-a", scope: "shared" },
+        ctx,
+      ),
+    ).resolves.toMatchObject({ id: "shared-fact", revision: 1 });
+
+    for (const request of [
+      { id: "fact-a", expectedRevision: 2, botId: "bot-a", scope: "isolated" as const },
+      { id: "fact-a", expectedRevision: 1, botId: "bot-a", scope: "shared" as const },
+      { id: "old-fact", expectedRevision: 2, botId: "bot-a", scope: "isolated" as const },
+      { id: "forgotten-fact", expectedRevision: 1, botId: "bot-a", scope: "isolated" as const },
+      { id: "expired-fact", expectedRevision: 1, botId: "bot-a", scope: "isolated" as const },
+      { id: "future-fact", expectedRevision: 1, botId: "bot-a", scope: "isolated" as const },
+      { id: "shared-fact", expectedRevision: 1, botId: "bot-a", scope: "isolated" as const },
+      { id: "lesson-a", expectedRevision: 4, botId: "bot-a", scope: "isolated" as const },
+      { id: "fact-a", expectedRevision: 1, botId: "bot-other", scope: "isolated" as const },
+      { id: "foreign-tenant", expectedRevision: 1, botId: "bot-a", scope: "isolated" as const },
+      { id: "history-a", expectedRevision: 1, botId: "bot-a", scope: "isolated" as const },
+      {
+        id: "history-a",
+        expectedRevision: 1,
+        botId: "bot-a",
+        scope: "isolated" as const,
+        threadId: "thread-other",
+        historyGeneration: 3,
+      },
+      {
+        id: "history-a",
+        expectedRevision: 1,
+        botId: "bot-a",
+        scope: "isolated" as const,
+        threadId: "thread-a",
+        historyGeneration: 2,
+      },
+    ]) {
+      await expect(f.store.read(request, ctx)).rejects.toBeInstanceOf(IsolationError);
+    }
+    await expect(
+      f.store.read(
+        {
+          id: "lesson-a",
+          expectedRevision: 4,
+          botId: "bot-a",
+          scope: "shared",
+          kind: "lesson",
+        },
+        ctx,
+      ),
+    ).rejects.toBeInstanceOf(IsolationError);
+    expect(f.db.semanticFact.findMany).toHaveBeenCalledWith({
+      where: {
+        id: { in: ["fact-a"] },
+        spaceId: "space-a",
+        namespace,
+        status: "active",
+      },
+    });
+  });
+
+  it("rechecks membership and the persisted history generation on an exact read", async () => {
+    const f = fixture([
+      record({
+        id: "history-a",
+        kind: "history",
+        sourceThreadId: "thread-a",
+        sourceGeneration: 3,
+      }),
+    ]);
+    const request = {
+      id: "history-a",
+      expectedRevision: 1,
+      botId: "bot-a",
+      scope: "isolated" as const,
+      threadId: "thread-a",
+      historyGeneration: 3,
+    };
+    await expect(f.store.read(request, ctx)).resolves.toMatchObject({ id: "history-a" });
+    f.db.thread.findFirst.mockResolvedValueOnce({
+      botId: "bot-a",
+      groupId: null,
+      externalConversationId: null,
+      historyCompactionGeneration: 4,
+    });
+    await expect(f.store.read(request, ctx)).rejects.toBeInstanceOf(IsolationError);
+    f.db.spaceMember.findFirst.mockResolvedValueOnce(null);
+    await expect(f.store.read(request, ctx)).rejects.toBeInstanceOf(IsolationError);
+  });
+
+  it("filters eligible spaces before applying the bounded pending-index limit", async () => {
+    const f = fixture();
+    for (let index = 1; index <= 100; index += 1) {
+      f.outbox.set(`work-${index}`, {
+        id: `work-${index}`,
+        spaceId: `disconnected-${index}`,
+        userId: "user-a",
+      });
+    }
+    f.outbox.set("work-101", {
+      id: "work-101",
+      spaceId: "connected-101",
+      userId: "user-101",
+    });
+
+    await expect(f.store.pendingIndexWork(100, undefined, ["connected-101"])).resolves.toEqual([
+      { id: "work-101", spaceId: "connected-101", userId: "user-101" },
+    ]);
+    expect(f.db.semanticMemoryIndexOutbox.findMany).toHaveBeenCalledWith({
+      where: { spaceId: { in: ["connected-101"] } },
+      distinct: ["spaceId"],
+      orderBy: [{ createdAt: "asc" }, { id: "asc" }],
+      take: 100,
+      select: { id: true, spaceId: true, userId: true },
+    });
+    f.db.semanticMemoryIndexOutbox.findMany.mockClear();
+    await expect(f.store.pendingIndexWork(100, undefined, [])).resolves.toEqual([]);
+    await expect(
+      f.store.pendingIndexWork(100, "disconnected-1", ["connected-101"]),
+    ).resolves.toEqual([]);
+    expect(f.db.semanticMemoryIndexOutbox.findMany).not.toHaveBeenCalled();
+    await expect(f.store.pendingIndexWork(1, "connected-101")).resolves.toEqual([
+      { id: "work-101", spaceId: "connected-101", userId: "user-101" },
+    ]);
   });
 
   it("binds stable exact source/content and never resurrects a forgotten retry", async () => {
@@ -530,7 +1000,14 @@ describe("managed semantic fact authority", () => {
 
   it("fences retired history and refuses a late save before creating a fact", async () => {
     const f = fixture();
-    f.retired.push({ id: "retired" });
+    f.retired.push({
+      id: "retired",
+      namespace,
+      kind: "history",
+      botId: "bot-a",
+      threadId: "thread-a",
+      generation: 3,
+    });
     await expect(
       f.store.save(
         {
@@ -653,7 +1130,7 @@ describe("managed semantic fact authority", () => {
 
   it("refuses archive writes in a retired scope without creating or updating facts", async () => {
     const f = fixture([record()]);
-    f.retired.push({ id: "scope-retired" });
+    f.retired.push({ id: "scope-retired", namespace, kind: "scope" });
     const result = await f.store.applyArchiveChanges(
       f.db as never,
       {

@@ -916,4 +916,192 @@ postgres("semantic fact authority (isolated PostgreSQL)", () => {
       [3, "[forgotten]", "forgotten"],
     ]);
   });
+
+  it("reads the full legal Chinese lesson at its current revision and rejects stale or retired references", async () => {
+    const cue = "部署失败时先检查依赖".repeat(20);
+    const body = "先安装目标平台工具链".repeat(60);
+    expect(cue).toHaveLength(200);
+    expect(body).toHaveLength(600);
+    const saved = await store.saveLesson(
+      { botId, cue, lesson: body, provenance: lessonRun(runId, "synthetic platform failure") },
+      { ...ctx, operationId: "exact-long-lesson" },
+    );
+    expect(saved).not.toBeNull();
+    const request = {
+      id: saved!.id,
+      expectedRevision: 1,
+      botId,
+      scope: "isolated" as const,
+      kind: "lesson" as const,
+    };
+    await expect(store.read(request, ctx)).resolves.toMatchObject({
+      id: saved!.id,
+      revision: 1,
+      memory: `cue: ${cue}\nlesson: ${body}`,
+      entity: lessonFactNamespace(spaceId, botId),
+    });
+    for (const invalid of [
+      { ...request, scope: "shared" as const },
+      { ...request, kind: undefined },
+      { ...request, botId: peerBotId },
+    ]) {
+      await expect(store.read(invalid, ctx)).rejects.toBeInstanceOf(IsolationError);
+    }
+    await expect(
+      store.read(request, { ...ctx, userId: `sm-nonmember-${stamp}` }),
+    ).rejects.toBeInstanceOf(IsolationError);
+    await expect(
+      store.read(
+        { ...request, botId: foreignBotId },
+        { ...ctx, spaceId: foreignSpaceId, botId: foreignBotId },
+      ),
+    ).rejects.toBeInstanceOf(IsolationError);
+
+    const updated = await store.correct(
+      { ...request, content: `cue: ${cue}\nlesson: Recheck the platform before installing.` },
+      ctx,
+    );
+    await expect(store.read(request, ctx)).rejects.toBeInstanceOf(IsolationError);
+    const current = { ...request, expectedRevision: updated.revision };
+    await expect(store.read(current, ctx)).resolves.toMatchObject({
+      revision: 2,
+      memory: updated.content,
+    });
+    await store.retireLesson(saved!.id, ctx);
+    await expect(store.read(current, ctx)).rejects.toBeInstanceOf(IsolationError);
+    await expect(store.read({ ...current, expectedRevision: 3 }, ctx)).rejects.toBeInstanceOf(
+      IsolationError,
+    );
+  });
+
+  it("keeps exact fact reads scoped and rejects forgotten, future and expired revisions", async () => {
+    const isolated = await store.save(
+      { botId, scope: "isolated", content: "Exact isolated fact.", source: { kind: "durable" } },
+      { ...ctx, operationId: "exact-isolated" },
+    );
+    const shared = await store.save(
+      { botId, scope: "shared", content: "Exact shared fact.", source: { kind: "durable" } },
+      { ...ctx, operationId: "exact-shared" },
+    );
+    const request = {
+      id: isolated.id,
+      expectedRevision: isolated.revision,
+      botId,
+      scope: "isolated" as const,
+    };
+    await expect(store.read(request, ctx)).resolves.toMatchObject({ memory: isolated.content });
+    await expect(
+      store.read({ ...request, id: shared.id, scope: "shared" }, ctx),
+    ).resolves.toMatchObject({ memory: shared.content });
+    await expect(store.read({ ...request, id: shared.id }, ctx)).rejects.toBeInstanceOf(
+      IsolationError,
+    );
+
+    for (const [name, valid] of [
+      ["future", { validFrom: "2999-01-01T00:00:00.000Z" }],
+      ["expired", { validTo: "2000-01-01T00:00:00.000Z" }],
+    ] as const) {
+      const inactive = await store.importFact(
+        {
+          botId,
+          scope: "isolated",
+          sourceKey: `exact-${name}`,
+          content: `Exact ${name} fact.`,
+          kind: "durable",
+          status: "active",
+          provenance: { kind: "import", ...valid },
+          createdAt: "2026-01-01T00:00:00.000Z",
+          updatedAt: "2026-01-01T00:00:00.000Z",
+        },
+        ctx,
+      );
+      await expect(store.read({ ...request, id: inactive.id }, ctx)).rejects.toBeInstanceOf(
+        IsolationError,
+      );
+    }
+    await store.forget(request, ctx);
+    await expect(store.read(request, ctx)).rejects.toBeInstanceOf(IsolationError);
+    await expect(store.read({ ...request, expectedRevision: 2 }, ctx)).rejects.toBeInstanceOf(
+      IsolationError,
+    );
+  });
+
+  it("rechecks the persisted history generation and retirement on exact reads", async () => {
+    const historyThreadId = `sm-exact-history-${stamp}`;
+    const historyBotId = `sm-exact-history-bot-${stamp}`;
+    const historyContext = { ...ctx, botId: historyBotId };
+    await runAsTenant(historyContext, async () => {
+      await prisma.bot.create({
+        data: { id: historyBotId, spaceId, userId, name: "History fixture", color: "ink" },
+      });
+      await prisma.thread.create({
+        data: {
+          id: historyThreadId,
+          spaceId,
+          userId,
+          botId: historyBotId,
+          historyCompactionGeneration: 3,
+        },
+      });
+    });
+    const history = await store.save(
+      {
+        botId: historyBotId,
+        scope: "isolated",
+        content: "Exact generation three history.",
+        source: { kind: "history", threadId: historyThreadId, generation: 3 },
+      },
+      historyContext,
+    );
+    const request = {
+      id: history.id,
+      expectedRevision: history.revision,
+      botId: historyBotId,
+      scope: "isolated" as const,
+      threadId: historyThreadId,
+      historyGeneration: 3,
+    };
+    await expect(store.read(request, historyContext)).resolves.toMatchObject({
+      memory: history.content,
+    });
+    for (const invalid of [
+      { ...request, threadId: undefined },
+      { ...request, threadId: threadId },
+      { ...request, threadId: otherThreadId },
+      { ...request, historyGeneration: undefined },
+      { ...request, historyGeneration: 2 },
+    ]) {
+      await expect(store.read(invalid, historyContext)).rejects.toBeInstanceOf(IsolationError);
+    }
+    await runAsTenant(historyContext, () =>
+      prisma.thread.update({
+        where: { id: historyThreadId },
+        data: { historyCompactionGeneration: 4 },
+      }),
+    );
+    await expect(store.read(request, historyContext)).rejects.toBeInstanceOf(IsolationError);
+    const next = await store.save(
+      {
+        botId: historyBotId,
+        scope: "isolated",
+        content: "Exact generation four history.",
+        source: { kind: "history", threadId: historyThreadId, generation: 4 },
+      },
+      historyContext,
+    );
+    const current = {
+      ...request,
+      id: next.id,
+      expectedRevision: next.revision,
+      historyGeneration: 4,
+    };
+    await expect(store.read(current, historyContext)).resolves.toMatchObject({
+      memory: next.content,
+    });
+    await store.purgeHistory(
+      { botId: historyBotId, threadId: historyThreadId, generations: [4] },
+      historyContext,
+    );
+    await expect(store.read(current, historyContext)).rejects.toBeInstanceOf(IsolationError);
+  });
 });

@@ -1,8 +1,9 @@
-import type { TicketStatus } from "@rakazo/contracts";
+import type { TicketFileDeliveryRequirements, TicketStatus } from "@rakazo/contracts";
 import {
   CommentTicketInput,
   CreateTicketInput,
   isTicketCompletedStatus,
+  TicketFileDeliveryRequirementsSchema,
   TicketStatusSchema,
   UpdateTicketInput,
 } from "@rakazo/contracts";
@@ -160,7 +161,12 @@ export async function getTicket(deps: TicketToolDeps, input: { spaceId: string; 
     ticket: toTicketDto(row, board.ticketPrefix),
     comments: comments.map(toTicketCommentDto),
     ...(row.originKey && ticketReceiptsEnabled()
-      ? { delivery: { previousVersion: row.receiptVersion } }
+      ? {
+          delivery: {
+            previousVersion: row.receiptVersion,
+            ...(row.fileDeliveryRequirements ? { requirements: row.fileDeliveryRequirements } : {}),
+          },
+        }
       : {}),
   };
 }
@@ -175,6 +181,7 @@ export async function createTicket(
     description?: string;
     priority?: string;
     ownerBotId?: string;
+    fileDeliveryRequirements?: unknown;
     origin?: { threadId: string; messageId: string; runId: string; key: string };
   },
 ) {
@@ -185,9 +192,11 @@ export async function createTicket(
   });
   if (!parsed.success) return { error: ticketInputError(parsed.error) };
   const data = parsed.data;
+  const origin = ticketReceiptsEnabled() ? input.origin : undefined;
+  if (data.fileDeliveryRequirements && !origin)
+    return { error: "File-delivery requirements need an eligible original chat receipt." };
   if (!(await ownBotInSpace(deps, input, data.assigneeBotId))) return { error: "Unknown bot." };
   const board = await ensureBoard(deps.prisma, input.spaceId);
-  const origin = ticketReceiptsEnabled() ? input.origin : undefined;
   const result = await deps.prisma.$transaction(async (tx) => {
     if (origin) {
       await tx.$queryRaw`SELECT id FROM boards WHERE id = ${board.id} FOR UPDATE`;
@@ -260,6 +269,9 @@ export async function createTicket(
         title: data.title,
         description: data.description ?? null,
         priority: data.priority,
+        ...(data.fileDeliveryRequirements
+          ? { fileDeliveryRequirements: data.fileDeliveryRequirements }
+          : {}),
         assigneeBotId: data.assigneeBotId,
         createdByBotId: input.botId ?? null,
         createdByUserId: input.userId,
@@ -291,7 +303,14 @@ export async function createTicket(
     });
   return {
     ticket: toTicketDto(row, board.ticketPrefix),
-    ...(origin ? { delivery: { previousVersion: row.receiptVersion } } : {}),
+    ...(origin
+      ? {
+          delivery: {
+            previousVersion: row.receiptVersion,
+            ...(row.fileDeliveryRequirements ? { requirements: row.fileDeliveryRequirements } : {}),
+          },
+        }
+      : {}),
   };
 }
 
@@ -308,12 +327,18 @@ export async function updateTicket(
     status?: string;
     ownerBotId?: string;
     runId?: string;
+    threadId?: string;
+    ownerAuthored?: boolean;
+    expectedRequirementsVersion?: unknown;
+    fileDeliveryRequirements?: unknown;
   },
 ) {
   if (!deps.ticketBoardEnabled) return { error: "Board unavailable." };
   const parsed = UpdateTicketInput.safeParse({ ...input, assigneeBotId: input.ownerBotId });
   if (!parsed.success) return { error: ticketInputError(parsed.error) };
   const data = parsed.data;
+  if (data.fileDeliveryRequirements && !ticketReceiptsEnabled())
+    return { error: "File-delivery requirements are unavailable." };
   if (data.assigneeBotId && !(await ownBotInSpace(deps, input, data.assigneeBotId)))
     return { error: "Unknown bot." };
   const board = await ensureBoard(deps.prisma, input.spaceId);
@@ -323,6 +348,91 @@ export async function updateTicket(
       where: { id: data.id, spaceId: input.spaceId, boardId: board.id },
     });
     if (!current) return null;
+    let requirements: TicketFileDeliveryRequirements | undefined;
+    if (data.fileDeliveryRequirements) {
+      if (
+        !current.originKey ||
+        !current.originThreadId ||
+        !current.originMessageId ||
+        !current.createdByBotId ||
+        current.fileDeliveryRequirements == null
+      ) {
+        return { error: "Only tickets created with file-delivery requirements can revise them." };
+      }
+      if (
+        current.createdByUserId !== input.userId ||
+        (input.botId &&
+          (!input.ownerAuthored ||
+            !input.runId ||
+            input.threadId !== current.originThreadId ||
+            input.botId !== current.createdByBotId))
+      ) {
+        return {
+          error: "Only the ticket creator or its original owner chat can change requirements.",
+        };
+      }
+      const source = await tx.message.findFirst({
+        where: {
+          id: current.originMessageId,
+          threadId: current.originThreadId,
+          role: "user",
+          authorUserId: input.userId,
+          thread: {
+            spaceId: input.spaceId,
+            externalConversationId: null,
+            OR: [
+              {
+                botId: current.createdByBotId,
+                bot: { userId: input.userId, archivedAt: null },
+              },
+              {
+                group: {
+                  spaceId: input.spaceId,
+                  archivedAt: null,
+                  members: {
+                    some: {
+                      botId: current.createdByBotId,
+                      bot: { userId: input.userId, archivedAt: null },
+                    },
+                  },
+                },
+              },
+            ],
+          },
+        },
+        select: { id: true },
+      });
+      if (!source) return { error: "Original request is unavailable." };
+      if (input.botId) {
+        const ownerRun = await tx.run.findFirst({
+          where: {
+            id: input.runId,
+            spaceId: input.spaceId,
+            userId: input.userId,
+            botId: input.botId,
+            threadId: current.originThreadId,
+            OR: [{ ticketId: null }, { ticketId: current.id }],
+            sourceMessage: {
+              threadId: current.originThreadId,
+              role: "user",
+              authorUserId: input.userId,
+            },
+          },
+          select: { id: true },
+        });
+        if (!ownerRun) return { error: "Requirements change does not match its owner execution." };
+      }
+      const saved = TicketFileDeliveryRequirementsSchema.safeParse(
+        current.fileDeliveryRequirements,
+      );
+      if (!saved.success) return { error: "Saved file-delivery requirements are unavailable." };
+      if (saved.data.version !== data.expectedRequirementsVersion)
+        return { error: "Requirements changed. Read ticket_get before revising them." };
+      requirements = {
+        version: saved.data.version + 1,
+        items: data.fileDeliveryRequirements.items,
+      };
+    }
     if (
       input.botId &&
       current.originKey &&
@@ -353,7 +463,17 @@ export async function updateTicket(
       await tx.run.update({ where: { id: input.runId }, data: { ticketId: current.id } });
     }
     const row = await tx.ticket.update({
-      where: { id: current.id },
+      where: {
+        id: current.id,
+        ...(requirements
+          ? {
+              fileDeliveryRequirements: {
+                path: ["version"],
+                equals: data.expectedRequirementsVersion,
+              },
+            }
+          : {}),
+      },
       data: {
         ...(data.title !== undefined ? { title: data.title } : {}),
         ...(data.description !== undefined ? { description: data.description } : {}),
@@ -367,6 +487,9 @@ export async function updateTicket(
                 : null,
             }
           : {}),
+        ...(requirements
+          ? { fileDeliveryRequirements: requirements, status: "review", completedAt: null }
+          : {}),
       },
     });
     const reassigned =
@@ -374,7 +497,7 @@ export async function updateTicket(
     const next =
       current.originKey &&
       ticketReceiptsEnabled() &&
-      reassigned &&
+      (reassigned || requirements) &&
       row.assigneeBotId &&
       row.assigneeBotId !== input.botId
         ? await prepareTicketRun(tx, {
@@ -386,20 +509,32 @@ export async function updateTicket(
     return {
       row,
       reassigned,
+      requirementsChanged: Boolean(requirements),
       preparedRunId: next?.id,
     };
   });
   if (!result) return { error: "Ticket not found." };
-  if (result.error) return { error: result.error };
+  if (result.error !== undefined) return { error: result.error };
   await deps.onTicketChange?.({
     spaceId: input.spaceId,
     boardId: board.id,
     ticketId: result.row.id,
     assigneeBotId: result.row.assigneeBotId,
-    wakeAssignee: result.reassigned && result.row.assigneeBotId !== input.botId,
+    wakeAssignee:
+      (result.reassigned || result.requirementsChanged) && result.row.assigneeBotId !== input.botId,
     preparedRunId: result.preparedRunId,
   });
-  return { ticket: toTicketDto(result.row, board.ticketPrefix) };
+  return {
+    ticket: toTicketDto(result.row, board.ticketPrefix),
+    ...(result.requirementsChanged
+      ? {
+          delivery: {
+            previousVersion: result.row.receiptVersion,
+            requirements: result.row.fileDeliveryRequirements,
+          },
+        }
+      : {}),
+  };
 }
 
 export async function commentTicket(

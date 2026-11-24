@@ -9,11 +9,108 @@ import { userTurnMessageForRun } from "@rakazo/core";
 import type { PrismaClient } from "@rakazo/db";
 import { describe, expect, it, vi } from "vitest";
 import { materializeCurrentTurnFiles } from "../../../packages/adapters/src/thread-artifacts.js";
+import * as subscriptions from "../../../packages/adapters/src/ticket-subscriptions.js";
 import type { MessagingReceipts } from "./messaging-receipts.js";
 import { TeamChatBridge } from "./team-chat-bridge.js";
 import { inboundDeliveryClientNonce, messagingWakeIdempotencyKey } from "./webhook-inbound.js";
 
 describe("team chat bridge", () => {
+  it.each(["queued", "waiting_input", "unknown", "ambiguous"])(
+    "routes the actual external transcript before agent fallback for %s",
+    async (status) => {
+      const conversation = {
+        id: "conversation-1",
+        spaceId: "space-1",
+        userId: "user-1",
+        botId: "source-bot",
+        thread: { id: "external-thread" },
+      };
+      const external = {
+        id: "external-1",
+        providerEventId: "provider-event-1",
+        status: "received",
+        engagementReason: null,
+        threadMessageId: "transcript-1",
+        threadMessage: { id: "transcript-1", seq: 7 },
+        externalConversation: conversation,
+      };
+      const tx = {
+        $queryRaw: vi.fn(async () => []),
+        externalMessage: {
+          findFirst: vi.fn(async () => external),
+          update: vi.fn(async () => external),
+          upsert: vi.fn(async () => external),
+          updateMany: vi.fn(async () => ({ count: 1 })),
+        },
+        externalConversation: { upsert: vi.fn(async () => conversation) },
+        run: { findFirst: vi.fn(async () => ({ id: "ticket-run", status })) },
+      };
+      const prisma = {
+        ...tx,
+        $transaction: vi.fn(async (fn: (client: typeof tx) => unknown) => fn(tx)),
+      } as unknown as PrismaClient;
+      const enqueue = vi.fn(async () => undefined);
+      const routed = vi
+        .spyOn(subscriptions, "routeTicketSourceEventInTransaction")
+        .mockResolvedValue(
+          status === "unknown" || status === "ambiguous"
+            ? { status }
+            : { status: "routed", ticketId: "ticket-1", runId: "ticket-run", duplicate: false },
+        );
+      const bridge = new TeamChatBridge({
+        prisma,
+        ticketBoardEnabled: true,
+        events: { sendUserMessage: vi.fn() },
+        jobs: { enqueue },
+        send: vi.fn(),
+        providerId: "slack",
+        botId: "source-bot",
+      });
+      (bridge as unknown as { target: unknown }).target = { ...conversation, id: "source-bot" };
+      try {
+        const result = await bridge.receive(
+          {
+            eventId: "provider-event-1",
+            workspaceId: "workspace",
+            kind: "mention",
+            conversationKey: "channel-1",
+            conversationId: "channel-1",
+            replyThreadId: null,
+            senderId: "sender",
+            senderName: "Sender",
+            content: "Evidence",
+          },
+          { queueAgent: false },
+        );
+        expect(routed).toHaveBeenCalledWith(tx, {
+          spaceId: "space-1",
+          userId: "user-1",
+          botId: "source-bot",
+          ticketBoardEnabled: true,
+          event: {
+            source: { type: "externalConversation", externalConversationId: "conversation-1" },
+            eventId: "provider-event-1",
+            messageId: "transcript-1",
+            position: 7,
+          },
+        });
+        expect(result.deferred).toBe(status === "unknown" || status === "ambiguous");
+        expect(enqueue).toHaveBeenCalledTimes(status === "queued" ? 1 : 0);
+        if (status === "queued" || status === "waiting_input")
+          expect(tx.externalMessage.update).toHaveBeenCalledWith({
+            where: { id: "external-1" },
+            data: {
+              status: "ignored",
+              engagementReason: "ticket_subscription",
+              nextAttemptAt: null,
+            },
+          });
+      } finally {
+        routed.mockRestore();
+      }
+    },
+  );
+
   it("keeps deferred messages outside reconciliation until routine routing resolves them", async () => {
     const upsert = vi.fn(async ({ create }: { create: Record<string, unknown> }) => ({
       id: "external-deferred",

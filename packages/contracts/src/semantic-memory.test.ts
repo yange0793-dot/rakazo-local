@@ -1,5 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
+  MemoryDerivedSpansSchema,
+  MemorySourceFactSchema,
   SemanticFactCorrectRequestSchema,
   SemanticFactForgetRequestSchema,
   SemanticFactListRequestSchema,
@@ -22,6 +24,34 @@ const fact = {
 };
 
 describe("managed semantic fact contracts", () => {
+  it("keeps derivations optional for legacy content and rejects invalid source/range contracts", () => {
+    const source = {
+      id: "fact-a",
+      revision: 2,
+      botId: "bot-a",
+      scope: "isolated",
+      kind: "durable",
+    };
+    expect(SemanticFactProvenanceSchema.parse({ kind: "manual" })).toEqual({ kind: "manual" });
+    expect(SemanticFactProvenanceSchema.parse({ kind: "run", derivedFrom: [source] })).toEqual({
+      kind: "run",
+      derivedFrom: [source],
+    });
+    expect(MemorySourceFactSchema.safeParse({ ...source, revision: -1 }).success).toBe(false);
+    expect(
+      MemorySourceFactSchema.safeParse({ ...source, kind: "lesson", scope: "shared" }).success,
+    ).toBe(false);
+    expect(MemorySourceFactSchema.safeParse({ ...source, kind: "history" }).success).toBe(false);
+    expect(
+      MemoryDerivedSpansSchema.safeParse([{ start: 1, end: 1, sources: [source] }]).success,
+    ).toBe(false);
+    expect(
+      MemoryDerivedSpansSchema.safeParse([
+        { start: 0, end: 5, sources: [source] },
+        { start: 3, end: 8, sources: [source] },
+      ]).success,
+    ).toBe(false);
+  });
   it("defaults to a bounded topic search and permits deeper scoped recall", () => {
     expect(SemanticMemoryRecallInputSchema.parse({ query: " project " })).toEqual({
       query: "project",
@@ -42,6 +72,74 @@ describe("managed semantic fact contracts", () => {
       expect(SemanticMemoryRecallInputSchema.safeParse(input).success).toBe(false);
     }
   });
+  it("supports lesson discovery and exact revision reads without widening lesson scope", () => {
+    expect(
+      SemanticMemoryRecallInputSchema.parse({
+        query: "部署失败",
+        kind: "lesson",
+      }),
+    ).toEqual({ query: "部署失败", kind: "lesson", limit: 20, scope: "current" });
+    expect(
+      SemanticMemoryRecallInputSchema.parse({
+        id: "lesson-a",
+        expected_revision: 4,
+        kind: "lesson",
+      }),
+    ).toEqual({
+      id: "lesson-a",
+      expected_revision: 4,
+      kind: "lesson",
+      scope: "current",
+    });
+    expect(
+      SemanticMemoryRecallInputSchema.safeParse({
+        id: "lesson-a",
+        expected_revision: 4,
+        kind: "lesson",
+        scope: "shared",
+      }).success,
+    ).toBe(false);
+    expect(
+      SemanticMemoryRecallInputSchema.safeParse({
+        query: "部署",
+        kind: "lesson",
+        scope: "all",
+      }).success,
+    ).toBe(false);
+    expect(
+      SemanticMemoryRecallInputSchema.safeParse({
+        id: "fact-a",
+        expected_revision: 0,
+      }).success,
+    ).toBe(false);
+  });
+
+  it("requires one discovery query or exact citation and keeps caller scope fields host-owned", () => {
+    expect(
+      SemanticMemoryRecallInputSchema.parse({
+        id: "fact-a",
+        expected_revision: 2,
+        scope: "shared",
+      }),
+    ).toEqual({ id: "fact-a", expected_revision: 2, scope: "shared" });
+    for (const input of [
+      {},
+      { id: "fact-a" },
+      { expected_revision: 2 },
+      { id: "  ", expected_revision: 2 },
+      { id: "fact-a", expected_revision: 2.5 },
+      { id: "fact-a", expected_revision: 2, query: "fact" },
+      { id: "fact-a", expected_revision: 2, limit: 1 },
+      { id: "fact-a", expected_revision: 2, scope: "all" },
+      { id: "fact-a", expected_revision: 2, spaceId: "space-other" },
+      { id: "fact-a", expected_revision: 2, botId: "bot-other" },
+      { id: "fact-a", expected_revision: 2, historyGeneration: 0 },
+      { query: "lesson", kind: "durable" },
+    ]) {
+      expect(SemanticMemoryRecallInputSchema.safeParse(input).success).toBe(false);
+    }
+  });
+
   it("preserves source and revision without introducing vendor-specific fields", () => {
     expect(SemanticFactSchema.parse(fact)).toEqual(fact);
   });

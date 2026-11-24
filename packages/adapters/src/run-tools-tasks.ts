@@ -1,4 +1,6 @@
 import { reflectRunJob } from "@rakazo/adapter-kit";
+import { TicketSubscriptionSourceSchema } from "@rakazo/contracts";
+import { cancelTicketSubscription, createTicketSubscription, requireMembership } from "@rakazo/db";
 import {
   desktopGuardApplies,
   desktopProtectionGuardMessage,
@@ -6,6 +8,7 @@ import {
 } from "./desktop-command-guard.js";
 import type { RunContext } from "./run-context.js";
 import { findSkillForRun } from "./run-reflection.js";
+import { loadRunTicketWorkState, saveRunTicketWorkState } from "./run-ticket-state.js";
 import type { ToolHandlers } from "./run-tool-gate.js";
 import {
   cancelScheduleFromTool,
@@ -169,12 +172,15 @@ export const taskTools: ToolHandlers = {
   async ticket_get(ctx, call) {
     const { deps, run } = ctx;
     const { args } = call;
-    return call.finish(
-      await getTicket(deps, {
-        spaceId: run.spaceId,
-        ref: String(args.ref ?? ""),
-      }),
-    );
+    const result = await getTicket(deps, {
+      spaceId: run.spaceId,
+      ref: String(args.ref ?? ""),
+    });
+    if ("ticket" in result && result.ticket.id === run.ticketId) {
+      const workState = await loadRunTicketWorkState(ctx);
+      return call.finish({ ...result, ...(workState ? { workState } : {}) });
+    }
+    return call.finish(result);
   },
   async ticket_create(ctx, call) {
     const { deps, run, bot } = ctx;
@@ -183,6 +189,7 @@ export const taskTools: ToolHandlers = {
       spaceId: run.spaceId,
       botId: bot.id,
       userId: run.userId,
+      fileDeliveryRequirements: args.fileDeliveryRequirements,
       ...(ticketReceiptsEnabled() &&
       ctx.source.ownerAuthoredRun &&
       !ctx.source.channelId &&
@@ -211,6 +218,17 @@ export const taskTools: ToolHandlers = {
   async ticket_update(ctx, call) {
     const { deps, run, bot } = ctx;
     const { args } = call;
+    if (args.workState !== undefined) {
+      if (
+        args.id !== run.ticketId ||
+        Object.keys(args).some((key) => key !== "id" && key !== "workState")
+      )
+        return call.finish({
+          error: "Use only the current ticket id and workState for a state update.",
+        });
+      const workState = await saveRunTicketWorkState(ctx, args.workState);
+      return call.finish("error" in workState ? workState : { workState });
+    }
     if (args.result !== undefined) {
       if (Object.keys(args).some((key) => key !== "id" && key !== "result"))
         return call.finish({ error: "Use only id and result for a delivery." });
@@ -228,12 +246,16 @@ export const taskTools: ToolHandlers = {
       botId: bot.id,
       userId: run.userId,
       runId: run.id,
+      threadId: run.threadId,
+      ownerAuthored: ctx.source.ownerAuthoredRun && !ctx.source.channelId,
       id: String(args.id ?? ""),
       title: args.title !== undefined ? String(args.title) : undefined,
       description: args.description !== undefined ? String(args.description) : undefined,
       priority: args.priority !== undefined ? String(args.priority) : undefined,
       status: args.status !== undefined ? String(args.status) : undefined,
       ownerBotId: args.ownerBotId !== undefined ? String(args.ownerBotId) : undefined,
+      expectedRequirementsVersion: args.expectedRequirementsVersion as number | undefined,
+      fileDeliveryRequirements: args.fileDeliveryRequirements,
     });
     if ("ticket" in updated && args.ownerBotId === bot.id && ticketReceiptsEnabled()) {
       const current = await deps.prisma.run.findUniqueOrThrow({
@@ -256,6 +278,32 @@ export const taskTools: ToolHandlers = {
         body: String(args.body ?? ""),
       }),
     );
+  },
+  async ticket_subscribe(ctx, call) {
+    const { deps, run } = ctx;
+    if (!deps.ticketBoardEnabled) return call.finish({ error: "Board unavailable." });
+    if (!ctx.source.ownerAuthoredRun || ctx.source.channelId || ctx.thread.externalConversationId)
+      return call.finish({ error: "Manage ticket subscriptions from the owner's chat." });
+    const source = TicketSubscriptionSourceSchema.safeParse(call.args.source);
+    if (!source.success) return call.finish({ error: "Choose an existing source conversation." });
+    const actor = await requireMembership(deps.prisma, run.userId, run.spaceId);
+    const subscription = await createTicketSubscription(deps.prisma, actor, {
+      ticketId: String(call.args.id ?? ""),
+      source: source.data,
+    });
+    return call.finish({ subscriptionId: subscription.id });
+  },
+  async ticket_unsubscribe(ctx, call) {
+    const { deps, run } = ctx;
+    if (!deps.ticketBoardEnabled) return call.finish({ error: "Board unavailable." });
+    if (!ctx.source.ownerAuthoredRun || ctx.source.channelId || ctx.thread.externalConversationId)
+      return call.finish({ error: "Manage ticket subscriptions from the owner's chat." });
+    const actor = await requireMembership(deps.prisma, run.userId, run.spaceId);
+    return call.finish({
+      cancelled: await cancelTicketSubscription(deps.prisma, actor, {
+        subscriptionId: String(call.args.subscriptionId ?? ""),
+      }),
+    });
   },
   async schedule_create(ctx, call) {
     const { deps, run, bot, thread } = ctx;

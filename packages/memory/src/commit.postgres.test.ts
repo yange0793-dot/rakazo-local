@@ -29,6 +29,13 @@ describePostgres("memory commits (PostgreSQL)", () => {
       await prisma.$disconnect();
       await db.pool.end();
     };
+    await asSystem(prisma).user.create({
+      data: {
+        id: context.userId,
+        name: "Memory Test User",
+        email: "memory-commit@example.test",
+      },
+    });
     await asSystem(prisma).organization.create({
       data: {
         id: context.spaceId,
@@ -51,12 +58,32 @@ describePostgres("memory commits (PostgreSQL)", () => {
         },
       },
     });
+    await asSystem(prisma).member.create({
+      data: {
+        id: "memory-commit-member",
+        organizationId: context.spaceId,
+        userId: context.userId,
+        role: "owner",
+        createdAt: new Date(),
+      },
+    });
+    await asSystem(prisma).spaceMember.create({
+      data: {
+        id: "memory-commit-space-member",
+        spaceId: context.spaceId,
+        organizationId: context.spaceId,
+        userId: context.userId,
+        role: "owner",
+        createdAt: new Date(),
+      },
+    });
   });
 
   afterAll(async () => {
     if (!prisma) return;
     try {
       await asSystem(prisma).organization.deleteMany({ where: { id: context.spaceId } });
+      await asSystem(prisma).user.deleteMany({ where: { id: context.userId } });
     } finally {
       await close();
     }
@@ -158,15 +185,10 @@ describePostgres("memory commits (PostgreSQL)", () => {
               memoryRevision: {
                 async create({ args, query }) {
                   inserts += 1;
-                  // Make PostgreSQL reject the history row after the document write.
-                  return query({
-                    ...args,
-                    data: {
-                      ...args.data,
-                      document: undefined,
-                      documentId: "missing-memory-document",
-                    },
-                  });
+                  // Keep the real tenant-owned parent, then violate the history revision's
+                  // unique constraint. An invented parent now fails RLS before the FK check.
+                  await query(args);
+                  return query(args);
                 },
               },
             },
@@ -176,7 +198,7 @@ describePostgres("memory commits (PostgreSQL)", () => {
         await expect(
           rejectingStore.commit(request(path, "rejected"), context),
         ).rejects.toMatchObject({
-          code: "P2003",
+          code: "P2002",
         });
         expect(inserts).toBe(1);
         expect(

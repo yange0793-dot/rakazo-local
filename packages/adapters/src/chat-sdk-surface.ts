@@ -241,7 +241,8 @@ export class ChatSdkMessagingSurface implements MessagingSurface {
   platforms(): MessagingPlatformDescriptor[] {
     return [...this.byProvider.values()].map(({ platform }) => ({
       provider: platform.provider,
-      capabilities: platform.capabilities,
+      // Chat SDK post() exposes no stable send key or acceptance lookup.
+      capabilities: { ...platform.capabilities, sendIdempotency: "none" },
       address: platform.address,
     }));
   }
@@ -713,26 +714,50 @@ function chatDedupeKey(adapter: Adapter, messageId: string): string {
 }
 
 /**
- * A failed platform send, classified for the outbox: give up when
- * `permanent`, otherwise retry no sooner than `retryAfterMs` when set.
+ * Only explicit rejection permits a retry. A transport failure may follow
+ * acceptance even when the caller never received a handle.
  */
 export class MessagingSendError extends Error {
   override readonly name = "MessagingSendError";
   readonly permanent: boolean;
   readonly retryAfterMs: number | null;
+  readonly acceptance: "rejected" | "unknown";
 
-  constructor(cause: unknown, options: { permanent: boolean; retryAfterMs: number | null }) {
+  constructor(
+    cause: unknown,
+    options: {
+      permanent: boolean;
+      retryAfterMs: number | null;
+      acceptance?: "rejected" | "unknown";
+    },
+  ) {
     super(cause instanceof Error ? cause.message : String(cause), { cause });
     this.permanent = options.permanent;
     this.retryAfterMs = options.retryAfterMs;
+    this.acceptance =
+      options.acceptance ??
+      (options.permanent || options.retryAfterMs !== null ? "rejected" : "unknown");
   }
 }
 
 function sendError(platform: MessagingPlatform, error: unknown): MessagingSendError {
   // Chat SDK AdapterRateLimitError and Slack's rate-limited error both carry seconds.
-  const seconds = (error as { retryAfter?: unknown } | null)?.retryAfter;
+  const details = error as {
+    retryAfter?: unknown;
+    status?: unknown;
+    name?: unknown;
+    code?: unknown;
+  } | null;
+  const seconds = details?.retryAfter;
+  const permanent = platform.isPermanentSendError?.(error) ?? false;
+  const rateLimited =
+    details?.status === 429 ||
+    details?.name === "AdapterRateLimitError" ||
+    details?.code === "slack_webapi_rate_limited_error" ||
+    (typeof seconds === "number" && seconds >= 0);
   return new MessagingSendError(error, {
-    permanent: platform.isPermanentSendError?.(error) ?? false,
+    permanent,
     retryAfterMs: typeof seconds === "number" && seconds > 0 ? seconds * 1000 : null,
+    acceptance: permanent || rateLimited ? "rejected" : "unknown",
   });
 }

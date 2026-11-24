@@ -30,7 +30,12 @@ const SCOPES = [
 
 export class SlackInstallProvider implements MessagingInstallProvider {
   readonly provider = "slack";
-  readonly capabilities = { direct: true, groups: true, receipt: "reaction" as const };
+  readonly capabilities = {
+    direct: true,
+    groups: true,
+    receipt: "reaction" as const,
+    sendIdempotency: "none" as const,
+  };
   constructor(
     private readonly config: {
       clientId: string;

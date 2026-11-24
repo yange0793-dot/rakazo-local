@@ -45,9 +45,11 @@ Restored messages pass through the normal newest-first whole-result allowance,
 monotonic shortening, stale page/screenshot pruning and context budget. Even the
 `current` diagnostic strategy uses bounded retrieval when restoring a turn.
 Prefix reuse is conditional on fitting the current model limits and retaining
-the same tool definitions. Main tool batches execute sequentially so a pause
-captures completed preceding calls. Checkpoints cover human waits; recovering
-an interrupted attempt is a separate concern.
+the same tool definitions. Main tool batches execute concurrently by default;
+tools requiring ordered effects make their batch sequential. A pause preserves
+completed sibling results, and each tool's audit outcome reflects its own result.
+Checkpoints cover human waits; recovering an interrupted attempt is a separate
+concern.
 
 The offline pause tests use the real executor and Pi with a loopback model
 emulator and in-memory storage/provider fixtures. They assert original call IDs,

@@ -673,6 +673,15 @@ describe("ChatSdkMessagingSurface webhook plumbing", () => {
 });
 
 describe("ChatSdkMessagingSurface outbound", () => {
+  it("declares that Chat SDK cannot dedupe a stable key across sends", async () => {
+    const { surface, adapter } = createSurface();
+    expect(surface.platforms()[0]!.capabilities.sendIdempotency).toBe("none");
+    const request = { threadId: "mock:C1:9", body: "hi", idempotencyKey: "msg:stable" };
+    await surface.sendToThread(request, context);
+    await surface.sendToThread(request, context);
+    expect(adapter.postMessage).toHaveBeenCalledTimes(2);
+  });
+
   it("posts Telegram replies as Markdown", async () => {
     const { surface, adapter } = createSurface({ provider: "telegram" });
     const body = "# Heading\n\n**bold** and [link](https://example.test)";
@@ -782,6 +791,25 @@ describe("ChatSdkMessagingSurface outbound", () => {
   });
 
   it.each([
+    { name: "AdapterRateLimitError" },
+    { status: 429 },
+    { code: "slack_webapi_rate_limited_error" },
+  ])("recognizes rate rejection without retry-after: %j", async (details) => {
+    const error = Object.assign(new Error("rate limited"), details);
+    const { surface } = createSurface(
+      {},
+      {
+        postMessage: vi.fn(async () => {
+          throw error;
+        }),
+      },
+    );
+    await expect(
+      surface.sendToThread({ threadId: "mock:C1:9", body: "hi" }, context),
+    ).rejects.toMatchObject({ acceptance: "rejected", retryAfterMs: null, permanent: false });
+  });
+
+  it.each([
     ["a transient failure", new Error("socket hang up"), false, null],
     [
       "a rate limit",
@@ -804,6 +832,7 @@ describe("ChatSdkMessagingSurface outbound", () => {
       cause: error,
       permanent,
       retryAfterMs,
+      acceptance: permanent || retryAfterMs !== null ? "rejected" : "unknown",
     });
   });
 
@@ -940,7 +969,10 @@ describe("ChatSdkMessagingSurface shape", () => {
     expect(() => new ChatSdkMessagingSurface([])).toThrow(/>=1 platform/);
     const { surface } = createSurface();
     expect(surface.platforms()).toEqual([
-      { provider: "mock", capabilities: { direct: true, groups: true, receipt: "typing" } },
+      {
+        provider: "mock",
+        capabilities: { direct: true, groups: true, receipt: "typing", sendIdempotency: "none" },
+      },
     ]);
     expect(surface.describe().capabilities).toEqual({ providers: ["mock"] });
     expect(providerOfThreadId("mock:C1:9")).toBe("mock");

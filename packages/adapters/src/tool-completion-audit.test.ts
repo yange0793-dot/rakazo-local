@@ -1,6 +1,10 @@
 import { createLogger, createTestSink, installLogger } from "@rakazo/logging";
 import { afterEach, describe, expect, it } from "vitest";
-import { logLoopGuardStop, logToolRefusal } from "./tool-completion-audit.js";
+import {
+  logLoopGuardStop,
+  logToolRefusal,
+  toolCompletionAuditPayload,
+} from "./tool-completion-audit.js";
 import { refusal } from "./tool-refusal.js";
 
 const target = {
@@ -19,6 +23,128 @@ function capture() {
 
 afterEach(() => {
   installLogger(createLogger({ service: "test", level: "off", sinks: [] }));
+});
+
+describe("lesson read audit", () => {
+  const source = { id: "fact-1", revision: 3, botId: "bot-1", scope: "shared", kind: "durable" };
+  const exactResult = {
+    kind: "agent_tool_result",
+    content: [{ type: "text", text: "PRIVATE_BODY SYNTHETIC_SECRET" }],
+    details: {
+      ok: true,
+      operation: "read",
+      kind: "fact",
+      shown: 1,
+      omitted: 0,
+      sourceFact: source,
+    },
+  };
+
+  it("records only source coordinates from a successful complete exact read", () => {
+    const audit = toolCompletionAuditPayload(
+      {
+        name: "recall_memory",
+        executionId: "read-1",
+        durationMs: 1,
+        result: exactResult,
+      },
+      ["SYNTHETIC_SECRET"],
+    );
+    expect(audit.memory).toEqual({
+      kind: "durable",
+      operation: "read",
+      references: [{ id: "fact-1", revision: 3 }],
+      sources: [source],
+      omitted: [],
+    });
+    expect(JSON.stringify(audit)).not.toMatch(/PRIVATE_BODY|SYNTHETIC_SECRET/);
+  });
+
+  it.each([
+    { operation: "recall" },
+    { shown: 0, omitted: 1 },
+    { ok: false },
+    { sourceFact: { ...source, revision: 0 } },
+    { sourceFact: { ...source, content: "PRIVATE_BODY" } },
+    { sourceFact: { ...source, id: "SYNTHETIC_SECRET" } },
+  ])("does not claim authoritative reads for ineligible metadata %j", (details) => {
+    const audit = toolCompletionAuditPayload(
+      {
+        name: "recall_memory",
+        executionId: "read-1",
+        durationMs: 1,
+        result: { ...exactResult, details: { ...exactResult.details, ...details } },
+      },
+      ["SYNTHETIC_SECRET"],
+    );
+    expect(audit.memory).toBeUndefined();
+    expect(JSON.stringify(audit)).not.toMatch(/PRIVATE_BODY|SYNTHETIC_SECRET/);
+  });
+
+  it("does not turn an errored, paused, or empty exact result into an observed source", () => {
+    for (const completion of [
+      { result: exactResult, error: "failed" },
+      { result: exactResult, paused: true },
+      { result: { ...exactResult, content: [] } },
+    ]) {
+      expect(
+        toolCompletionAuditPayload({
+          name: "recall_memory",
+          executionId: "read-1",
+          durationMs: 1,
+          ...completion,
+        }).memory,
+      ).toBeUndefined();
+    }
+  });
+
+  it("retains exact read references without copying lesson contents", () => {
+    const audit = toolCompletionAuditPayload({
+      name: "recall_memory",
+      executionId: "read-1",
+      durationMs: 1,
+      result: {
+        kind: "agent_tool_result",
+        content: [{ type: "text", text: "Private lesson body." }],
+        details: {
+          kind: "lesson",
+          operation: "read",
+          id: "lesson-1",
+          revision: 3,
+          shown: 1,
+        },
+      },
+    });
+    expect(audit.memory).toEqual({
+      kind: "lesson",
+      operation: "read",
+      references: [{ id: "lesson-1", revision: 3 }],
+      omitted: [],
+    });
+    expect(JSON.stringify(audit)).not.toContain("Private lesson body");
+  });
+
+  it("distinguishes discovery and body-budget omission from reading", () => {
+    const audit = toolCompletionAuditPayload({
+      name: "recall_memory",
+      executionId: "recall-1",
+      durationMs: 1,
+      result: {
+        kind: "agent_tool_result",
+        content: [],
+        details: {
+          kind: "lesson",
+          references: [{ id: "lesson-1", revision: 3 }],
+          omitted: [{ id: "lesson-1", revision: 3, reason: "body_budget" }],
+        },
+      },
+    });
+    expect(audit.memory).toMatchObject({
+      operation: "recall",
+      references: [{ id: "lesson-1", revision: 3 }],
+      omitted: ["body_budget"],
+    });
+  });
 });
 
 describe("tool refusal log", () => {

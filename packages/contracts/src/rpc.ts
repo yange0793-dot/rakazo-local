@@ -218,6 +218,7 @@ import {
 } from "./semantic-memory.js";
 import { SettingsScopeSchema, SpaceSettingSchema, settingsScopeInput } from "./settings-scope.js";
 import { SpaceAvailabilitySchema } from "./space-availability.js";
+import { TicketSubscriptionSourceSchema } from "./ticket-subscriptions.js";
 
 const botId = z.object({ botId: Id });
 const groupId = z.object({ groupId: Id });
@@ -332,9 +333,7 @@ export const appContract = {
   health: oc.output(z.object({ ok: z.literal(true), version: z.string() })),
   me: oc.output(MeSchema),
   profile: {
-    updateName: oc
-      .input(z.object({ name: z.string().trim().min(1).max(80) }))
-      .output(MeSchema),
+    updateName: oc.input(z.object({ name: z.string().trim().min(1).max(80) })).output(MeSchema),
   },
   billing: {
     /** Claims an invite code first when one is sent, so the status already reflects it. */
@@ -1046,6 +1045,12 @@ export const appContract = {
     update: oc.input(UpdateTicketInput).output(TicketSchema),
     move: oc.input(MoveTicketInput).output(TicketSchema),
     comment: oc.input(CommentTicketInput).output(TicketCommentSchema),
+    subscribe: oc
+      .input(z.strictObject({ id: Id, source: TicketSubscriptionSourceSchema }))
+      .output(z.object({ subscriptionId: Id })),
+    unsubscribe: oc
+      .input(z.strictObject({ subscriptionId: Id }))
+      .output(z.object({ cancelled: z.boolean() })),
     comments: oc.input(z.object({ ticketId: Id })).output(z.array(TicketCommentSchema)),
   },
   skills: {

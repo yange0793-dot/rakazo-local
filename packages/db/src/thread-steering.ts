@@ -58,6 +58,7 @@ async function claimSteeringOnce(
         id: true,
         spaceId: true,
         userId: true,
+        ticketId: true,
         trigger: true,
         sourceMessage: { select: { blocks: true } },
       },
@@ -86,7 +87,41 @@ async function claimSteeringOnce(
           ? [pendingWhere, { runId: input.runId }]
           : [{ runId: input.runId }],
         message: {
-          threadId: input.threadId,
+          ...(run.ticketId
+            ? {
+                OR: [
+                  { threadId: input.threadId },
+                  {
+                    thread: {
+                      spaceId: run.spaceId,
+                      userId: run.userId,
+                      space: {
+                        deletingAt: null,
+                        memberships: { some: { userId: run.userId } },
+                      },
+                    },
+                    ticketSubscriptionEvents: {
+                      some: {
+                        runId: run.id,
+                        subscription: {
+                          spaceId: run.spaceId,
+                          ticketId: run.ticketId,
+                          ticket: {
+                            createdByUserId: run.userId,
+                            assigneeBotId: input.botId,
+                            assigneeBot: {
+                              userId: run.userId,
+                              spaceId: run.spaceId,
+                              archivedAt: null,
+                            },
+                          },
+                        },
+                      },
+                    },
+                  },
+                ],
+              }
+            : { threadId: input.threadId }),
           // Private follow-ups remain unclaimed for the existing private continuation.
           ...(channelId
             ? { blocks: { array_contains: [{ kind: "channel_message", channelId }] } }
@@ -95,7 +130,9 @@ async function claimSteeringOnce(
               : {}),
         },
       },
-      include: { message: { select: { blocks: true, seq: true } } },
+      include: {
+        message: { select: { blocks: true, seq: true, threadId: true, authorUserId: true } },
+      },
       orderBy: [{ message: { seq: "asc" } }, { id: "asc" }],
     });
     if (steering.length === 0) return [];
@@ -136,7 +173,10 @@ async function claimSteeringOnce(
       );
       return group
         ? ownAddresses.has(`${group.provider}:${group.fromAddress}`)
-        : item.userId === run.userId;
+        : item.originTrigger === "ticket_subscription" ||
+            (item.message.threadId && item.message.threadId !== input.threadId)
+          ? item.message.authorUserId === run.userId
+          : item.userId === run.userId;
     };
     const claimed = steering.map((item) => ({
       id: item.id,
@@ -146,11 +186,13 @@ async function claimSteeringOnce(
       origin:
         item.originTrigger === "webhook"
           ? ("webhook" as const)
-          : sentByRunPerson(item)
-            ? ("user" as const)
-            : item.originTrigger === "messaging"
-              ? ("messaging" as const)
-              : ("member" as const),
+          : item.originTrigger === "ticket_subscription_external"
+            ? ("messaging" as const)
+            : sentByRunPerson(item)
+              ? ("user" as const)
+              : item.originTrigger === "messaging"
+                ? ("messaging" as const)
+                : ("member" as const),
     }));
     await appendEventInTransaction(tx, {
       threadId: input.threadId,

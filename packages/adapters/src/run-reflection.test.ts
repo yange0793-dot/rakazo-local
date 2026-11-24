@@ -9,7 +9,13 @@ import {
 import { createLogger, installLogger } from "@rakazo/logging";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { ReflectionLessonStore } from "./run-reflection.js";
-import { parseReflection, reflectRun, verifyLessonEvidence } from "./run-reflection.js";
+import {
+  observedMemorySources,
+  parseReflection,
+  reflectRun,
+  verifyLessonEvidence,
+} from "./run-reflection.js";
+import { toolCompletionAuditPayload } from "./tool-completion-audit.js";
 
 vi.mock("@rakazo/db", async (original) => ({
   ...(await original<typeof Db>()),
@@ -92,6 +98,7 @@ type HarnessOptions = {
   steering?: Array<{ id: string; text: string }>;
   denials?: Array<{ kind: string; reviewDecision: string | null; reviewReason: string | null }>;
   toolEvents?: Array<{ type: string; payload: unknown }>;
+  memoryEvents?: Array<{ seq: number; payload: unknown }>;
   savedLessons?: Array<{ id: string; revision: number; content: string; updatedAt: string }>;
 };
 
@@ -236,21 +243,41 @@ function harness(options: HarnessOptions = {}) {
       ),
     },
     event: {
-      findMany: vi.fn(async ({ where }: { where: { type: unknown } }) =>
-        where.type === "run.steering.claimed"
-          ? [{ payload: { userMessageIds: (options.steering ?? []).map(({ id }) => id) } }]
-          : (options.toolEvents ?? [
-              { type: "agent.tool.called", payload: { name: "web_search", executionId: "call-1" } },
-              {
-                type: "agent.tool.completed",
-                payload: {
-                  name: "web_search",
-                  executionId: "call-1",
-                  durationMs: 1200,
-                  outcome: "succeeded",
-                },
-              },
-            ]),
+      findMany: vi.fn(
+        async ({
+          where,
+          take,
+        }: {
+          where: { type: unknown; seq?: { lt: number } };
+          take?: number;
+        }) =>
+          where.type === "run.steering.claimed"
+            ? [{ payload: { userMessageIds: (options.steering ?? []).map(({ id }) => id) } }]
+            : where.type === "agent.tool.completed"
+              ? (
+                  options.memoryEvents ??
+                  (options.toolEvents ?? []).map((event, index) => ({
+                    seq: 1000 - index,
+                    payload: event.payload,
+                  }))
+                )
+                  .filter((event) => where.seq === undefined || event.seq < where.seq.lt)
+                  .slice(0, take)
+              : (options.toolEvents ?? [
+                  {
+                    type: "agent.tool.called",
+                    payload: { name: "web_search", executionId: "call-1" },
+                  },
+                  {
+                    type: "agent.tool.completed",
+                    payload: {
+                      name: "web_search",
+                      executionId: "call-1",
+                      durationMs: 1200,
+                      outcome: "succeeded",
+                    },
+                  },
+                ]),
       ),
     },
     externalEffect: { findMany: vi.fn(async () => options.denials ?? []) },
@@ -589,6 +616,173 @@ describe("reflectRun", () => {
     );
   });
 
+  it("binds audited exact reads to saved lessons and excludes the replacement's own source", async () => {
+    const source = { id: "fact-1", revision: 3, botId: "bot-1", scope: "shared", kind: "durable" };
+    const oldLesson = { ...source, id: "lesson-9", kind: "lesson", scope: "isolated", revision: 4 };
+    const audit = (sourceFact: typeof source) =>
+      toolCompletionAuditPayload({
+        name: "recall_memory",
+        executionId: sourceFact.id,
+        durationMs: 1,
+        result: {
+          kind: "agent_tool_result",
+          content: [{ type: "text", text: "PRIVATE_FACT_BODY" }],
+          details: {
+            ok: true,
+            operation: "read",
+            kind: sourceFact.kind,
+            shown: 1,
+            omitted: 0,
+            sourceFact,
+          },
+        },
+      });
+    const h = harness({
+      output: JSON.stringify({
+        lessons: [{ ...LESSON, replaces: { id: "lesson-9", revision: 4 } }],
+      }),
+      toolEvents: failedToolEvents(),
+      memoryEvents: [
+        { seq: 10, payload: audit(source) },
+        { seq: 9, payload: audit(oldLesson) },
+        { seq: 8, payload: audit({ ...source, botId: "bot-other" }) },
+        {
+          seq: 7,
+          payload: {
+            ...audit(source),
+            memory: { operation: "recall", sources: [{ ...source, id: "candidate" }] },
+          },
+        },
+      ],
+    });
+    await reflectRun(h.deps, { runId: "run-1", auto: true });
+    expect(h.saveLesson).toHaveBeenCalledWith(
+      expect.objectContaining({
+        provenance: expect.objectContaining({ derivedFrom: [source] }),
+        replaces: { id: "lesson-9", expectedRevision: 4 },
+      }),
+      expect.anything(),
+    );
+    expect(JSON.stringify(h.saveLesson.mock.calls)).not.toContain("PRIVATE_FACT_BODY");
+  });
+
+  it("retains host read sources on a lesson draft through the message contract", async () => {
+    const source = { id: "fact-1", revision: 3, botId: "bot-1", scope: "shared", kind: "durable" };
+    const h = harness({
+      output: JSON.stringify({ lessons: [LESSON] }),
+      tainted: true,
+      toolEvents: failedToolEvents(),
+      memoryEvents: [
+        {
+          seq: 10,
+          payload: {
+            name: "recall_memory",
+            outcome: "succeeded",
+            memory: { operation: "read", sources: [source] },
+          },
+        },
+      ],
+    });
+    await reflectRun(h.deps, { runId: "run-1", auto: true });
+    const [, card] = vi
+      .mocked(createThreadMessageInTransaction)
+      .mock.calls.find(([, input]) => input.clientNonce?.startsWith("reflect-lesson:"))!;
+    expect(MessageBlock.parse(card.blocks[0])).toMatchObject({
+      kind: "lesson_draft",
+      derivedFrom: [source],
+    });
+  });
+
+  it("pages decrypted completion metadata so early reads survive beyond the tool digest tail", async () => {
+    const source = {
+      id: "history-1",
+      revision: 3,
+      botId: "bot-1",
+      scope: "isolated",
+      kind: "history",
+      threadId: "thread-1",
+      historyGeneration: 2,
+    };
+    const memoryEvents = Array.from({ length: 200 }, (_, index) => ({
+      seq: 1000 - index,
+      payload: { name: "shell", outcome: "succeeded" } as unknown,
+    }));
+    memoryEvents.push({
+      seq: 800,
+      payload: {
+        name: "recall_memory",
+        outcome: "succeeded",
+        memory: { operation: "read", sources: [source] },
+      },
+    });
+    const h = harness({
+      output: JSON.stringify({ lessons: [LESSON] }),
+      toolEvents: failedToolEvents(),
+      memoryEvents,
+    });
+    await reflectRun(h.deps, { runId: "run-1", auto: true });
+    expect(h.saveLesson).toHaveBeenCalledWith(
+      expect.objectContaining({
+        provenance: expect.objectContaining({ derivedFrom: [source] }),
+      }),
+      expect.anything(),
+    );
+    expect(h.prisma.event.findMany).toHaveBeenCalledWith({
+      where: {
+        runId: "run-1",
+        spaceId: "space-1",
+        botId: "bot-1",
+        threadId: "thread-1",
+        type: "agent.tool.completed",
+        seq: { lt: 801 },
+      },
+      orderBy: { seq: "desc" },
+      take: 200,
+      select: { seq: true, payload: true },
+    });
+  });
+
+  it("skips lessons when bounded dependency scanning cannot retain every observed source", async () => {
+    const h = harness({
+      output: JSON.stringify({ lessons: [LESSON] }),
+      toolEvents: failedToolEvents(),
+      memoryEvents: Array.from({ length: 65 }, (_, index) => ({
+        seq: 1000 - index,
+        payload: {
+          name: "recall_memory",
+          outcome: "succeeded",
+          memory: {
+            operation: "read",
+            sources: [
+              {
+                id: `fact-${index}`,
+                revision: 1,
+                botId: "bot-1",
+                scope: "isolated",
+                kind: "durable",
+              },
+            ],
+          },
+        },
+      })),
+    });
+    await reflectRun(h.deps, { runId: "run-1", auto: true });
+    expect(h.saveLesson).not.toHaveBeenCalled();
+  });
+
+  it("reports incomplete recovery when the completion page bound is exhausted", async () => {
+    const h = harness({
+      memoryEvents: Array.from({ length: 2000 }, (_, index) => ({
+        seq: 5000 - index,
+        payload: { name: "shell", outcome: "succeeded" },
+      })),
+    });
+    expect(await observedMemorySources(h.deps.prisma, RUN, new AbortController().signal)).toEqual({
+      sources: [],
+      complete: false,
+    });
+    expect(h.prisma.event.findMany).toHaveBeenCalledTimes(10);
+  });
   it("leaves a card instead of a lesson when the run read outside content", async () => {
     const h = harness({
       output: JSON.stringify({

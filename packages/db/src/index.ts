@@ -75,6 +75,8 @@ export {
   listClaimedUserSteering,
 } from "./thread-steering.js";
 export * from "./thread-takeover.js";
+export * from "./ticket-subscriptions.js";
+export * from "./ticket-work-state.js";
 export * from "./transaction-retry.js";
 export * from "./unread-inbox-chats.js";
 export * from "./usage.js";

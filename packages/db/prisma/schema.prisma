@@ -448,6 +448,7 @@ model Space {
   agentSecrets                AgentSecret[]
   board                       Board?
   tickets                     Ticket[]
+  ticketSubscriptions         TicketSubscription[]
   ticketComments              TicketComment[]
   agentSkillSpaces            AgentSkillSpace[]
   mcpServerSpaces             McpServerSpace[]
@@ -917,6 +918,7 @@ model Thread {
   runs                        Run[]
   routines                    Routine[]
   originTickets               Ticket[]   @relation("TicketOriginThread")
+  ticketSubscriptions         TicketSubscription[]
   archiveProgress             MemoryArchiveProgress?
 
   @@index([spaceId])
@@ -968,6 +970,7 @@ model Message {
   sourceRuns            Run[]             @relation("RunSourceMessage")
   externalTranscriptFor  ExternalMessage?
   steeringMessages SteeringMessage[]
+  ticketSubscriptionEvents TicketSubscriptionEvent[]
   createdAt        DateTime  @default(now())
 
   @@unique([threadId, seq])
@@ -1079,6 +1082,7 @@ model Run {
   externalMessage      ExternalMessage?
   lessonUsages         LessonUsage[]
   taughtSkillRevisions  RunTaughtSkillRevision[]
+  ticketSubscriptionEvents TicketSubscriptionEvent[]
 
   @@unique([spaceId, clientNonce])
   @@index([status, wakeAt])
@@ -1606,6 +1610,7 @@ model MemoryDocument {
   scope     String
   path      String
   content   String
+  derivations Json?
   revision  Int              @default(1)
   createdAt DateTime         @default(now())
   updatedAt DateTime         @updatedAt
@@ -2265,6 +2270,11 @@ model MessagingOutbound {
   threadId        String?
   body            String
   status          String    @default("pending")
+  /// Null preserves legacy rows; sent alone is not provider confirmation.
+  deliveryState   String?
+  /// CAS token for a claim that has not yet started a provider send.
+  claimedAt       DateTime?
+  confirmedAt     DateTime?
   attempts        Int       @default(0)
   nextAttemptAt   DateTime?
   providerHandle  String?
@@ -2273,6 +2283,7 @@ model MessagingOutbound {
   updatedAt       DateTime  @updatedAt
 
   @@index([status, nextAttemptAt])
+  @@index([deliveryState, claimedAt])
   @@map("messaging_outbound")
 }
 
@@ -2355,6 +2366,7 @@ model ExternalConversation {
   userId                   String
   thread                   Thread?
   messages                 ExternalMessage[]
+  ticketSubscriptions      TicketSubscription[]
   createdAt                DateTime          @default(now())
   updatedAt                DateTime          @updatedAt
 
@@ -2466,6 +2478,10 @@ model Ticket {
   originRun       Run?      @relation("TicketOriginRun", fields: [originRunId], references: [id], onDelete: SetNull)
   executions      Run[]     @relation("TicketExecutions")
   receiptVersion  Int       @default(0)
+  fileDeliveryRequirements Json?
+  workState      Json?
+  workStateVersion Int @default(0)
+  subscriptions TicketSubscription[]
 
   @@index([originThreadId, updatedAt])
 
@@ -2473,6 +2489,45 @@ model Ticket {
   @@index([spaceId, status])
   @@index([boardId, status])
   @@map("tickets")
+}
+
+model TicketSubscription {
+  id                       String @id @default(cuid())
+  ticketId                 String
+  ticket                   Ticket @relation(fields: [ticketId], references: [id], onDelete: Cascade)
+  spaceId                  String
+  space                    Space @relation(fields: [spaceId], references: [id], onDelete: Cascade)
+  threadId                 String?
+  thread                   Thread? @relation(fields: [threadId], references: [id], onDelete: Cascade)
+  externalConversationId   String?
+  externalConversation     ExternalConversation? @relation(fields: [externalConversationId], references: [id], onDelete: Cascade)
+  active                   Boolean @default(true)
+  lastProcessedPosition    Int @default(0)
+  createdAt                DateTime @default(now())
+  updatedAt                DateTime @updatedAt
+  events                   TicketSubscriptionEvent[]
+
+  @@index([ticketId, active])
+  @@index([threadId, active])
+  @@index([externalConversationId, active])
+  @@map("ticket_subscriptions")
+}
+
+model TicketSubscriptionEvent {
+  id             String @id @default(cuid())
+  subscriptionId String
+  subscription   TicketSubscription @relation(fields: [subscriptionId], references: [id], onDelete: Cascade)
+  eventId        String
+  messageId      String?
+  message        Message? @relation(fields: [messageId], references: [id], onDelete: Cascade)
+  position       Int
+  runId          String?
+  run            Run? @relation(fields: [runId], references: [id], onDelete: SetNull)
+  createdAt      DateTime @default(now())
+
+  @@unique([subscriptionId, eventId])
+  @@index([subscriptionId, position])
+  @@map("ticket_subscription_events")
 }
 
 model TicketComment {

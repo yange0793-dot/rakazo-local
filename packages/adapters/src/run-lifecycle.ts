@@ -28,7 +28,11 @@ import type { ExecutorDeps } from "./executor-deps.js";
 import type { RunComputerUseState, RunLeaseState } from "./run-context.js";
 import { notifyRun } from "./run-notifications.js";
 import type { TakeoverResumeCheckpoint } from "./takeover-resume.js";
-import { continueRunClaimFence, TAKEOVER_RESUME_CHECKPOINTS } from "./takeover-resume.js";
+import {
+  continueRunClaimFence,
+  RESUMABLE_TAKEOVER_WHERE,
+  TAKEOVER_RESUME_CHECKPOINTS,
+} from "./takeover-resume.js";
 
 /**
  * Avoid an expensive remote workspace export when a turn never touched the computer. A failed
@@ -467,7 +471,9 @@ export async function claimRun(
             ...continueRunClaimFence(run),
             AND: [{ OR: [{ wakeAt: null }, { wakeAt: { lte: now } }] }],
             OR: [
-              { status: { in: ["queued", "waiting_input", "waiting_takeover"] } },
+              // Answer transactions queue input waits; a stale wake cannot answer them.
+              { status: "queued" },
+              RESUMABLE_TAKEOVER_WHERE,
               {
                 status: { in: ["leased", "running"] },
                 leaseExpiresAt: { lte: now },

@@ -76,14 +76,20 @@ describe("takeoverContinuePlan", () => {
 });
 
 describe("continueRunClaimFence", () => {
-  it("pins the claim to the observed status and checkpoint", () => {
-    expect(continueRunClaimFence({ status: "waiting_takeover", checkpoint: null })).toEqual({
+  it("pins the claim to the observed attempt, status and checkpoint", () => {
+    expect(
+      continueRunClaimFence({ status: "waiting_takeover", checkpoint: null, leaseFence: 3 }),
+    ).toEqual({
       status: "waiting_takeover",
       checkpoint: null,
+      leaseFence: 3,
     });
-    expect(continueRunClaimFence({ status: "queued", checkpoint: "takeover" })).toEqual({
+    expect(
+      continueRunClaimFence({ status: "queued", checkpoint: "takeover", leaseFence: 4 }),
+    ).toEqual({
       status: "queued",
       checkpoint: "takeover",
+      leaseFence: 4,
     });
   });
 });

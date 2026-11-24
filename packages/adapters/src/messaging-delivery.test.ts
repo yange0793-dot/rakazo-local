@@ -1,4 +1,4 @@
-import type { AdapterContext, MessagingSurface } from "@rakazo/adapter-kit";
+import type { AdapterContext, MessagingSendRequest, MessagingSurface } from "@rakazo/adapter-kit";
 import type { PrismaClient } from "@rakazo/db";
 import { SpaceDeletionInProgressError } from "@rakazo/db";
 import { afterEach, describe, expect, it, vi } from "vitest";
@@ -7,6 +7,7 @@ import type { MessagingDeliveryDeps } from "./messaging-delivery.js";
 import {
   applyMessagingOutboundStatus,
   deliverMessagingOutbound,
+  MESSAGING_CLAIM_TIMEOUT_MS,
   MESSAGING_DM_OUTBOUND_CAP,
   MESSAGING_OUTBOUND_MAX_ATTEMPTS,
   mirrorMessagingOutbound,
@@ -36,11 +37,19 @@ const identity = {
 
 const messagingRun = {
   id: "run-1",
+  status: "completed",
   botId: "bot-1",
   userId: "user-1",
   trigger: "messaging",
   sourceMessage: { blocks: [{ kind: "text", text: "hi" }] },
 };
+
+const rejectedSend = () =>
+  new MessagingSendError(new Error("provider rejected before acceptance"), {
+    permanent: false,
+    retryAfterMs: null,
+    acceptance: "rejected",
+  });
 
 type OutboundRowFilter = Record<string, unknown>;
 
@@ -73,9 +82,12 @@ function matchesWhere(row: Record<string, unknown>, where: OutboundRowFilter): b
     if (key === "updatedAt" && row[key] === undefined)
       return compareBound(new Date(), (value as { gt: unknown }).gt, true);
     if (value !== null && typeof value === "object") {
-      const bound = value as { lt?: unknown; gt?: unknown };
+      const bound = value as { lt?: unknown; gt?: unknown; lte?: unknown; in?: unknown[] };
       if (bound.lt !== undefined) return compareBound(row[key], bound.lt, false);
       if (bound.gt !== undefined) return compareBound(row[key], bound.gt, true);
+      if (bound.lte instanceof Date)
+        return row[key] instanceof Date && (row[key] as Date).getTime() <= bound.lte.getTime();
+      if (bound.in) return bound.in.includes(row[key]);
       return false;
     }
     // Prisma's null means IS NULL; a mock row without the field counts too.
@@ -93,7 +105,9 @@ function findOutboundRow(rows: Array<Record<string, unknown>>, where: OutboundRo
 }
 
 function createFakeSurface(sendError?: Error) {
-  const sendToThread = vi.fn(async () => ({ handle: "handle-out-1" }));
+  const sendToThread = vi.fn(async (_request: MessagingSendRequest, _context: AdapterContext) => ({
+    handle: "handle-out-1",
+  }));
   if (sendError) sendToThread.mockRejectedValue(sendError);
   const openDirectThread = vi.fn(
     async (_provider: string, address: string) => `sendblue:opened:${address}`,
@@ -263,18 +277,10 @@ function createDeps(overrides: {
         return row;
       }),
       updateMany: vi.fn(
-        async ({
-          where,
-          data,
-        }: {
-          where: { id?: string; providerHandle?: string; status?: string };
-          data: Record<string, unknown>;
-        }) => {
+        async ({ where, data }: { where: OutboundRowFilter; data: Record<string, unknown> }) => {
           let count = 0;
           for (const row of rows) {
-            if (where.id && row.id !== where.id) continue;
-            if (where.providerHandle && row.providerHandle !== where.providerHandle) continue;
-            if (where.status && row.status !== where.status) continue;
+            if (!matchesWhere(row, where)) continue;
             Object.assign(row, data);
             count += 1;
           }
@@ -307,7 +313,7 @@ describe("deliverMessagingOutbound", () => {
     await deliverMessagingOutbound(deps, { runId: "run-1" }, context);
 
     expect(deps.sendToThread).toHaveBeenCalledWith(
-      { threadId: "sendblue:dm-1", body: "Hello from your bot" },
+      { threadId: "sendblue:dm-1", body: "Hello from your bot", idempotencyKey: "msg:m-1" },
       context,
     );
     expect(deps.rows).toEqual([
@@ -324,7 +330,7 @@ describe("deliverMessagingOutbound", () => {
       expect.objectContaining({ data: { outboundSinceInbound: { increment: 1 } } }),
     );
     expect(deps.prisma.run.updateMany).toHaveBeenCalledWith({
-      where: { id: "run-1", trigger: "messaging" },
+      where: { id: "run-1", trigger: "messaging", status: "completed", messagingMirroredAt: null },
       data: { messagingMirroredAt: expect.any(Date) },
     });
   });
@@ -344,7 +350,11 @@ describe("deliverMessagingOutbound", () => {
     await deliverMessagingOutbound(deps, { runId: "run-1" }, context);
 
     expect(deps.sendToThread).toHaveBeenCalledWith(
-      { threadId: "sendblue:dm-1", body: "I made a Test dashboard for you." },
+      {
+        threadId: "sendblue:dm-1",
+        body: "I made a Test dashboard for you.",
+        idempotencyKey: "msg:m-1",
+      },
       context,
     );
   });
@@ -416,12 +426,12 @@ describe("deliverMessagingOutbound", () => {
     });
     expect(deps.sendToThread).toHaveBeenNthCalledWith(
       1,
-      { threadId: "sendblue:opened:+15551234567", body: "first" },
+      { threadId: "sendblue:opened:+15551234567", body: "first", idempotencyKey: "msg:m-1" },
       context,
     );
     expect(deps.sendToThread).toHaveBeenNthCalledWith(
       2,
-      { threadId: "sendblue:opened:+15551234567", body: "second" },
+      { threadId: "sendblue:opened:+15551234567", body: "second", idempotencyKey: "msg:m-2" },
       context,
     );
   });
@@ -525,7 +535,7 @@ describe("deliverMessagingOutbound", () => {
     const deps = createDeps({ run: { ...messagingRun, trigger: "bot_message" } });
     await deliverMessagingOutbound(deps, { runId: "run-1" }, context);
     expect(deps.sendToThread).toHaveBeenCalledWith(
-      { threadId: "sendblue:dm-1", body: "Hello from your bot" },
+      { threadId: "sendblue:dm-1", body: "Hello from your bot", idempotencyKey: "msg:m-1" },
       context,
     );
   });
@@ -568,8 +578,8 @@ describe("deliverMessagingOutbound", () => {
     ]);
   });
 
-  it("returns a transient send failure to pending and schedules a delayed retry", async () => {
-    const deps = createDeps({ sendError: new Error("messaging provider 500") });
+  it("returns an explicit temporary rejection to pending and schedules a delayed retry", async () => {
+    const deps = createDeps({ sendError: rejectedSend() });
     await deliverMessagingOutbound(deps, { runId: "run-1" }, context);
 
     expect(deps.rows).toEqual([
@@ -627,7 +637,7 @@ describe("deliverMessagingOutbound", () => {
     await deliverMessagingOutbound(deps, {}, context);
 
     expect(deps.sendToThread).toHaveBeenCalledWith(
-      { threadId: "sendblue:dm-1", body: "pending earlier" },
+      { threadId: "sendblue:dm-1", body: "pending earlier", idempotencyKey: "invite:ch-1:mi-1" },
       context,
     );
     expect(deps.rows[0]).toEqual(expect.objectContaining({ status: "sent" }));
@@ -795,6 +805,7 @@ describe("deliverMessagingOutbound", () => {
       {
         threadId: "sendblue:dm-1",
         body: "wants to connect. Reply YES to allow, NO to decline.",
+        idempotencyKey: "connect:bot-1:bot-9",
       },
       context,
     );
@@ -856,7 +867,7 @@ describe("deliverMessagingOutbound", () => {
     expect(deps.prisma.messagingIdentity.update).not.toHaveBeenCalled();
   });
 
-  it("does not re-queue a connect invite after a delivery transaction timeout", async () => {
+  it("retries a connect invite after a pre-send authorization transaction timeout", async () => {
     const deps = createDeps({
       run: null,
       connectionStatus: "pending",
@@ -886,8 +897,10 @@ describe("deliverMessagingOutbound", () => {
     await deliverMessagingOutbound(deps, {}, context);
 
     expect(deps.sendToThread).not.toHaveBeenCalled();
-    expect(deps.rows[0]).toEqual(expect.objectContaining({ status: "sent" }));
-    expect(deps.jobs.enqueue).not.toHaveBeenCalled();
+    expect(deps.rows[0]).toEqual(
+      expect.objectContaining({ status: "pending", deliveryState: "retryable" }),
+    );
+    expect(deps.jobs.enqueue).toHaveBeenCalledOnce();
   });
 });
 
@@ -902,7 +915,7 @@ describe("applyMessagingOutboundStatus", () => {
     });
     expect(deps.prisma.messagingOutbound.updateMany).toHaveBeenCalledWith({
       where: { providerHandle: "h-1" },
-      data: { status: "failed" },
+      data: { status: "failed", deliveryState: "rejected" },
     });
 
     await applyMessagingOutboundStatus(deps.prisma, {
@@ -913,7 +926,7 @@ describe("applyMessagingOutboundStatus", () => {
     });
     expect(deps.prisma.messagingOutbound.updateMany).toHaveBeenCalledWith({
       where: { providerHandle: "h-2" },
-      data: { status: "sent" },
+      data: { status: "sent", deliveryState: "accepted", confirmedAt: expect.any(Date) },
     });
 
     await applyMessagingOutboundStatus(deps.prisma, {
@@ -942,6 +955,7 @@ function createChannelDeps(
 ) {
   const text = overrides.text ?? "found it";
   const channelRun = {
+    status: "completed",
     id: "run-1",
     botId: "bot-1",
     trigger: "messaging",
@@ -1093,18 +1107,15 @@ function createChannelDeps(
         if (row) Object.assign(row, data);
         return row;
       }),
-      updateMany: vi.fn(
-        async ({ where, data }: { where: { id?: string; status?: string }; data: unknown }) => {
-          let count = 0;
-          for (const row of rows) {
-            if (where.id && row.id !== where.id) continue;
-            if (where.status && row.status !== where.status) continue;
-            Object.assign(row, data);
-            count += 1;
-          }
-          return { count };
-        },
-      ),
+      updateMany: vi.fn(async ({ where, data }: { where: OutboundRowFilter; data: unknown }) => {
+        let count = 0;
+        for (const row of rows) {
+          if (!matchesWhere(row, where)) continue;
+          Object.assign(row, data);
+          count += 1;
+        }
+        return { count };
+      }),
     },
     user: {
       findUnique: vi.fn(async ({ where }: { where: { id: string } }) => ({
@@ -1179,7 +1190,11 @@ describe("deliverMessagingOutbound channel runs", () => {
     });
     await deliverMessagingOutbound(deps, { runId: "run-1" }, context);
     expect(deps.sendToThread).toHaveBeenCalledWith(
-      { threadId: "sendblue:grp-1", body: "Alice's agent: Public update" },
+      {
+        threadId: "sendblue:grp-1",
+        body: "Alice's agent: Public update",
+        idempotencyKey: "msg:reply-1",
+      },
       context,
     );
   });
@@ -1189,7 +1204,7 @@ describe("deliverMessagingOutbound channel runs", () => {
     await deliverMessagingOutbound(deps, { runId: "run-1" }, context);
 
     expect(deps.sendToThread).toHaveBeenCalledWith(
-      { threadId: "sendblue:grp-1", body: "Alice's agent: found it" },
+      { threadId: "sendblue:grp-1", body: "Alice's agent: found it", idempotencyKey: "msg:m-1" },
       context,
     );
     expect(deps.rows).toEqual([
@@ -1237,7 +1252,11 @@ describe("deliverMessagingOutbound channel runs", () => {
     expect(deps.rows.map((row) => row.body).join("")).toContain("TAIL-MARK");
     expect(deps.rows.map((row) => row.status)).toEqual(["sent", "sent"]);
     expect(deps.sendToThread.mock.calls.map((call) => (call as unknown[])[0])).toEqual(
-      deps.rows.map((row) => ({ threadId: "sendblue:grp-1", body: row.body })),
+      deps.rows.map((row) => ({
+        threadId: "sendblue:grp-1",
+        body: row.body,
+        idempotencyKey: row.idempotencyKey,
+      })),
     );
   });
 
@@ -1410,7 +1429,7 @@ describe("deliverMessagingOutbound transient failure retry", () => {
   it("marks the row failed only once the attempt budget is exhausted", async () => {
     const deps = createDeps({
       run: null,
-      sendError: new Error("messaging provider 500"),
+      sendError: rejectedSend(),
       outboundRows: [
         {
           id: "out-9",
@@ -1436,7 +1455,7 @@ describe("deliverMessagingOutbound transient failure retry", () => {
 describe("deliverMessagingOutbound retry enqueue failure", () => {
   it("propagates the enqueue failure so the job queue retries the drain", async () => {
     const deps = createDeps({});
-    deps.sendToThread.mockRejectedValueOnce(new Error("messaging provider 500"));
+    deps.sendToThread.mockRejectedValueOnce(rejectedSend());
     deps.jobs.enqueue.mockRejectedValueOnce(new Error("queue down"));
 
     // A swallowed enqueue failure would strand the row in pending forever:
@@ -1527,7 +1546,7 @@ describe("deliverMessagingOutbound conversation order", () => {
     });
     deps.sendToThread
       .mockResolvedValueOnce({ handle: "wamid.1" })
-      .mockRejectedValueOnce(new Error("WhatsApp API error"));
+      .mockRejectedValueOnce(rejectedSend());
     await deliverMessagingOutbound(deps, { runId: "run-1" }, context);
 
     // The third part waits behind the failed second one.
@@ -1538,9 +1557,10 @@ describe("deliverMessagingOutbound conversation order", () => {
     await deliverMessagingOutbound(deps, { runId: "run-1" }, context);
 
     expect(deps.sendToThread.mock.calls.map((call) => (call as unknown[])[0])).toEqual(
-      [part("a"), part("b"), part("b"), part("c")].map((body) => ({
+      [part("a"), part("b"), part("b"), part("c")].map((body, index) => ({
         threadId: "whatsapp:p:1",
         body,
+        idempotencyKey: ["msg:m-1", "msg:m-1:2", "msg:m-1:2", "msg:m-1:3"][index],
       })),
     );
     expect(deps.rows.map((row) => row.status)).toEqual(["sent", "sent", "sent"]);
@@ -1548,7 +1568,7 @@ describe("deliverMessagingOutbound conversation order", () => {
 
   it.each([
     ["in flight in another drain", "sent", new Date(), false],
-    ["abandoned mid-send long ago", "sent", new Date(Date.now() - 10 * 60_000), true],
+    ["abandoned mid-send long ago", "sent", new Date(Date.now() - 10 * 60_000), false],
     ["permanently failed", "failed", new Date(), true],
   ] as const)(
     "a later part whose first part is %s is sent=%s",
@@ -1609,7 +1629,7 @@ describe("deliverMessagingOutbound conversation order", () => {
     await deliverMessagingOutbound(deps, {}, context);
 
     expect(deps.sendToThread).toHaveBeenCalledExactlyOnceWith(
-      { threadId: "sendblue:grp", body: "elsewhere" },
+      { threadId: "sendblue:grp", body: "elsewhere", idempotencyKey: "msg:out-3" },
       context,
     );
     expect(deps.rows.map((row) => row.status)).toEqual(["pending", "pending", "sent"]);
@@ -1666,13 +1686,13 @@ describe("WhatsApp rendered outbound delivery", () => {
     expect(sends).toHaveLength(2);
     expect(sends.every(intact)).toBe(true);
     expect(sends.join(" ")).toContain("😀zzz");
-    expect(deps.rows.map((row) => row.status)).toEqual(["sent", "pending"]);
+    expect(deps.rows.map((row) => row.deliveryState)).toEqual(["accepted", "unknown"]);
 
     deps.rows[1]!.nextAttemptAt = new Date(Date.now() - 1);
     await run();
 
-    expect(sends.slice(2)).toEqual([sends[1]]);
-    expect(deps.rows.map((row) => row.status)).toEqual(["sent", "sent"]);
+    expect(sends.slice(2)).toEqual([]);
+    expect(deps.rows.map((row) => row.deliveryState)).toEqual(["accepted", "unknown"]);
   });
 
   it("sends a table that renders past the limit as one request per queued part", async () => {
@@ -1740,16 +1760,18 @@ describe("deliverMessagingOutbound attachments", () => {
     await deliverMessagingOutbound(deps, { runId: "run-1" }, context);
 
     expect(deps.sendToThread.mock.calls.map((call) => (call as unknown[])[0])).toEqual([
-      { threadId: "telegram:123", body: "Here you go" },
+      { threadId: "telegram:123", body: "Here you go", idempotencyKey: "msg:m-1" },
       {
         threadId: "telegram:123",
         body: "",
         attachment: { name: "chart.png", mimeType: "image/png", data: bytes("key-1") },
+        idempotencyKey: "msg:m-1:file:art-1",
       },
       {
         threadId: "telegram:123",
         body: "",
         attachment: { name: "report.pdf", mimeType: "application/pdf", data: bytes("key-2") },
+        idempotencyKey: "msg:m-1:file:art-2",
       },
     ]);
     expect(deps.rows.map((row) => [row.idempotencyKey, row.status])).toEqual([
@@ -1780,7 +1802,7 @@ describe("deliverMessagingOutbound attachments", () => {
     await deliverMessagingOutbound(deps, { runId: "run-1" }, context);
 
     expect(deps.sendToThread).toHaveBeenCalledExactlyOnceWith(
-      { threadId: "sendblue:dm-1", body: "Here you go" },
+      { threadId: "sendblue:dm-1", body: "Here you go", idempotencyKey: "msg:m-1" },
       context,
     );
     expect(deps.rows).toHaveLength(1);
@@ -1791,7 +1813,7 @@ describe("deliverMessagingOutbound attachments", () => {
     const deps = createDeps({ identity: telegram, messages: [reply], artifacts });
     deps.sendToThread
       .mockResolvedValueOnce({ handle: "text-1" })
-      .mockRejectedValueOnce(new Error("Telegram 500"));
+      .mockRejectedValueOnce(rejectedSend());
     await deliverMessagingOutbound(deps, { runId: "run-1" }, context);
 
     // The second file waits behind the failed first one.
@@ -1840,7 +1862,7 @@ describe("deliverMessagingOutbound attachments", () => {
         fileRow,
       ],
     });
-    deps.sendToThread.mockRejectedValueOnce(new Error("Telegram 500"));
+    deps.sendToThread.mockRejectedValueOnce(rejectedSend());
     await deliverMessagingOutbound(deps, {}, context);
 
     expect(deps.rows.map((row) => [row.idempotencyKey, row.status])).toEqual([
@@ -1894,7 +1916,7 @@ describe("deliverMessagingOutbound attachments", () => {
         },
       ],
     });
-    deps.sendToThread.mockRejectedValueOnce(new Error("Telegram 500"));
+    deps.sendToThread.mockRejectedValueOnce(rejectedSend());
     await deliverMessagingOutbound(deps, {}, context);
     // One transaction claims the row for sending; the failure and its notice
     // are then saved together in a second one.
@@ -2008,13 +2030,12 @@ describe("accepted outbound bookkeeping failures", () => {
     const error = new Error("bookkeeping unavailable");
     if (failure === "counter") {
       deps.prisma.messagingIdentity.update.mockRejectedValueOnce(error);
-    } else if (kind === "group" || kind === "intro") {
-      deps.prisma.messagingOutbound.update.mockRejectedValueOnce(error);
     } else {
       const update = deps.prisma.messagingOutbound.updateMany.getMockImplementation()!;
-      deps.prisma.messagingOutbound.updateMany
-        .mockImplementationOnce(update)
-        .mockRejectedValueOnce(error);
+      deps.prisma.messagingOutbound.updateMany.mockImplementation(async (args) => {
+        if (args.data.providerHandle) throw error;
+        return update(args);
+      });
     }
     await deliverMessagingOutbound(deps, {}, context);
     // Past every send retry and abandoned-part deadline, the accepted row stays claimed.
@@ -2023,17 +2044,105 @@ describe("accepted outbound bookkeeping failures", () => {
     await deliverMessagingOutbound(deps, {}, context);
     expect(deps.sendToThread).toHaveBeenCalledTimes(1);
     expect(deps.rows[0]!.status).toBe("sent");
-    expect(deps.rows[0]!.attempts).toBe(0);
+    expect(deps.rows[0]!.attempts).toBe(1);
     expect(deps.rows[0]!.providerHandle).toBe(failure === "counter" ? "handle-out-1" : null);
+    expect(deps.rows[0]!.deliveryState).toBe(failure === "counter" ? "accepted" : "unknown");
     expect(deps.jobs.enqueue).not.toHaveBeenCalled();
     expect(deps.rows).toHaveLength(1);
+  });
+
+  it.each(["group", "intro", "invite", "text", "attachment"])(
+    "holds an accepted-but-disconnected %s without retrying or releasing its lane",
+    async (kind) => {
+      const deps = pending(kind);
+      const acceptedKeys: string[] = [];
+      deps.sendToThread.mockImplementationOnce(async (...args) => {
+        const request = args[0] as unknown as { idempotencyKey: string };
+        expect(deps.rows[0]!.deliveryState).toBe("unknown");
+        acceptedKeys.push(request.idempotencyKey);
+        throw new Error("connection lost after provider acceptance");
+      });
+      await deliverMessagingOutbound(deps, {}, context);
+      const first = deps.rows[0]!;
+      deps.rows.push({
+        ...first,
+        id: "later",
+        idempotencyKey: "msg:later",
+        createdAt: new Date(2_000),
+        status: "pending",
+        deliveryState: null,
+        claimedAt: null,
+      });
+      first.updatedAt = new Date(0);
+      first.claimedAt = new Date(0);
+      await deliverMessagingOutbound(deps, {}, context);
+      expect(acceptedKeys).toEqual([first.idempotencyKey]);
+      expect(deps.sendToThread).toHaveBeenCalledTimes(1);
+      expect(first).toMatchObject({
+        status: "sent",
+        deliveryState: "unknown",
+        providerHandle: null,
+      });
+      expect(deps.rows[1]!.status).toBe("pending");
+      expect(deps.jobs.enqueue).not.toHaveBeenCalled();
+    },
+  );
+
+  it("keeps a later reply behind a handle persistence failure", async () => {
+    const deps = pending("text");
+    const update = deps.prisma.messagingOutbound.updateMany.getMockImplementation()!;
+    deps.prisma.messagingOutbound.updateMany.mockImplementation(async (args) => {
+      if (args.data.providerHandle) throw new Error("handle write failed");
+      return update(args);
+    });
+    deps.rows.push({
+      ...deps.rows[0]!,
+      id: "later",
+      idempotencyKey: "msg:later",
+      createdAt: new Date(2_000),
+    });
+    await deliverMessagingOutbound(deps, {}, context);
+    await deliverMessagingOutbound(deps, {}, context);
+    expect(deps.sendToThread).toHaveBeenCalledOnce();
+    expect(deps.rows.map((row) => row.deliveryState ?? null)).toEqual(["unknown", null]);
+  });
+
+  it("does not confirm a successful response without a provider handle", async () => {
+    const deps = pending("text");
+    deps.sendToThread.mockResolvedValueOnce({ handle: "" });
+    await deliverMessagingOutbound(deps, {}, context);
+    await deliverMessagingOutbound(deps, {}, context);
+    expect(deps.rows[0]!.deliveryState).toBe("unknown");
+    expect(deps.rows[0]!.confirmedAt).toBeUndefined();
+    expect(deps.sendToThread).toHaveBeenCalledOnce();
+  });
+
+  it("never waits for the provider inside the connection authorization transaction", async () => {
+    const deps = pending("invite");
+    let transactions = 0;
+    (deps.prisma as unknown as { $transaction: unknown }).$transaction = vi.fn(
+      async (fn: (tx: unknown) => Promise<unknown>) => {
+        transactions++;
+        try {
+          return await fn(deps.prisma);
+        } finally {
+          transactions--;
+        }
+      },
+    );
+    deps.sendToThread.mockImplementationOnce(async () => {
+      expect(transactions).toBe(0);
+      return { handle: "invite-handle" };
+    });
+    await deliverMessagingOutbound(deps, {}, context);
+    expect(deps.rows[0]!.deliveryState).toBe("accepted");
   });
 
   it.each(["group", "intro", "text", "attachment"])(
     "still retries %s when the provider fails before acceptance",
     async (kind) => {
       const deps = pending(kind);
-      deps.sendToThread.mockRejectedValueOnce(new Error("provider unavailable"));
+      deps.sendToThread.mockRejectedValueOnce(rejectedSend());
       await deliverMessagingOutbound(deps, {}, context);
       expect(deps.rows[0]!.status).toBe("pending");
       expect(deps.rows[0]!.attempts).toBe(1);
@@ -2049,6 +2158,112 @@ describe("accepted outbound bookkeeping failures", () => {
       expect(deps.rows[0]!.status).toBe("sent");
     },
   );
+});
+
+describe("messaging claim recovery and final mirroring", () => {
+  afterEach(() => vi.useRealTimers());
+
+  it.each(["queued", "leased", "running", "waiting_input", "waiting_child", "failed", "cancelled"])(
+    "does not mark or finalize a %s run before reading its completed transcript",
+    async (status) => {
+      const run = { ...messagingRun, status };
+      const messages = [interim("progress", "Working")];
+      const deps = createDeps({ run, messages });
+      await mirrorMessagingOutbound(deps, run.id);
+      expect(deps.prisma.message.findMany).not.toHaveBeenCalled();
+      expect(deps.prisma.run.updateMany).not.toHaveBeenCalled();
+      expect(deps.rows).toHaveLength(0);
+      run.status = "completed";
+      messages.push({
+        id: "final",
+        clientNonce: "",
+        blocks: [{ kind: "text", text: "Final reply" }],
+      });
+      await mirrorMessagingOutbound(deps, run.id);
+      expect(deps.rows.map((row) => row.idempotencyKey)).toEqual(["msg:progress", "msg:final"]);
+      expect(deps.prisma.run.updateMany).toHaveBeenCalledOnce();
+      expect(deps.prisma.message.findMany.mock.invocationCallOrder[0]).toBeLessThan(
+        deps.prisma.run.updateMany.mock.invocationCallOrder[0]!,
+      );
+    },
+  );
+
+  it("leaves the final mirror marker unset when the outbox insert fails", async () => {
+    const deps = createDeps({});
+    deps.prisma.messagingOutbound.createMany.mockRejectedValueOnce(new Error("insert failed"));
+    await expect(mirrorMessagingOutbound(deps, "run-1")).rejects.toThrow("insert failed");
+    expect(deps.prisma.run.updateMany).not.toHaveBeenCalled();
+    await mirrorMessagingOutbound(deps, "run-1");
+    expect(deps.rows).toHaveLength(1);
+    expect(deps.prisma.run.updateMany).toHaveBeenCalledOnce();
+  });
+
+  it.each([
+    ["claimed", true],
+    ["unknown", false],
+    [null, false],
+  ])("recovers expired %s only when dispatch never started", async (deliveryState, sends) => {
+    const deps = createDeps({
+      outboundRows: [
+        {
+          id: "crash",
+          idempotencyKey: "msg:crash",
+          kind: "dm",
+          identityId: identity.id,
+          body: "Recover",
+          status: "sent",
+          deliveryState,
+          claimedAt: new Date(0),
+          providerHandle: null,
+          createdAt: new Date(0),
+        },
+      ],
+    });
+    await deliverMessagingOutbound(deps, {}, context);
+    expect(deps.sendToThread).toHaveBeenCalledTimes(sends ? 1 : 0);
+    expect(deps.rows[0]!.deliveryState).toBe(sends ? "accepted" : deliveryState);
+  });
+
+  it("fences a worker paused in pre-send work after its claim is recovered", async () => {
+    vi.useFakeTimers({ toFake: ["Date"] });
+    vi.setSystemTime(new Date("2026-01-01T00:00:00Z"));
+    const deps = createDeps({
+      identity: { dmThreadId: null },
+      outboundRows: [
+        {
+          id: "crash",
+          idempotencyKey: "msg:crash",
+          kind: "dm",
+          identityId: identity.id,
+          body: "Recover",
+          status: "pending",
+          createdAt: new Date(0),
+        },
+      ],
+    });
+    let release!: () => void;
+    let entered!: () => void;
+    const started = new Promise<void>((resolve) => {
+      entered = resolve;
+    });
+    const held = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    deps.openDirectThread.mockImplementationOnce(async () => {
+      entered();
+      await held;
+      return "sendblue:dm-1";
+    });
+    const stale = deliverMessagingOutbound(deps, {}, context);
+    await started;
+    expect(deps.rows[0]!.deliveryState).toBe("claimed");
+    vi.setSystemTime(Date.now() + MESSAGING_CLAIM_TIMEOUT_MS + 1);
+    await deliverMessagingOutbound(deps, {}, context);
+    release();
+    await stale;
+    expect(deps.sendToThread).toHaveBeenCalledOnce();
+    expect(deps.rows[0]!.deliveryState).toBe("accepted");
+  });
 });
 
 describe("drain lanes", () => {
@@ -2113,8 +2328,8 @@ describe("drain lanes", () => {
     releaseFirst();
     await drained;
     expect(deps.sendToThread.mock.calls.map((call) => (call as unknown[])[0])).toEqual([
-      { threadId: "t-a", body: "a-1" },
-      { threadId: "t-a", body: "a-2" },
+      { threadId: "t-a", body: "a-1", idempotencyKey: "msg:a-1" },
+      { threadId: "t-a", body: "a-2", idempotencyKey: "msg:a-2" },
     ]);
   });
 
@@ -2147,8 +2362,8 @@ describe("drain lanes", () => {
     releaseFirst();
     await firstDrain;
     expect(deps.sendToThread.mock.calls.map((call) => (call as unknown[])[0])).toEqual([
-      { threadId: "t-a", body: "a-1" },
-      { threadId: "t-a", body: "z-2" },
+      { threadId: "t-a", body: "a-1", idempotencyKey: "msg:a-1" },
+      { threadId: "t-a", body: "z-2", idempotencyKey: "msg:z-2" },
     ]);
     expect(deps.rows.map((row) => row.status)).toEqual(["sent", "sent"]);
   });
@@ -2213,8 +2428,8 @@ describe("drain lanes", () => {
       ["intro", "sent"],
     ]);
     expect(deps.sendToThread.mock.calls.map((call) => (call as unknown[])[0])).toEqual([
-      { threadId: "t-a", body: "intro" },
-      { threadId: "t-a", body: "r-1" },
+      { threadId: "t-a", body: "intro", idempotencyKey: "msg:intro" },
+      { threadId: "t-a", body: "r-1", idempotencyKey: "msg:r-1" },
     ]);
   });
 
@@ -2223,9 +2438,10 @@ describe("drain lanes", () => {
       run: null,
       outboundRows: [groupRow("a-1", "t-a", 0), groupRow("a-2", "t-a", 1)],
     });
-    (
-      deps.prisma.messagingOutbound.updateMany as unknown as ReturnType<typeof vi.fn>
-    ).mockResolvedValueOnce({ count: 0 });
+    const update = deps.prisma.messagingOutbound.updateMany.getMockImplementation()!;
+    deps.prisma.messagingOutbound.updateMany.mockImplementation(async (args) =>
+      args.where.status === "pending" ? { count: 0 } : update(args),
+    );
 
     await deliverMessagingOutbound(deps, {}, context);
 
@@ -2245,8 +2461,8 @@ describe("drain lanes", () => {
     await deliverMessagingOutbound(deps, {}, context);
 
     expect(deps.sendToThread.mock.calls.map((call) => (call as unknown[])[0])).toEqual([
-      { threadId: "t-a", body: "a-1" },
-      { threadId: "t-a", body: "a-2" },
+      { threadId: "t-a", body: "a-1", idempotencyKey: "msg:a-1" },
+      { threadId: "t-a", body: "a-2", idempotencyKey: "msg:a-2" },
     ]);
   });
 
@@ -2263,7 +2479,7 @@ describe("drain lanes", () => {
     await deliverMessagingOutbound(deps, {}, context);
 
     expect(deps.sendToThread).toHaveBeenCalledExactlyOnceWith(
-      { threadId: "t-other", body: "later" },
+      { threadId: "t-other", body: "later", idempotencyKey: "msg:later" },
       context,
     );
   });

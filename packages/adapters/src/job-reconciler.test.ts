@@ -153,8 +153,17 @@ describe("createJobReconciler", () => {
 
     expect(prisma.messagingOutbound.findFirst).toHaveBeenCalledWith({
       where: {
-        status: "pending",
-        OR: [{ nextAttemptAt: null }, { nextAttemptAt: { lte: expect.any(Date) } }],
+        OR: [
+          {
+            status: "pending",
+            OR: [{ nextAttemptAt: null }, { nextAttemptAt: { lte: expect.any(Date) } }],
+          },
+          {
+            status: "sent",
+            deliveryState: "claimed",
+            claimedAt: { lte: expect.any(Date) },
+          },
+        ],
       },
       select: { id: true },
     });

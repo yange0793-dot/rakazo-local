@@ -84,6 +84,9 @@ export function createManagedMemoryProvider(
         return results;
       });
     },
+    async read(request, ctx) {
+      return response(() => store.read(request, ctx));
+    },
     async save(request, ctx) {
       return response(async () => {
         await store.save(request, ctx);

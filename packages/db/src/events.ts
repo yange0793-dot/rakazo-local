@@ -34,6 +34,7 @@ import {
   notifyCommittedEvent,
   notifyRealtime,
 } from "./event-stream.js";
+import { MemoryArchiveStore } from "./memory-archive.js";
 import type { RunLease } from "./messages.js";
 import {
   assertRunCanWriteHistory,
@@ -134,7 +135,9 @@ export interface ClearThreadInput {
 
 export class ThreadClearConflictError extends Error {
   constructor() {
-    super("The conversation changed during memory archiving. Clear it again to include the new messages.");
+    super(
+      "The conversation changed during memory archiving. Clear it again to include the new messages.",
+    );
     this.name = "ThreadClearConflictError";
   }
 }
@@ -147,6 +150,8 @@ export interface ClearThreadResult {
 
 export interface FinalizeRunResult {
   continuationRunId: string | null;
+  /** A pending archive committed with completion; publishing its job may happen afterward. */
+  memoryArchiveAt?: Date;
   /**
    * The chat a paused card was shown in when that is not the run's own thread: a background
    * helper asks in the chat that started it.
@@ -171,6 +176,8 @@ export type FinalizeRunInput = FinalizeRunBase &
         outcome: "completed";
         blocks: MessageBlock[];
         markUnread?: boolean;
+        /** Opt in to registering this turn's archive in the completion transaction. */
+        memoryArchiveAt?: Date;
       }
     | {
         outcome: "failed";
@@ -198,6 +205,13 @@ export interface SendUserMessageInput {
   createRun?: boolean;
   /** When true, start a new run even if the bot is already busy (team-chat delivery). */
   allowParallelRun?: boolean;
+  /** Exact source ownership is resolved after the message is durable in this transaction. */
+  routeSourceEvent?: (
+    tx: Prisma.TransactionClient,
+    message: { id: string; seq: number },
+  ) => Promise<{
+    run: { id: string; taskId: string; status: string; botId?: string } | null;
+  } | null>;
   /** Model every routine in an inbound delivery agreed on. */
   modelPin?: {
     modelProvider: string;
@@ -211,6 +225,8 @@ export interface SendUserMessageResult {
   seq: number;
   taskId: string | null;
   runId: string | null;
+  /** Present when source routing is enabled, so unrelated events cannot resume paused input. */
+  runStatus?: string | null;
 }
 
 export function createThreadEvents(
@@ -438,6 +454,7 @@ export async function sendUserMessage(
       seq: message.seq,
       taskId: created?.taskId ?? null,
       runId: run?.id ?? null,
+      ...(input.routeSourceEvent ? { runStatus: run?.status ?? null } : {}),
     };
   };
   const existing = await replay();
@@ -469,11 +486,12 @@ export async function sendUserMessage(
       }
       const author = await loadMessageAuthor(tx, input.authorUserId);
       const createRun = input.createRun !== false;
+      const routed = createRun ? await input.routeSourceEvent?.(tx, message) : undefined;
       // Include the creation intro. It has no tools, so it must not absorb the message, and a
       // second run would overlap it on a dedicated computer. Pending steering waits for the
       // continuation that starts when the intro finishes.
       const activeRuns =
-        createRun && !input.allowParallelRun
+        createRun && !routed && !input.allowParallelRun
           ? await tx.run.findMany({
               where: {
                 threadId: input.threadId,
@@ -515,8 +533,14 @@ export async function sendUserMessage(
         holdingRuns[0] ??
         null;
       let task = null;
-      let run = null;
-      if (createRun && !busy) {
+      let run: { id: string; taskId: string; status: string; botId?: string } | null = null;
+      if (routed) {
+        run = routed.run;
+        if (run) {
+          task = { id: run.taskId };
+          await tx.message.update({ where: { id: message.id }, data: { runId: run.id } });
+        }
+      } else if (createRun && !busy) {
         task = await tx.task.create({
           data: {
             spaceId: input.spaceId,
@@ -577,7 +601,7 @@ export async function sendUserMessage(
       const event = await appendEventInTransaction(tx, {
         spaceId: input.spaceId,
         threadId: input.threadId,
-        botId: input.botId,
+        botId: routed?.run?.botId ?? input.botId,
         type: "thread.message.created",
         runId: run?.id ?? busy?.id,
         payload: {
@@ -612,6 +636,9 @@ export async function sendUserMessage(
     seq: committed.message.seq,
     taskId: committed.task?.id ?? null,
     runId: committed.run?.id ?? committed.busy?.id ?? null,
+    ...(input.routeSourceEvent
+      ? { runStatus: committed.run?.status ?? committed.busy?.status ?? null }
+      : {}),
   };
 }
 
@@ -743,7 +770,10 @@ export async function finalizeRun(
     "bot.id": input.botId,
   });
   void captureRunAnalytics(prisma, analytics, input.runId, `run.${input.outcome}`);
-  return { continuationRunId: committed.continuationRunId };
+  return {
+    continuationRunId: committed.continuationRunId,
+    ...(committed.memoryArchiveAt ? { memoryArchiveAt: committed.memoryArchiveAt } : {}),
+  };
 }
 
 /** Stamps one turn-level wall-clock duration on the final tool block. */
@@ -776,6 +806,7 @@ async function finalizeRunOnce(
   seq: number;
   continuationRunId: string | null;
   firstResponse: boolean;
+  memoryArchiveAt?: Date;
 } | null> {
   return prisma.$transaction(async (tx: Prisma.TransactionClient) => {
     await tx.$queryRaw`SELECT id FROM threads WHERE id = ${input.threadId} FOR UPDATE`;
@@ -901,7 +932,20 @@ async function finalizeRunOnce(
         { id: input.runId, userId: writableRun.userId, spaceId: input.spaceId },
       ]);
     }
+    let memoryArchiveAt: Date | undefined;
     if (input.outcome === "completed") {
+      if (
+        input.memoryArchiveAt &&
+        writableRun &&
+        (await new MemoryArchiveStore(prisma).markPendingInTransaction(
+          tx,
+          input.runId,
+          { spaceId: input.spaceId, botId: input.botId, userId: writableRun.userId },
+          input.memoryArchiveAt,
+        ))
+      ) {
+        memoryArchiveAt = input.memoryArchiveAt;
+      }
       await tx.steeringMessage.deleteMany({
         where: { runId: input.runId, claimedAt: { not: null } },
       });
@@ -912,7 +956,13 @@ async function finalizeRunOnce(
     }
     const continuationRunId = await createPendingSteeringRun(tx, input);
     await tx.bot.update({ where: { id: input.botId }, data: { updatedAt: now } });
-    return { threadId: lastEvent.threadId, seq: lastEvent.seq, continuationRunId, firstResponse };
+    return {
+      threadId: lastEvent.threadId,
+      seq: lastEvent.seq,
+      continuationRunId,
+      firstResponse,
+      memoryArchiveAt,
+    };
   }, FINALIZE_TRANSACTION_OPTIONS);
 }
 

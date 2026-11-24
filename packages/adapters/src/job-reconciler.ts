@@ -11,6 +11,7 @@ import { returnHelperOutcome } from "./background-helpers.js";
 import { returnBotMessageOutcome } from "./bot-messages.js";
 import { reconcileCallRequests } from "./call-request.js";
 import { scheduleComputerControlExpiry } from "./computer-control.js";
+import { MESSAGING_CLAIM_TIMEOUT_MS } from "./messaging-delivery.js";
 import { findRunRecoveryBlockers } from "./run-recovery.js";
 import { messageBlocksText } from "./run-replies.js";
 import { reconcileStuckWork } from "./stuck-work.js";
@@ -242,8 +243,17 @@ export function createJobReconciler(
         }),
         deps.prisma.messagingOutbound.findFirst({
           where: {
-            status: "pending",
-            OR: [{ nextAttemptAt: null }, { nextAttemptAt: { lte: now } }],
+            OR: [
+              {
+                status: "pending",
+                OR: [{ nextAttemptAt: null }, { nextAttemptAt: { lte: now } }],
+              },
+              {
+                status: "sent",
+                deliveryState: "claimed",
+                claimedAt: { lte: new Date(now.getTime() - MESSAGING_CLAIM_TIMEOUT_MS) },
+              },
+            ],
           },
           select: { id: true },
         }),

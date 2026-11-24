@@ -1,4 +1,5 @@
 import type { AdapterContext, MemorySnapshot, MemoryStore } from "@rakazo/adapter-kit";
+import { semanticFactNamespace } from "@rakazo/db";
 import { describe, expect, it, vi } from "vitest";
 import { buildAgentMemoryPrompt, loadAgentMemoryContext } from "./memory-context.js";
 
@@ -13,6 +14,62 @@ const context: AdapterContext = {
 };
 
 describe("agent memory context", () => {
+  it("loads only the current projection from the real Markdown store after source correction", async () => {
+    const { MarkdownMemoryStore } = await vi.importActual<{
+      MarkdownMemoryStore: new (db: never) => MemoryStore;
+    }>("../../memory/src/index.js");
+    const source = {
+      id: "fact-a",
+      revision: 1,
+      botId: "bot-1",
+      scope: "isolated",
+      kind: "durable",
+    };
+    const fact = {
+      ...source,
+      spaceId: context.spaceId,
+      userId: context.userId,
+      namespace: semanticFactNamespace(context.spaceId, "isolated", "bot-1"),
+      status: "active",
+      content: "Source fact.",
+      provenance: JSON.stringify({ kind: "manual" }),
+      createdAt: new Date(),
+      updatedAt: new Date(),
+    };
+    const content = "Handwritten note.\nAutomatic projection.\n";
+    const store = new MarkdownMemoryStore({
+      spaceMember: { findFirst: async () => ({ id: "member" }) },
+      space: { findFirst: async () => ({ deletingAt: null }) },
+      bot: { findFirst: async () => ({ id: "bot-1" }) },
+      semanticMemoryRetirement: { findFirst: async () => null },
+      semanticFact: { findFirst: async () => fact },
+      memoryDocument: {
+        findMany: async ({ where }: { where: { scope: string } }) =>
+          where.scope === "bot"
+            ? [
+                {
+                  id: "memory-1",
+                  ...where,
+                  path: "MEMORY.md",
+                  content,
+                  revision: 1,
+                  updatedAt: new Date(),
+                  derivations: [
+                    { start: "Handwritten note.\n".length, end: content.length, sources: [source] },
+                  ],
+                },
+              ]
+            : [],
+      },
+    } as never);
+    expect(await loadAgentMemoryContext(store, "bot-1", context)).toContain(
+      "Automatic projection.",
+    );
+    fact.revision = 2;
+    const prompt = await loadAgentMemoryContext(store, "bot-1", context);
+    expect(prompt).toContain("Handwritten note.");
+    expect(prompt).not.toContain("Automatic projection.");
+  });
   it("loads bot and user memory and renders newest revisions first", async () => {
     const read = vi.fn(async ({ scope }: { scope: "bot" | "user" }) =>
       snapshot(

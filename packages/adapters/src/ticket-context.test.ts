@@ -99,3 +99,100 @@ it("does not query tickets for an out-of-range reference in a message", async ()
   ).resolves.toBeUndefined();
   expect(findMany).not.toHaveBeenCalled();
 });
+
+it("omits inaccessible work state while preserving the existing board lookup", async () => {
+  const findFirst = vi.fn(async () => null);
+  const findUnique = vi.fn();
+  const client = {
+    run: { findFirst },
+    board: { findUnique },
+    $transaction: async (action: (tx: unknown) => Promise<unknown>) => action(client),
+  };
+  await expect(
+    loadAgentTicketContext(
+      { prisma: client as never, ticketBoardEnabled: true },
+      {
+        spaceId: "space-1",
+        text: "Continue RAK-1",
+        ticketId: "ticket-1",
+        workState: {
+          runId: "other-run",
+          userId: "other-user",
+          botId: "bot-1",
+          environment: null,
+        },
+      },
+    ),
+  ).resolves.toBeUndefined();
+  expect(findFirst).toHaveBeenCalledWith(
+    expect.objectContaining({
+      where: expect.objectContaining({
+        id: "other-run",
+        userId: "other-user",
+        ticketId: "ticket-1",
+        spaceId: "space-1",
+      }),
+    }),
+  );
+  expect(findUnique).toHaveBeenCalledOnce();
+});
+
+it.each(["historical-ticket", "transferred-owner"])(
+  "renders only the ordinary board context for %s",
+  async (scenario) => {
+    const client = {
+      run: { findFirst: vi.fn(async () => ({ id: "run-1" })) },
+      ticket: {
+        findFirst: vi.fn(async () => null),
+        findMany: vi.fn(async () => [
+          {
+            id: "ticket-1",
+            number: 1,
+            title: "Shared board title",
+            status: "doing",
+            assigneeBotId: null,
+            createdByUserId: scenario === "historical-ticket" ? null : "different-user",
+          },
+        ]),
+      },
+      board: { findUnique: vi.fn(async () => ({ id: "board-1", ticketPrefix: "RAK" })) },
+      ticketComment: { findMany: vi.fn(async () => []) },
+      $transaction: async (action: (tx: unknown) => Promise<unknown>) => action(client),
+    };
+    const context = await loadAgentTicketContext(
+      { prisma: client as never, ticketBoardEnabled: true },
+      {
+        spaceId: "space-1",
+        text: "Continue RAK-1",
+        ticketId: "ticket-1",
+        workState: { runId: "run-1", userId: "user-1", botId: "bot-1", environment: null },
+      },
+    );
+    expect(context).toContain("Shared board title");
+    expect(context).not.toContain("<ticket_work_state>");
+    expect(client.ticket.findFirst).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: expect.objectContaining({ createdByUserId: "user-1", assigneeBotId: "bot-1" }),
+      }),
+    );
+  },
+);
+
+it("does not hide database or decryption failures as missing work state", async () => {
+  const client = {
+    $transaction: vi.fn(async () => {
+      throw new Error("content key unavailable");
+    }),
+  };
+  await expect(
+    loadAgentTicketContext(
+      { prisma: client as never, ticketBoardEnabled: true },
+      {
+        spaceId: "space-1",
+        text: "Continue RAK-1",
+        ticketId: "ticket-1",
+        workState: { runId: "run-1", userId: "user-1", botId: "bot-1", environment: null },
+      },
+    ),
+  ).rejects.toThrow("content key unavailable");
+});

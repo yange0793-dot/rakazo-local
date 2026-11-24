@@ -20,6 +20,7 @@ import type {
 } from "@rakazo/adapter-kit";
 import type { PrismaClient, RunLease, ThreadEvents } from "@rakazo/db";
 import type { CloudAgentConnection } from "./cloud-agent-factory.js";
+import type { FileDeliveryJudge } from "./file-delivery-judge.js";
 import type { MemoryProviderResolver } from "./memory-provider-factory.js";
 import type { CodexLiveCatalog } from "./pi-codex-catalog.js";
 import type { RemoteTransportDependencies } from "./remote-mcp.js";
@@ -58,6 +59,8 @@ export interface ExecutorDeps {
   /** Publishes board-change signals and wakes ticket owners; absent disables both. */
   onTicketChange?: TicketChangeNotifier;
   ticketBoardEnabled?: boolean;
+  /** Optional supplied judge; the executor otherwise binds one to its resolved run model. */
+  fileDeliveryJudge?: FileDeliveryJudge;
   phoneCallsEnabled?: boolean;
   /** The domain bot email addresses are on; absent when this server receives no email. */
   inboundEmailDomain?: string;

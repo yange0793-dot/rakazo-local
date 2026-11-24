@@ -28,10 +28,7 @@ describePostgres("messaging outbound drain order (PostgreSQL)", () => {
     db = createDb(url!);
     system = asSystem(db.prisma);
     const provisioned = await runAsSystem("messaging order fixture", () =>
-      provisionMessagingIdentity(
-        db.prisma,
-        { provider: "telegram", address },
-      ),
+      provisionMessagingIdentity(db.prisma, { provider: "telegram", address }),
     );
     identity = {
       userId: provisioned.userId,
@@ -194,7 +191,7 @@ describePostgres("messaging outbound drain order (PostgreSQL)", () => {
     });
     expect(sent.map((row) => row.status)).toEqual(["sent", "sent"]);
     expect(sendToThread.mock.calls.map((call) => (call as unknown[])[0])).toEqual(
-      inserted.map((row) => ({ threadId, body: row.body })),
+      inserted.map((row) => ({ threadId, body: row.body, idempotencyKey: row.idempotencyKey })),
     );
   });
 

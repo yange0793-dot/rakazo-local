@@ -268,6 +268,56 @@ describe("ticket mutations", () => {
     expect(s.changes).not.toHaveBeenCalled();
   });
 
+  it.each([
+    { expectedRequirementsVersion: 1 },
+    {
+      fileDeliveryRequirements: {
+        items: [{ id: "report", kind: "artifact", description: "File" }],
+      },
+    },
+    { expectedRequirementsVersion: 0, fileDeliveryRequirements: { items: [] } },
+    {
+      expectedRequirementsVersion: 1,
+      fileDeliveryRequirements: {
+        version: 8,
+        items: [{ id: "report", kind: "artifact", description: "File" }],
+      },
+    },
+    {
+      expectedRequirementsVersion: 1,
+      fileDeliveryRequirements: {
+        items: [
+          { id: "report", kind: "artifact", description: "File" },
+          { id: "report", kind: "semantic", description: "Coverage" },
+        ],
+      },
+    },
+    {
+      expectedRequirementsVersion: 1,
+      fileDeliveryRequirements: {
+        items: [{ id: "coverage", kind: "semantic", description: "All" }],
+      },
+    },
+    {
+      expectedRequirementsVersion: 1,
+      fileDeliveryRequirements: {
+        items: [{ id: "report", kind: "artifact", description: "File" }],
+      },
+      status: "done",
+    },
+  ])(
+    "rejects incomplete or invalid requirement revisions before persistence: %j",
+    async (revision) => {
+      const s = mutationDeps();
+      expect(
+        await updateTicket(s.deps, { spaceId: "ws", userId: "user-1", id: "t1", ...revision }),
+      ).toHaveProperty("error");
+      expect(s.prisma.board.findUnique).not.toHaveBeenCalled();
+      expect(s.prisma.$transaction).not.toHaveBeenCalled();
+      expect(s.changes).not.toHaveBeenCalled();
+    },
+  );
+
   it("uses public parameter names and keeps blank comments rejected", async () => {
     const s = mutationDeps();
     await expect(

@@ -1,6 +1,7 @@
 import type { Board, Ticket, TicketComment, TicketPriority, TicketStatus } from "@rakazo/contracts";
 import {
   parseTicketRef,
+  TicketFileDeliveryRequirementsSchema,
   TicketPrioritySchema,
   TicketStatusSchema,
   ticketRef,
@@ -91,6 +92,7 @@ function coerceTicketPriority(value: string | null | undefined): TicketPriority 
 }
 
 export function toTicketDto(row: TicketRow, ticketPrefix: string): Ticket {
+  const requirements = TicketFileDeliveryRequirementsSchema.safeParse(row.fileDeliveryRequirements);
   return {
     id: row.id,
     boardId: row.boardId,
@@ -107,6 +109,7 @@ export function toTicketDto(row: TicketRow, ticketPrefix: string): Ticket {
     createdAt: row.createdAt.toISOString(),
     updatedAt: row.updatedAt.toISOString(),
     completedAt: row.completedAt ? row.completedAt.toISOString() : null,
+    ...(requirements.success ? { fileDeliveryRequirements: requirements.data } : {}),
   };
 }
 

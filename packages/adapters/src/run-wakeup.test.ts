@@ -14,7 +14,11 @@ function fixture() {
   const rows = new Map<string, { status: string; wakeAt: Date | null; trigger?: string }>();
   const updateMany = vi.fn(async ({ where, data }) => {
     const row = rows.get(where.id);
-    if (!row || !where.status.in.includes(row.status) || (where.wakeAt === null && row.wakeAt))
+    if (
+      !row ||
+      !where.OR.some((clause: { status: string }) => clause.status === row.status) ||
+      (where.wakeAt === null && row.wakeAt)
+    )
       return { count: 0 };
     Object.assign(row, data);
     return { count: 1 };
@@ -534,6 +538,7 @@ describe("durable direct run wakeups", () => {
 
   it("never holds one run's start behind another run, however slow", async () => {
     const f = fixture();
+    f.rows.set("stuck", { status: "queued", wakeAt: null });
     let release!: () => void;
     const stuck = new Promise<void>((resolve) => {
       release = resolve;
@@ -548,6 +553,7 @@ describe("durable direct run wakeups", () => {
       } as unknown as BackgroundJobHandlers);
       await f.publisher.enqueue(runContinueJob("stuck"));
       for (let index = 0; index < 20; index += 1) {
+        f.rows.set(`chat-${index}`, { status: "queued", wakeAt: null });
         await f.publisher.enqueue(runContinueJob(`chat-${index}`));
       }
       await vi.waitFor(() => expect(entered).toHaveLength(21));
@@ -604,6 +610,7 @@ describe("durable direct run wakeups", () => {
 
   it("does not hand a taken run back and forth when this process cannot run it", async () => {
     const f = fixture();
+    f.rows.set("full", { status: "queued", wakeAt: null });
     const publish = vi.spyOn(f.realtime, "publish");
     const admission = vi.spyOn(RunExecutionHost.prototype, "execute").mockResolvedValue(false);
     try {
@@ -620,6 +627,7 @@ describe("durable direct run wakeups", () => {
 
   it("starts a run again when it is made due while this process is still finishing it", async () => {
     const f = fixture();
+    f.rows.set("answered", { status: "queued", wakeAt: null });
     let release!: () => void;
     const finishing = new Promise<void>((resolve) => {
       release = resolve;

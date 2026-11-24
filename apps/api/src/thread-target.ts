@@ -63,6 +63,7 @@ import {
   workReceiptTicketId,
 } from "./thread-learning.js";
 import { cancelThreadRuns, finishThreadStop, isStopMessage } from "./thread-stop.js";
+import { routeThreadTicketSource } from "./ticket-source-events.js";
 
 export type ThreadTarget =
   | {
@@ -510,6 +511,8 @@ export async function sendThreadMessage(
     analytics?: ProductAnalytics;
     sandbox: SandboxProvider;
     notifications?: NotificationProvider;
+    ticketBoardEnabled?: boolean;
+    env?: { ticketBoardEnabled?: boolean };
   },
   actor: Actor,
   target: ThreadTarget,
@@ -700,6 +703,47 @@ export async function sendThreadMessage(
         }
         const answered: typeof activeRuns = [];
         const targetedRunId = targetedQuestionRun(activeRuns);
+        if (
+          (deps.ticketBoardEnabled ?? deps.env?.ticketBoardEnabled) &&
+          !stopping &&
+          !targetedRunId &&
+          !routineRuns.length
+        ) {
+          const routed = await routeThreadTicketSource(
+            tx,
+            { ...actor, threadId: target.threadId, botId: target.botId, ticketBoardEnabled: true },
+            message,
+          );
+          if (routed?.run) {
+            await tx.message.update({ where: { id: message.id }, data: { runId: routed.run.id } });
+            const event = await appendEventInTransaction(tx, {
+              spaceId: actor.spaceId,
+              threadId: target.threadId,
+              botId: routed.run.botId ?? target.botId,
+              type: "thread.message.created",
+              runId: routed.run.id,
+              payload: {
+                messageId: message.id,
+                seq: message.seq,
+                role: "user",
+                blocks,
+                author,
+                callId,
+                runIds: [routed.run.id],
+                replyToMessageId,
+                replyQuote,
+                replyPreview,
+              },
+            });
+            return {
+              message,
+              runs: [{ ...routed.run, userId: actor.userId, trigger: "tickets" }],
+              routineRuns,
+              eventSeq: event.seq,
+            };
+          }
+          if (routed) throw new IsolationError("The subscribed execution is unavailable.");
+        }
         // Someone else's question stays on its card; this message starts the sender's own run.
         for (const run of activeRuns.filter(
           (run) => !stopping && run.status === "waiting_input" && run.userId === actor.userId,
@@ -984,6 +1028,55 @@ export async function sendThreadMessage(
         throw new ORPCError("BAD_REQUEST", { message: MODEL_REQUIRED_SEND_ERROR });
       }
       const activeByBotId = new Map<string, (typeof activeRuns)[number]>();
+      let subscribed: { id: string; taskId: string; status: string; botId?: string } | null = null;
+      if (
+        (deps.ticketBoardEnabled ?? deps.env?.ticketBoardEnabled) &&
+        !routineRuns.length &&
+        !targetedQuestionRun(activeRuns)
+      ) {
+        const routed = await routeThreadTicketSource(
+          tx,
+          {
+            ...actor,
+            threadId: target.threadId,
+            botId: targetBotIds[0]!,
+            ticketBoardEnabled: true,
+          },
+          message,
+        );
+        subscribed = routed?.run ?? null;
+        if (routed && !subscribed)
+          throw new IsolationError("The subscribed execution is unavailable.");
+      }
+      if (subscribed) {
+        await tx.message.update({ where: { id: message.id }, data: { runId: subscribed.id } });
+        await touchGroupUpdatedAt(tx, target.groupId);
+        const event = await appendEventInTransaction(tx, {
+          spaceId: actor.spaceId,
+          threadId: target.threadId,
+          botId: subscribed.botId ?? targetBotIds[0]!,
+          type: "thread.message.created",
+          runId: subscribed.id,
+          payload: {
+            messageId: message.id,
+            seq: message.seq,
+            role: "user",
+            blocks,
+            author,
+            callId,
+            runIds: [subscribed.id],
+            replyToMessageId,
+            replyQuote,
+            replyPreview,
+          },
+        });
+        return {
+          message,
+          runs: [{ ...subscribed, userId: actor.userId, trigger: "tickets" }],
+          routineRuns,
+          eventSeq: event.seq,
+        };
+      }
       const rank = (candidate: (typeof activeRuns)[number]) =>
         steersMessageFrom(candidate, actor) ? 2 : steersUserMessage(candidate) ? 1 : 0;
       const answeredByBotId = new Map<string, Array<(typeof activeRuns)[number]>>();

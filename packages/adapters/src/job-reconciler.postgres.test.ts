@@ -29,6 +29,66 @@ describePostgres("job reconciliation leadership (PostgreSQL contract)", () => {
   });
 });
 
+describePostgres("messaging claim reconciliation (PostgreSQL contract)", () => {
+  it("wakes the drain for expired pre-send claims, leaving unknown sends held", async () => {
+    const db = createDb(databaseUrl!);
+    const system = asSystem(db.prisma);
+    const prefix = `claim-${randomUUID()}`;
+    const ids = [`${prefix}-claimed`, `${prefix}-unknown`, `${prefix}-legacy`];
+    const published: BackgroundJob[] = [];
+    const jobs: JobPublisher = {
+      enqueue: async (job) => {
+        published.push(job);
+      },
+      cancel: async () => undefined,
+      close: async () => undefined,
+    };
+    const reconcile = createJobReconciler({ prisma: system, jobs });
+    try {
+      await system.messagingOutbound.createMany({
+        data: [
+          {
+            id: ids[0]!,
+            idempotencyKey: ids[0]!,
+            kind: "dm",
+            body: "claimed",
+            status: "sent",
+            deliveryState: "claimed",
+            claimedAt: new Date(),
+          },
+          {
+            id: ids[1]!,
+            idempotencyKey: ids[1]!,
+            kind: "dm",
+            body: "unknown",
+            status: "sent",
+            deliveryState: "unknown",
+            claimedAt: new Date(0),
+          },
+          { id: ids[2]!, idempotencyKey: ids[2]!, kind: "dm", body: "legacy", status: "sent" },
+        ],
+      });
+      await reconcile.reconcileOnce();
+      const drains = () => published.filter((job) => job.replaceKey === "messaging.deliver:drain");
+      expect(drains()).toHaveLength(0);
+      await system.messagingOutbound.update({
+        where: { id: ids[0] },
+        data: { claimedAt: new Date(0) },
+      });
+      await reconcile.reconcileOnce();
+      expect(drains()).toHaveLength(1);
+      expect(await system.messagingOutbound.findUnique({ where: { id: ids[1] } })).toMatchObject({
+        status: "sent",
+        deliveryState: "unknown",
+      });
+    } finally {
+      await system.messagingOutbound.deleteMany({ where: { id: { in: ids } } });
+      await db.prisma.$disconnect();
+      await db.pool.end();
+    }
+  });
+});
+
 describePostgres("bounded routine reconciliation (PostgreSQL contract)", () => {
   it("reads stable routine pages from the current schema in one pass", async () => {
     const db = createDb(databaseUrl!);
@@ -37,10 +97,7 @@ describePostgres("bounded routine reconciliation (PostgreSQL contract)", () => {
     let identity: Awaited<ReturnType<typeof provisionMessagingIdentity>> | undefined;
     try {
       identity = await runAsSystem("reconciliation fixture", () =>
-        provisionMessagingIdentity(
-          db.prisma,
-          { provider: "email", address },
-        ),
+        provisionMessagingIdentity(db.prisma, { provider: "email", address }),
       );
       const nextRunAt = new Date(Date.now() - 1_000);
       const prefix = `routine-${randomUUID()}-`;

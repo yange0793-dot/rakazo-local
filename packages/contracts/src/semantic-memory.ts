@@ -12,6 +12,54 @@ export const SemanticFactStatusSchema = z.enum(["active", "historical", "forgott
 export const SemanticFactKindSchema = z.enum(["durable", "history", "lesson"]);
 export type SemanticFactKind = z.infer<typeof SemanticFactKindSchema>;
 
+/** A host-checked citation, never a copy of the source text. */
+export const MemorySourceFactSchema = z
+  .object({
+    id: Id,
+    revision: z.number().int().positive(),
+    botId: Id,
+    scope: SemanticFactScopeSchema,
+    kind: SemanticFactKindSchema,
+    threadId: Id.optional(),
+    historyGeneration: z.number().int().nonnegative().optional(),
+  })
+  .strict()
+  .refine(
+    (source) =>
+      source.kind === "history"
+        ? source.threadId !== undefined && source.historyGeneration !== undefined
+        : source.threadId === undefined && source.historyGeneration === undefined,
+    { message: "Only history citations require a thread and generation." },
+  )
+  .refine((source) => source.kind !== "lesson" || source.scope === "isolated", {
+    message: "Lessons belong to an isolated bot scope.",
+  });
+export type MemorySourceFact = z.infer<typeof MemorySourceFactSchema>;
+export const MemorySourceFactsSchema = z.array(MemorySourceFactSchema).min(1).max(64);
+
+/** UTF-16 offsets into the stored Markdown; each span covers complete lines. */
+export const MemoryDerivedSpanSchema = z
+  .object({
+    start: z.number().int().nonnegative(),
+    end: z.number().int().positive(),
+    sources: MemorySourceFactsSchema,
+    /** Set by the store; a writer that changes bytes cannot leave authority on new text. */
+    contentHash: z
+      .string()
+      .regex(/^[a-f0-9]{64}$/)
+      .optional(),
+  })
+  .strict()
+  .refine((span) => span.start < span.end, { message: "A derived span must contain text." });
+export type MemoryDerivedSpan = z.infer<typeof MemoryDerivedSpanSchema>;
+export const MemoryDerivedSpansSchema = z
+  .array(MemoryDerivedSpanSchema)
+  .max(256)
+  .refine(
+    (spans) => spans.every((span, index) => index === 0 || spans[index - 1]!.end <= span.start),
+    { message: "Derived spans must be ordered and cannot overlap." },
+  );
+
 export const LessonEvidenceKindSchema = z.enum([
   "run_failed",
   "approval_denied",
@@ -40,18 +88,35 @@ export type LessonHarnessProvenance = z.infer<typeof LessonHarnessProvenanceSche
 export const SEMANTIC_RECALL_DEFAULT_LIMIT = 20;
 export const SEMANTIC_RECALL_MAX_LIMIT = 50;
 
+/** Query discovery and exact revision reads share the existing recall tool. */
 export const SemanticMemoryRecallInputSchema = z
-  .object({
-    query: z.string().trim().min(1).max(10_000),
-    limit: z
-      .number()
-      .int()
-      .min(1)
-      .max(SEMANTIC_RECALL_MAX_LIMIT)
-      .default(SEMANTIC_RECALL_DEFAULT_LIMIT),
-    scope: z.enum(["current", "isolated", "shared", "all"]).default("current"),
-  })
-  .strict();
+  .union([
+    z
+      .object({
+        query: z.string().trim().min(1).max(10_000),
+        limit: z
+          .number()
+          .int()
+          .min(1)
+          .max(SEMANTIC_RECALL_MAX_LIMIT)
+          .default(SEMANTIC_RECALL_DEFAULT_LIMIT),
+        scope: z.enum(["current", "isolated", "shared", "all"]).default("current"),
+        kind: z.literal("lesson").optional(),
+      })
+      .strict(),
+    z
+      .object({
+        id: z.string().trim().min(1),
+        expected_revision: z.number().int().positive(),
+        scope: z.enum(["current", "isolated", "shared"]).default("current"),
+        kind: z.literal("lesson").optional(),
+      })
+      .strict(),
+  ])
+  .refine(
+    (input) => input.kind !== "lesson" || input.scope === "current" || input.scope === "isolated",
+    { message: "Lessons belong to this bot's isolated scope.", path: ["scope"] },
+  );
 
 export const SemanticFactProvenanceSchema = z.object({
   kind: z.enum(["user", "run", "manual", "import", "history"]),
@@ -67,6 +132,8 @@ export const SemanticFactProvenanceSchema = z.object({
   validTo: IsoDate.optional(),
   /** Set on host-written lessons: why it exists and where it came from. */
   harness: LessonHarnessProvenanceSchema.optional(),
+  /** Automatic projections depend on these exact source revisions. Manual edits detach. */
+  derivedFrom: MemorySourceFactsSchema.optional(),
   /** Imported assertions are retained as history, not newly verified by the host. */
   legacy: z
     .object({

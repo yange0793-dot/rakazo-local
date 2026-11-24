@@ -2,6 +2,7 @@ import type {
   AdapterContext,
   DurableMemoryScope,
   SemanticMemoryProvider,
+  SemanticMemoryReadRequest,
   SemanticMemoryRecallRequest,
   SemanticMemoryResponse,
   SemanticMemoryResult,
@@ -24,6 +25,12 @@ import {
   MAX_RECALLED_MEMORIES,
   MAX_RECALLED_MEMORY_BYTES,
 } from "./history-compaction.js";
+import { buildLessonNotes } from "./lesson-notes.js";
+import {
+  memoryDerivationsForEdit,
+  memoryReadSource,
+  memorySourceFactsArgument,
+} from "./memory-derivation.js";
 import { editMemory } from "./memory-tools.js";
 import type { RunContext } from "./run-context.js";
 import { isRunTainted } from "./run-context.js";
@@ -364,6 +371,19 @@ export const memoryTools: ToolHandlers = {
   async remember(ctx, call) {
     const { deps, runId, bot, thread, context } = ctx;
     const { args } = call;
+    const sources = memorySourceFactsArgument(args, bot.id);
+    if ("error" in sources) return call.finish(sources);
+    if (args.source_facts === undefined && ctx.memory.recoveryUnavailable)
+      return call.finish({
+        error:
+          "Memory source recovery is incomplete. Read the relevant facts and supply source_facts.",
+      });
+    const derivedFrom =
+      args.source_facts === undefined ? (ctx.memory.observedFacts ?? []) : sources.sources;
+    if (derivedFrom.length > 64)
+      return call.finish({
+        error: "Too many memory sources for one note. Specify the relevant source_facts.",
+      });
     // One document per bot keeps the size cap meaningful.
     const path = MEMORY_INDEX_PATH;
     // A concurrent save changes the revision, so re-read and apply the edit again.
@@ -385,6 +405,7 @@ export const memoryTools: ToolHandlers = {
             botId: bot.id,
             path,
             content,
+            derivations: memoryDerivationsForEdit(existing?.content ?? "", content, derivedFrom),
             expectedRevision: existing?.revision ?? 0,
             sourceRunId: runId,
             sourceThreadId: thread.id,
@@ -401,6 +422,23 @@ export const memoryTools: ToolHandlers = {
   async save_shared_memory(ctx, call) {
     const { deps, runId, thread, context } = ctx;
     const { args } = call;
+    const sources = memorySourceFactsArgument(args, ctx.bot.id);
+    if ("error" in sources) return call.finish(sources);
+    if (args.source_facts === undefined && ctx.memory.recoveryUnavailable)
+      return call.finish({
+        error:
+          "Memory source recovery is incomplete. Read the relevant facts and supply source_facts.",
+      });
+    const derivedFrom =
+      args.source_facts === undefined
+        ? (ctx.memory.observedFacts ?? []).filter(
+            (source) => source.scope === "shared" && source.kind !== "lesson",
+          )
+        : sources.sources;
+    if (derivedFrom.length > 64)
+      return call.finish({
+        error: "Too many memory sources for one note. Specify the relevant source_facts.",
+      });
     const invalid = sharedMemorySaveError(args);
     if (invalid) return call.finish({ error: invalid });
     const path = String(args.path ?? "").trim();
@@ -408,12 +446,18 @@ export const memoryTools: ToolHandlers = {
     // concurrent edit is rejected instead of overwritten.
     const snapshot = await deps.memory.read({ scope: "user", path }, context);
     const expectedRevision = snapshot.documents[0]?.revision ?? 0;
+    const content = redactSecrets(String(args.content ?? ""), ctx.secrets);
     try {
       const saved = await deps.memory.commit(
         {
           scope: "user",
           path,
-          content: redactSecrets(String(args.content ?? ""), ctx.secrets),
+          content,
+          derivations: memoryDerivationsForEdit(
+            snapshot.documents[0]?.content ?? "",
+            content,
+            derivedFrom,
+          ),
           expectedRevision,
           sourceRunId: runId,
           sourceThreadId: thread.id,
@@ -430,17 +474,28 @@ export const memoryTools: ToolHandlers = {
   async recall_memory(ctx, call) {
     const { bot, thread, context } = ctx;
     const { args } = call;
-    if (!ctx.memory.semantic || !ctx.memory.scope || ctx.source.messagingChannelRun) {
+    const semantic = ctx.memory.semantic;
+    if (!semantic || !ctx.memory.scope || ctx.source.messagingChannelRun) {
       return call.finish({ error: "Semantic memory is not available in this run." });
     }
     const parsed = SemanticMemoryRecallInputSchema.safeParse(withoutBlankFields(args));
     if (!parsed.success) return call.finish({ error: argsError(parsed.error) });
-    const { query, limit, scope } = parsed.data;
+    const { scope, kind } = parsed.data;
+    if (
+      kind === "lesson" &&
+      (semantic.describe().capabilities.managedFacts !== true || !semantic.read)
+    ) {
+      return call.finish({
+        error: "This memory provider does not support readable lesson references.",
+      });
+    }
+    // Automatic lesson recall uses the bot's own namespace regardless of its fact preference.
+    const currentScope = kind === "lesson" ? "isolated" : ctx.memory.scope;
     const scopes: DurableMemoryScope[] =
       scope === "all"
-        ? [ctx.memory.scope, ctx.memory.scope === "isolated" ? "shared" : "isolated"]
-        : [scope === "current" ? ctx.memory.scope : scope];
-    if (scopes.some((value) => value !== ctx.memory.scope)) {
+        ? [currentScope, currentScope === "isolated" ? "shared" : "isolated"]
+        : [scope === "current" ? currentScope : scope];
+    if (scopes.some((value) => value !== currentScope)) {
       const sourceMessage = ctx.run.sourceMessageId
         ? await ctx.deps.prisma.message.findUnique({
             where: { id: ctx.run.sourceMessageId, threadId: thread.id },
@@ -458,14 +513,96 @@ export const memoryTools: ToolHandlers = {
         });
       }
     }
+    if ("id" in parsed.data) {
+      if (!semantic.read) {
+        return call.finish({
+          error: "This memory provider does not support exact revision reads.",
+        });
+      }
+      const request: SemanticMemoryReadRequest = {
+        id: parsed.data.id,
+        expectedRevision: parsed.data.expected_revision,
+        scope: scopes[0]!,
+        botId: bot.id,
+        threadId: thread.id,
+        ...(kind ? { kind } : {}),
+        ...(thread.historyCompactedUpToSeq == null
+          ? {}
+          : { historyGeneration: thread.historyCompactionGeneration }),
+      };
+      const response = await semantic.read(request, context);
+      if (!response.ok)
+        return call.finish({
+          ...response,
+          error: sanitizeConnectorError(response.error, ctx.secrets),
+        });
+      if (
+        response.value.id !== parsed.data.id ||
+        response.value.revision !== parsed.data.expected_revision
+      ) {
+        return call.finish({
+          error: "The requested memory revision is not available in this scope.",
+        });
+      }
+      const rendered = buildRecalledMemory([response.value], ctx.secrets, {
+        maxFacts: 1,
+        maxBytes: MAX_RECALLED_MEMORY_BYTES,
+      });
+      if (!rendered.shown) {
+        return call.finish({
+          ok: false,
+          error: "The memory body exceeds the read response budget.",
+        });
+      }
+      const sourceFact =
+        semantic.describe().capabilities.managedFacts === true
+          ? memoryReadSource(request, response.value)
+          : undefined;
+      const sourceIsPublicMetadata =
+        sourceFact &&
+        redactSecrets(JSON.stringify(sourceFact), ctx.secrets) === JSON.stringify(sourceFact);
+      if (sourceIsPublicMetadata) {
+        ctx.memory.observedFacts ??= [];
+        const observed = ctx.memory.observedFacts;
+        const existing = observed.findIndex(
+          (source) =>
+            source.id === sourceFact.id &&
+            source.scope === sourceFact.scope &&
+            source.kind === sourceFact.kind,
+        );
+        if (existing >= 0) observed[existing] = sourceFact;
+        else if (observed.length <= 64) observed.push(sourceFact);
+      }
+      return call.finish({
+        kind: "agent_tool_result",
+        content: [{ type: "text", text: rendered.text }],
+        details: {
+          ok: true,
+          untrusted: true,
+          operation: "read",
+          id: redactSecrets(response.value.id, ctx.secrets),
+          revision: response.value.revision,
+          kind: kind ?? "fact",
+          shown: rendered.shown,
+          omitted: rendered.omitted,
+          bytes: rendered.bytes,
+          scopes,
+          ...(sourceIsPublicMetadata ? { sourceFact } : {}),
+        },
+      });
+    }
+    const { query } = parsed.data;
+    const limit =
+      kind === "lesson" ? Math.min(parsed.data.limit, MAX_LESSON_RECALLS) : parsed.data.limit;
     const responses = await Promise.all(
       scopes.map((selectedScope) =>
-        ctx.memory.semantic!.recall(
+        semantic.recall(
           {
             query: redactSecrets(query, ctx.secrets),
             scope: selectedScope,
             botId: bot.id,
             threadId: thread.id,
+            ...(kind ? { kind } : {}),
             ...(thread.historyCompactedUpToSeq == null
               ? {}
               : { historyGeneration: thread.historyCompactionGeneration }),
@@ -491,6 +628,41 @@ export const memoryTools: ToolHandlers = {
           });
         }
       }
+    }
+    if (kind === "lesson") {
+      const rendered = buildLessonNotes(
+        results.flatMap((result) =>
+          result.id && result.revision !== undefined
+            ? [{ id: result.id, revision: result.revision, content: result.memory }]
+            : [],
+        ),
+        ctx.secrets,
+      );
+      return call.finish({
+        kind: "agent_tool_result",
+        content: [
+          {
+            type: "text",
+            text:
+              rendered.text ||
+              (results.length
+                ? "No recalled lesson references fit the response budget."
+                : "No matching lessons."),
+          },
+        ],
+        details: {
+          ok: true,
+          untrusted: true,
+          kind,
+          matched: results.length,
+          shown: rendered.shown.length,
+          references: rendered.shown,
+          omitted: rendered.omitted,
+          bytes: rendered.bytes,
+          limit,
+          scopes,
+        },
+      });
     }
     const rendered = buildRecalledMemory(results, ctx.secrets, {
       maxFacts: limit,

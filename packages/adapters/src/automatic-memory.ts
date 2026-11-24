@@ -26,8 +26,6 @@ const MAX_RECALL_QUERY_BYTES = 8 * 1024;
 const REDACTED = "[redacted]";
 /** Shorter values cannot be redacted without shredding ordinary words; the password rule agrees. */
 const MIN_SECRET_REDACTION_LENGTH = 6;
-/** A turn this short holds no durable fact, so it must not cost a model call. */
-const MIN_EXTRACTION_SOURCE_CHARS = 4;
 /** A worker killed mid-extraction leaves its job locked for Graphile's hours; retry after this. */
 const LOCKED_EXTRACTION_ABANDONED_MS = 10 * 60_000;
 
@@ -157,16 +155,6 @@ async function archiveBatch(
     await store.applyBatch(batch, [], ctx);
     return;
   }
-  // Acknowledgement-only turns ("谢谢", "好的") carry no durable fact; skip the paid call.
-  if (batch.newSources.every((source) => source.text.trim().length < MIN_EXTRACTION_SOURCE_CHARS)) {
-    await store.applyBatch(batch, [], ctx);
-    getLogger().info("automatic memory extraction skipped a short turn", {
-      threadId: batch.threadId,
-      sources: batch.newSources.length,
-    });
-    return;
-  }
-
   const secrets = await collectSecrets(deps, ctx);
   const request = await buildExtractionRequest(deps, batch, ctx, secrets);
   const requestBytes = new TextEncoder().encode(JSON.stringify(request)).byteLength;

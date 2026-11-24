@@ -1,8 +1,10 @@
+import type { TicketWorkEnvironment } from "@rakazo/contracts";
 import { parseTicketRef } from "@rakazo/contracts";
 import { escapePromptData } from "@rakazo/core";
 import type { Prisma, PrismaClient } from "@rakazo/db";
-import { coerceTicketStatus } from "@rakazo/db";
+import { coerceTicketStatus, IsolationError } from "@rakazo/db";
 import { ticketReceiptsEnabled } from "./ticket-receipt-config.js";
+import { loadAgentTicketWorkState, renderTicketWorkStateContext } from "./ticket-work-state.js";
 import { byteLength, truncateUtf8 } from "./utf8.js";
 
 const MAX_TICKET_CONTEXT_BYTES = 4 * 1024;
@@ -78,18 +80,39 @@ export async function loadAgentTicketContext(
     spaceId: string;
     text: string;
     ticketId?: string | null;
+    workState?: {
+      runId: string;
+      userId: string;
+      botId: string;
+      environment: TicketWorkEnvironment | null;
+    };
     origin?: { threadId: string; userId: string; botId: string; messageId?: string | null };
   },
   maxBytes = MAX_TICKET_CONTEXT_BYTES,
 ): Promise<string | undefined> {
   if (!deps.ticketBoardEnabled) return undefined;
+  const recovered =
+    input.ticketId && input.workState
+      ? await loadAgentTicketWorkState(deps, {
+          ...input.workState,
+          ticketId: input.ticketId,
+          spaceId: input.spaceId,
+        }).catch((error: unknown) => {
+          // Historical/shared tickets can be readable on the board without a personal work state.
+          if (error instanceof IsolationError) return undefined;
+          throw error;
+        })
+      : undefined;
+  const workContext = recovered
+    ? renderTicketWorkStateContext(recovered, Math.min(maxBytes, 3 * 1024))
+    : undefined;
   const receipts = ticketReceiptsEnabled();
   const origin = receipts ? input.origin : undefined;
   const ticketId = receipts ? input.ticketId : undefined;
-  if (!origin && !ticketId && !TICKET_REF_HINT.test(input.text)) return undefined;
+  if (!origin && !ticketId && !TICKET_REF_HINT.test(input.text)) return workContext;
 
   const board = await deps.prisma.board.findUnique({ where: { spaceId: input.spaceId } });
-  if (!board) return undefined;
+  if (!board) return workContext;
 
   const refs = extractTicketRefs(input.text, board.ticketPrefix);
   const wanted = refs.flatMap((ref) => {
@@ -157,7 +180,7 @@ export async function loadAgentTicketContext(
   }
   const recentOpen = filters.length === 0 && originFilter;
   if (recentOpen) filters.push({ ...originFilter, status: { notIn: ["done", "closed"] } });
-  if (!filters.length) return undefined;
+  if (!filters.length) return workContext;
 
   const rows = await deps.prisma.ticket.findMany({
     where: {
@@ -167,7 +190,7 @@ export async function loadAgentTicketContext(
     },
     ...(recentOpen ? { orderBy: { updatedAt: "desc" as const }, take: 3 } : {}),
   });
-  if (rows.length === 0) return undefined;
+  if (rows.length === 0) return workContext;
 
   const comments = await deps.prisma.ticketComment.findMany({
     where: { spaceId: input.spaceId, ticketId: { in: rows.map((row) => row.id) } },
@@ -214,5 +237,9 @@ export async function loadAgentTicketContext(
       lastComment: lastCommentByTicket.get(row.id)?.trim() || null,
     });
   }
-  return renderTicketContext(entries, maxBytes);
+  const references = renderTicketContext(
+    entries,
+    maxBytes - (workContext ? byteLength(workContext) + 2 : 0),
+  );
+  return [workContext, references].filter(Boolean).join("\n\n") || undefined;
 }

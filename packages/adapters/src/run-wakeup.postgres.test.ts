@@ -5,20 +5,27 @@ import { runContinueJob } from "@rakazo/adapter-kit";
 import { stuckWorkStatusMessage } from "@rakazo/core";
 import type { PrismaClient } from "@rakazo/db";
 import {
+  answerRunInput,
   appendEvent,
   appendEventInTransaction,
   asSystem,
   createDb,
   createThreadEvents,
+  finalizeComputerControlRelease,
   finalizeRun,
+  pauseRunForInput,
   provisionMessagingIdentity,
   runAsSystem,
   runAsTenant,
+  sendUserMessage,
 } from "@rakazo/db";
 import { createLogger, createTestSink, installLogger } from "@rakazo/logging";
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
+import type { ExecutorDeps } from "./executor-deps.js";
 import { InMemoryRealtimeFanout } from "./realtime.js";
+import { claimRun } from "./run-lifecycle.js";
 import { RunJobPublisher, RunStarter, RunWorkerHost } from "./run-wakeup.js";
+import { refreshTakeoverContinuePlan, takeoverContinuePlan } from "./takeover-resume.js";
 import { GraphileJobPublisher } from "./wakeup.js";
 
 const url = process.env.DATABASE_URL;
@@ -33,10 +40,7 @@ describePostgres("direct run dispatch (PostgreSQL)", () => {
     db = createDb(url!);
     system = asSystem(db.prisma);
     identity = await runAsSystem("direct dispatch fixture", () =>
-      provisionMessagingIdentity(
-        db.prisma,
-        { provider: "email", address },
-      ),
+      provisionMessagingIdentity(db.prisma, { provider: "email", address }),
     );
   });
   afterAll(async () => {
@@ -530,7 +534,7 @@ describePostgres("direct run dispatch (PostgreSQL)", () => {
     }
   });
 
-  it("preserves delayed retries, recovers expired leases, and only resumes human waits after an explicit wake", async () => {
+  it("preserves delayed retries, recovers expired leases, and only resumes input waits once queued", async () => {
     const due = new Date(Date.now() + 60_000);
     const delayed = await createRun({ wakeAt: due });
     const expired = await createRun({ status: "running", leaseExpiresAt: new Date(0) });
@@ -558,8 +562,15 @@ describePostgres("direct run dispatch (PostgreSQL)", () => {
       await wait(() => expect(entered).toContain(expired.id));
       expect(entered).not.toContain(waiting.id);
       expect(entered).not.toContain(delayed.id);
-      await system.run.update({ where: { id: delayed.id }, data: { wakeAt: new Date(0) } });
       await runAsTenant(identity, () => publisher.enqueue(runContinueJob(waiting.id)));
+      expect(await system.run.findUniqueOrThrow({ where: { id: waiting.id } })).toMatchObject({
+        status: "waiting_input",
+        wakeAt: null,
+      });
+      expect(entered).not.toContain(waiting.id);
+      await system.run.update({ where: { id: waiting.id }, data: { status: "queued" } });
+      await runAsTenant(identity, () => publisher.enqueue(runContinueJob(waiting.id)));
+      await system.run.update({ where: { id: delayed.id }, data: { wakeAt: new Date(0) } });
       await wait(() => {
         expect(entered).toContain(delayed.id);
         expect(entered).toContain(waiting.id);
@@ -568,6 +579,207 @@ describePostgres("direct run dispatch (PostgreSQL)", () => {
       await host.stop();
     }
   });
+
+  it.each([false, true])(
+    "rechecks a real pause after dueAgain and only claims a committed answer (%s)",
+    async (answered) => {
+      const run = await createRun();
+      const deps = { prisma: system } as ExecutorDeps;
+      const realtime = new InMemoryRealtimeFanout();
+      const starter = new RunStarter(realtime);
+      const publisher = new RunJobPublisher(system, background(), starter);
+      let release!: () => void;
+      const finishing = new Promise<void>((resolve) => {
+        release = resolve;
+      });
+      const fences: number[] = [];
+      const handler = vi.fn(async (_payload, execution) => {
+        const observed = await system.run.findUniqueOrThrow({ where: { id: run.id } });
+        const claimed = await claimRun(deps, observed, "worker");
+        if (!claimed) return;
+        fences.push(claimed.fence);
+        execution.onRunStarted();
+        if (fences.length === 1) await finishing;
+      });
+      starter.attach({ "run.continue": handler } as unknown as BackgroundJobHandlers);
+      try {
+        await publisher.enqueue(runContinueJob(run.id));
+        await wait(() => expect(fences).toEqual([1]));
+        await publisher.enqueue(runContinueJob(run.id));
+        // A notification already in flight may be delivered before the pause commits.
+        starter.start(run.id);
+        const attempt = await system.attempt.create({
+          data: { runId: run.id, fence: 1, status: "running" },
+        });
+        expect(
+          await pauseRunForInput(system, {
+            ...identity,
+            runId: run.id,
+            attemptId: attempt.id,
+            leaseOwner: "worker",
+            leaseFence: 1,
+            blocks: [{ kind: "ask", text: "Which city?", status: "pending" }],
+          }),
+        ).toBeTruthy();
+        const paused = await system.run.findUniqueOrThrow({ where: { id: run.id } });
+        expect(paused).toMatchObject({
+          status: "waiting_input",
+          leaseFence: 1,
+          leaseOwner: null,
+          wakeAt: null,
+        });
+        expect(await claimRun(deps, run, "stale-scanner")).toBeUndefined();
+        expect(await claimRun(deps, paused, "stale-worker")).toBeUndefined();
+        if (answered) {
+          const ask = await system.message.findFirstOrThrow({
+            where: { runId: run.id, role: "bot" },
+            orderBy: { seq: "desc" },
+          });
+          expect(
+            await answerRunInput(system, {
+              ...identity,
+              runId: run.id,
+              messageId: ask.id,
+              answeredByUserId: identity.userId,
+              answer: "Paris",
+            }),
+          ).toBe(true);
+          await publisher.enqueue(runContinueJob(run.id));
+        }
+        release();
+        await wait(() => expect(handler).toHaveBeenCalledTimes(2));
+        await starter.stop();
+        expect(fences).toEqual(answered ? [1, 2] : [1]);
+        expect(await system.run.findUniqueOrThrow({ where: { id: run.id } })).toMatchObject({
+          status: answered ? "running" : "waiting_input",
+          leaseFence: answered ? 2 : 1,
+        });
+        expect((await system.task.findUniqueOrThrow({ where: { id: run.taskId } })).prompt).toBe(
+          answered ? "Paris" : "fixture",
+        );
+      } finally {
+        release();
+        await starter.stop();
+        await system.run.update({ where: { id: run.id }, data: { status: "cancelled" } });
+      }
+    },
+  );
+
+  it.each(["leased", "running"])(
+    "recovers expired %s once and rejects the old fence after another expiry",
+    async (status) => {
+      const run = await createRun({ status, leaseExpiresAt: new Date(0) });
+      const observed = await system.run.update({
+        where: { id: run.id },
+        data: { leaseFence: 7, leaseOwner: "lost-worker" },
+      });
+      const deps = { prisma: system } as ExecutorDeps;
+      try {
+        const results = await Promise.all([
+          claimRun(deps, observed, "worker-a"),
+          claimRun(deps, observed, "worker-b"),
+        ]);
+        expect(results.filter(Boolean)).toHaveLength(1);
+        expect(results.find(Boolean)).toMatchObject({ fence: 8 });
+        const active = await system.run.findUniqueOrThrow({ where: { id: run.id } });
+        expect(await claimRun(deps, active, "competitor")).toBeUndefined();
+        const expired = await system.run.update({
+          where: { id: run.id },
+          data: { leaseExpiresAt: new Date(0) },
+        });
+        expect(await claimRun(deps, observed, "stale-worker")).toBeUndefined();
+        expect(await claimRun(deps, expired, "replacement")).toMatchObject({ fence: 9 });
+      } finally {
+        await system.run.update({ where: { id: run.id }, data: { status: "cancelled" } });
+      }
+    },
+  );
+
+  it.each(["before", "after"])(
+    "keeps external steering resumable when handback commits %s the claim",
+    async (releaseOrder) => {
+      const run = await createRun({ status: "waiting_takeover", trigger: "messaging" });
+      const leaseId = randomUUID();
+      const computer = await system.computer.create({
+        data: {
+          spaceId: identity.spaceId,
+          userId: identity.userId,
+          scopeKey: `steered-takeover-${randomUUID()}`,
+          homeKey: `steered-takeover-${randomUUID()}`,
+          kind: "fake",
+          controlHolder: "user",
+          controlBotId: identity.botId,
+          controlRunId: run.id,
+          controlLeaseId: leaseId,
+          controlLeaseExpiresAt: new Date(Date.now() + 60_000),
+        },
+      });
+      const deps = { prisma: system } as ExecutorDeps;
+      const realtime = new InMemoryRealtimeFanout();
+      const starter = new RunStarter(realtime);
+      const publisher = new RunJobPublisher(system, background(), starter);
+      const handback = () =>
+        finalizeComputerControlRelease(system, {
+          ...identity,
+          computerId: computer.id,
+          runId: run.id,
+          leaseId,
+          holder: "bot",
+          reason: "done",
+        });
+      try {
+        await publisher.enqueue(runContinueJob(run.id));
+        expect(await claimRun(deps, run, "stale-worker")).toBeUndefined();
+        expect(await system.run.findUniqueOrThrow({ where: { id: run.id } })).toMatchObject({
+          status: "waiting_takeover",
+          wakeAt: null,
+          leaseFence: 0,
+        });
+        const message = await sendUserMessage(system, {
+          ...identity,
+          trigger: "messaging",
+          prompt: "Use the files while I finish on screen",
+          blocks: [{ kind: "text", text: "Use the files while I finish on screen" }],
+          clientNonce: `steering-${randomUUID()}`,
+        });
+        expect(message.runId).toBe(run.id);
+        expect(
+          await system.steeringMessage.findMany({ where: { runId: run.id, claimedAt: null } }),
+        ).toHaveLength(1);
+        await publisher.enqueue(runContinueJob(run.id));
+        const observed = await system.run.findUniqueOrThrow({ where: { id: run.id } });
+        let plan = takeoverContinuePlan(observed);
+        expect(plan.heldForTakeover).toBe(true);
+        if (releaseOrder === "before") {
+          expect(await handback()).toEqual({ runId: run.id });
+          expect(await claimRun(deps, observed, "stale-worker")).toBeUndefined();
+          const released = await system.run.findUniqueOrThrow({ where: { id: run.id } });
+          plan = takeoverContinuePlan(released);
+          expect(await claimRun(deps, released, "worker")).toMatchObject({ fence: 1 });
+        } else {
+          expect(await claimRun(deps, observed, "worker")).toMatchObject({ fence: 1 });
+          expect(
+            await system.computer.findUniqueOrThrow({ where: { id: computer.id } }),
+          ).toMatchObject({ controlHolder: "user", controlLeaseId: leaseId });
+          expect(await handback()).toEqual({ runId: run.id });
+        }
+        const current = await system.run.findUniqueOrThrow({ where: { id: run.id } });
+        expect(current).toMatchObject({
+          status: "running",
+          leaseOwner: "worker",
+          leaseFence: 1,
+        });
+        expect(refreshTakeoverContinuePlan(plan, current)).toMatchObject({
+          heldForTakeover: false,
+          resumeCheckpoint: "takeover",
+        });
+      } finally {
+        await starter.stop();
+        await system.run.update({ where: { id: run.id }, data: { status: "cancelled" } });
+        await system.computer.delete({ where: { id: computer.id } });
+      }
+    },
+  );
 
   it("commits first response timing with output, once across retries, and rolls both back on failure", async () => {
     const run = await createRun({ status: "running" });

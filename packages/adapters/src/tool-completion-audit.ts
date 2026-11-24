@@ -1,4 +1,5 @@
 import type { AgentToolCompletion } from "@rakazo/adapter-kit";
+import { MemorySourceFactSchema } from "@rakazo/contracts";
 import { redactSecrets } from "@rakazo/core";
 import type { ThreadEvents } from "@rakazo/db";
 import { RunHistoryWriteError } from "@rakazo/db";
@@ -93,6 +94,67 @@ export function toolCompletionAuditPayload(
     return payload;
   }
   const record = details as Record<string, unknown>;
+  if (completion.name === "recall_memory" && record.kind === "lesson") {
+    const references =
+      record.operation === "read"
+        ? [{ id: record.id, revision: record.revision }]
+        : Array.isArray(record.references)
+          ? record.references
+          : [];
+    payload.memory = {
+      kind: "lesson",
+      operation: record.operation === "read" ? "read" : "recall",
+      references: references.slice(0, 3).flatMap((reference: unknown) => {
+        if (!reference || typeof reference !== "object") return [];
+        const { id, revision } = reference as { id?: unknown; revision?: unknown };
+        return typeof id === "string" &&
+          typeof revision === "number" &&
+          Number.isSafeInteger(revision)
+          ? [{ id: redactSecrets(id, secrets), revision }]
+          : [];
+      }),
+      omitted: Array.isArray(record.omitted)
+        ? record.omitted.slice(0, 3).flatMap((entry: unknown) => {
+            const reason =
+              entry && typeof entry === "object" ? (entry as { reason?: unknown }).reason : null;
+            return typeof reason === "string" &&
+              ["body_budget", "note_budget", "note_limit", "empty"].includes(reason)
+              ? [reason]
+              : [];
+          })
+        : [],
+    };
+  }
+  if (
+    completion.name === "recall_memory" &&
+    payload.outcome === "succeeded" &&
+    record.operation === "read" &&
+    record.ok === true &&
+    record.shown === 1 &&
+    record.omitted === 0 &&
+    completion.result.content.some(
+      (part) =>
+        part &&
+        typeof part === "object" &&
+        (part as { type?: unknown }).type === "text" &&
+        typeof (part as { text?: unknown }).text === "string" &&
+        Boolean((part as { text: string }).text.trim()),
+    )
+  ) {
+    const parsed = MemorySourceFactSchema.safeParse(record.sourceFact);
+    if (
+      parsed.success &&
+      redactSecrets(JSON.stringify(parsed.data), secrets) === JSON.stringify(parsed.data)
+    ) {
+      payload.memory = {
+        kind: parsed.data.kind,
+        operation: "read",
+        references: [{ id: parsed.data.id, revision: parsed.data.revision }],
+        sources: [parsed.data],
+        omitted: [],
+      };
+    }
+  }
   if (typeof record.frameId === "string") {
     payload.frameId = redactSecrets(record.frameId, secrets);
   }

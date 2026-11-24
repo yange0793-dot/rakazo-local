@@ -2,12 +2,17 @@ import type { AdapterContext, AgentRunRequest, AgentRuntime } from "@rakazo/adap
 import type {
   Actor,
   LessonEvidenceKind,
+  MemorySourceFact,
   MessageBlock,
   SemanticFact,
   SemanticFactListRequest,
   SemanticFactPage,
 } from "@rakazo/contracts";
-import { LessonEvidenceKindSchema, MessageReactionSchema } from "@rakazo/contracts";
+import {
+  LessonEvidenceKindSchema,
+  MemorySourceFactSchema,
+  MessageReactionSchema,
+} from "@rakazo/contracts";
 import type { SkillPlaybook } from "@rakazo/core";
 import {
   blocksToAgentHistoryText,
@@ -69,6 +74,8 @@ export interface ReflectionPayload {
 
 const MAX_FOLLOW_UP_CHARS = 1_000;
 const MAX_TOOL_EVENTS = 200;
+const MAX_MEMORY_SOURCE_READS = 64;
+const MAX_MEMORY_SOURCE_PAGES = 10;
 const MAX_TOOL_ERROR_CHARS = 200;
 const MAX_SKILL_NAMES = 20;
 const MAX_QUOTE_CHARS = 500;
@@ -317,6 +324,50 @@ function toolCallDigest(events: Array<{ type: string; payload: unknown }>): Tool
   };
 }
 
+/** Payloads are encrypted. Scan this run's completion pages, then inspect opened audit metadata. */
+export async function observedMemorySources(
+  prisma: PrismaClient,
+  run: { id: string; spaceId: string; botId: string; threadId: string },
+  signal: AbortSignal,
+): Promise<{ sources: MemorySourceFact[]; complete: boolean }> {
+  const sources = new Map<string, MemorySourceFact>();
+  let before: number | undefined;
+  for (let page = 0; page < MAX_MEMORY_SOURCE_PAGES; page += 1) {
+    signal.throwIfAborted();
+    const events = await prisma.event.findMany({
+      where: {
+        runId: run.id,
+        spaceId: run.spaceId,
+        botId: run.botId,
+        threadId: run.threadId,
+        type: "agent.tool.completed",
+        ...(before === undefined ? {} : { seq: { lt: before } }),
+      },
+      orderBy: { seq: "desc" },
+      take: MAX_TOOL_EVENTS,
+      select: { seq: true, payload: true },
+    });
+    for (const event of events) {
+      if (!event.payload || typeof event.payload !== "object") continue;
+      const payload = event.payload as Record<string, unknown>;
+      if (payload.name !== "recall_memory" || payload.outcome !== "succeeded") continue;
+      const memory = payload.memory as { operation?: unknown; sources?: unknown } | undefined;
+      if (memory?.operation !== "read" || !Array.isArray(memory.sources)) continue;
+      for (const source of memory.sources) {
+        const parsed = MemorySourceFactSchema.safeParse(source);
+        if (!parsed.success || parsed.data.botId !== run.botId) continue;
+        if (parsed.data.kind === "history" && parsed.data.threadId !== run.threadId) continue;
+        const key = JSON.stringify([parsed.data.id, parsed.data.scope, parsed.data.kind]);
+        if (!sources.has(key)) sources.set(key, parsed.data);
+        if (sources.size > MAX_MEMORY_SOURCE_READS) return { sources: [], complete: false };
+      }
+    }
+    if (events.length < MAX_TOOL_EVENTS) return { sources: [...sources.values()], complete: true };
+    before = events.at(-1)!.seq;
+  }
+  return { sources: [], complete: false };
+}
+
 function finalBotReply(messages: Array<{ role: string; blocks: unknown }>): string {
   // Messages come newest first, so the first bot text is the run's final reply.
   for (const message of messages) {
@@ -451,6 +502,7 @@ async function writeLessonDrafts(
   lessons: readonly ParsedLesson[],
   domainKey: string,
   signals: string[],
+  readSources: readonly MemorySourceFact[],
   feedbackId?: string,
 ): Promise<void> {
   if (!threadId) {
@@ -460,20 +512,26 @@ async function writeLessonDrafts(
     return;
   }
   const key = feedbackId ? `${run.id}:${feedbackId}` : run.id;
-  const blocks: MessageBlock[] = lessons.map((lesson, index) => ({
-    kind: "lesson_draft",
-    lessonId: `lesson-draft:${key}:${index}`,
-    runId: run.id,
-    cue: lesson.cue,
-    lesson: lesson.lesson,
-    evidence: lesson.evidence,
-    domainKey,
-    signals,
-    ...(lesson.replaces
-      ? { replaces: { id: lesson.replaces.id, expectedRevision: lesson.replaces.revision } }
-      : {}),
-    status: "draft",
-  }));
+  const blocks: MessageBlock[] = lessons.map((lesson, index) => {
+    const derivedFrom = readSources.filter(
+      (source) => source.kind !== "lesson" || source.id !== lesson.replaces?.id,
+    );
+    return {
+      kind: "lesson_draft",
+      lessonId: `lesson-draft:${key}:${index}`,
+      runId: run.id,
+      cue: lesson.cue,
+      lesson: lesson.lesson,
+      evidence: lesson.evidence,
+      domainKey,
+      signals,
+      ...(derivedFrom.length ? { derivedFrom } : {}),
+      ...(lesson.replaces
+        ? { replaces: { id: lesson.replaces.id, expectedRevision: lesson.replaces.revision } }
+        : {}),
+      status: "draft",
+    };
+  });
   const clientNonce = `reflect-lesson:${key}`;
   const seq = await deps.prisma.$transaction(async (tx) => {
     const existing = await tx.message.findUnique({
@@ -661,7 +719,7 @@ async function reviewAndRecord(
     signal: AbortSignal.timeout(REFLECTION_TIMEOUT_MS),
   };
 
-  const [task, recentMessages, toolEvents, agentSkills, savedSkills, sourceMessage] =
+  const [task, recentMessages, toolEvents, agentSkills, savedSkills, sourceMessage, memoryReads] =
     await Promise.all([
       deps.prisma.task.findUnique({ where: { id: run.taskId }, select: { prompt: true } }),
       deps.prisma.message.findMany({
@@ -690,6 +748,9 @@ async function reviewAndRecord(
             select: { id: true, threadId: true, role: true, authorUserId: true },
           })
         : null,
+      lessonsEnabled
+        ? observedMemorySources(deps.prisma, run, context.signal)
+        : { sources: [], complete: true },
     ]);
   // A free-standing message later in the conversation might be an entirely different task.
   // Read only the owner's linked replies or the explicit manual request about this run.
@@ -904,7 +965,13 @@ async function reviewAndRecord(
     return false;
   });
 
-  if (lessonsEnabled && lessons.length > 0) {
+  if (lessonsEnabled && !memoryReads.complete) {
+    getLogger().warn("harness.reflect skipped lessons: memory read dependencies exceed the limit", {
+      "run.id": run.id,
+      "memory.read_limit": MAX_MEMORY_SOURCE_READS,
+    });
+  }
+  if (lessonsEnabled && lessons.length > 0 && memoryReads.complete) {
     // Auto-apply needs a run nobody outside started and whose source words are their owner's.
     const autoApplied =
       run.learningSourceChecked &&
@@ -917,6 +984,9 @@ async function reviewAndRecord(
       sourceMessage.threadId === run.threadId;
     if (autoApplied) {
       for (const lesson of lessons) {
+        const derivedFrom = memoryReads.sources.filter(
+          (source) => source.kind !== "lesson" || source.id !== lesson.replaces?.id,
+        );
         const saved = await store.saveLesson(
           {
             botId,
@@ -926,6 +996,7 @@ async function reviewAndRecord(
               kind: "run",
               runId: run.id,
               threadId: run.threadId,
+              ...(derivedFrom.length ? { derivedFrom } : {}),
               harness: {
                 domainKey,
                 signals,
@@ -953,6 +1024,7 @@ async function reviewAndRecord(
         lessons,
         domainKey,
         signals,
+        memoryReads.sources,
         feedback[0]?.id,
       );
     }

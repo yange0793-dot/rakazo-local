@@ -25,7 +25,7 @@ import {
   userRunError,
   withoutLastToolStepNotes,
 } from "@rakazo/core";
-import { MemoryArchiveStore, RunHistoryWriteError, recordUsage } from "@rakazo/db";
+import { RunHistoryWriteError, recordUsage } from "@rakazo/db";
 import { getLogger } from "@rakazo/logging";
 import { sanitizedError } from "@rakazo/logging/monitoring";
 import { MAX_APPROVAL_DETAIL_LENGTH, truncate } from "./approval-ask.js";
@@ -137,6 +137,18 @@ async function recordRunLearning(
     await finishRunLearning(ctx, signals);
   } catch (error) {
     getLogger().error("run learning", error);
+  }
+}
+
+async function enqueueMemoryArchive(ctx: RunContext, availableAt: Date | undefined) {
+  if (!availableAt) return;
+  try {
+    await ctx.deps.jobs.enqueue(
+      automaticMemoryJob(ctx.thread.id, ctx.bot.id, ctx.run.userId, availableAt),
+    );
+  } catch (error) {
+    // The completion transaction saved the pointer; reconciliation can publish it again.
+    getLogger().error("automatic memory scheduling failed", error);
   }
 }
 
@@ -677,8 +689,13 @@ async function stopStuckToolLoop(ctx: RunContext, toolName: string, refusal?: To
     leaseFence: fence,
     outcome: "completed",
     blocks: isBackgroundRunTrigger(run.trigger) ? [] : [{ kind: "text", text: stuckText }],
+    memoryArchiveAt:
+      deps.automaticMemory?.enabled && (run.trigger === "user" || run.trigger === "follow_up")
+        ? new Date((deps.now?.() ?? new Date()).getTime() + 60_000)
+        : undefined,
   });
   if (!stopped) return;
+  await enqueueMemoryArchive(ctx, stopped.memoryArchiveAt);
   await recordRunLearning(ctx, "completed");
   const stoppedForOverLimit = overLimit >= MAX_CONSECUTIVE_OVER_LIMIT_ACTION_CALLS;
   logLoopGuardStop(
@@ -975,8 +992,13 @@ export async function completeRun(ctx: RunContext) {
     outcome: "completed",
     blocks,
     markUnread: !groupSilentEnd && marksUnread,
+    memoryArchiveAt:
+      deps.automaticMemory?.enabled && (run.trigger === "user" || run.trigger === "follow_up")
+        ? new Date((deps.now?.() ?? new Date()).getTime() + 60_000)
+        : undefined,
   });
   if (!completed) return;
+  await enqueueMemoryArchive(ctx, completed.memoryArchiveAt);
   await recordRunLearning(ctx, "completed");
   if (groupSilentEnd) await noteGroupPass(ctx);
   ctx.stopHeartbeatAfterCompletion();
@@ -1020,17 +1042,6 @@ export async function completeRun(ctx: RunContext) {
       threadId: thread.id,
       runId: run.id,
     });
-  }
-  if (deps.automaticMemory?.enabled && (run.trigger === "user" || run.trigger === "follow_up")) {
-    try {
-      const availableAt = new Date((deps.now?.() ?? new Date()).getTime() + 60_000);
-      if (await new MemoryArchiveStore(deps.prisma).markPending(run.id, context, availableAt)) {
-        await deps.jobs.enqueue(automaticMemoryJob(thread.id, bot.id, run.userId, availableAt));
-      }
-    } catch (error) {
-      // The reply is already saved. A scheduled cursor survives an enqueue failure for recovery.
-      getLogger().error("automatic memory scheduling failed", error);
-    }
   }
   // Last, and never fatal: the run is already finalized, so a failure here must not reach
   // the failure path, where a second finalizeRun would match no rows and silently

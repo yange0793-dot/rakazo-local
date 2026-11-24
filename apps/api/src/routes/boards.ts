@@ -4,6 +4,8 @@ import { parseTicketRef } from "@rakazo/contracts";
 import { escapeSearchWildcards } from "@rakazo/core";
 import type { Board as BoardRow, Prisma, PrismaClient } from "@rakazo/db";
 import {
+  cancelTicketSubscription,
+  createTicketSubscription,
   ensureBoard,
   findTicket,
   IsolationError,
@@ -103,6 +105,16 @@ export function boardsRoutes(ctx: RouterContext) {
       }),
     },
     tickets: {
+      subscribe: boardEnabled.tickets.subscribe.handler(async ({ context, input }) => {
+        const subscription = await createTicketSubscription(deps.prisma, context.actor, {
+          ticketId: input.id,
+          source: input.source,
+        });
+        return { subscriptionId: subscription.id };
+      }),
+      unsubscribe: boardEnabled.tickets.unsubscribe.handler(async ({ context, input }) => ({
+        cancelled: await cancelTicketSubscription(deps.prisma, context.actor, input),
+      })),
       list: boardEnabled.tickets.list.handler(async ({ context, input }) => {
         const board = await resolveSpaceBoard(deps.prisma, context.actor.spaceId, input.boardId);
         const q = input.q?.trim();

@@ -532,9 +532,11 @@ function toAgentTool(
           const startedAt = Date.now();
           let result: unknown;
           let failure: unknown;
+          let paused = false;
           try {
             result = await (async () => {
               if (tool.name === "request_takeover") {
+                paused = true;
                 host.pausePending = true;
                 host.queue.push({
                   type: "takeover",
@@ -559,6 +561,7 @@ function toAgentTool(
                 ) {
                   throw new Error("ask_user requires two to four unique, non-empty options");
                 }
+                paused = true;
                 host.pausePending = true;
                 host.queue.push({
                   type: "ask",
@@ -582,7 +585,10 @@ function toAgentTool(
                 if (host.request.executeTool) {
                   const result = await host.request.executeTool(tool.name, args, executionId);
                   if (isAgentToolExecutionResult(result)) {
-                    if (isToolPauseResult(result)) host.pausePending = true;
+                    if (isToolPauseResult(result)) {
+                      paused = true;
+                      host.pausePending = true;
+                    }
                     return result;
                   }
                   return {
@@ -600,6 +606,7 @@ function toAgentTool(
                     details: result,
                   };
                 }
+                paused = true;
                 host.pausePending = true;
                 return {
                   content: [{ type: "text", text: "Protected input requested." }],
@@ -634,7 +641,10 @@ function toAgentTool(
                   },
                 );
                 if (isAgentToolExecutionResult(result)) {
-                  if (isToolPauseResult(result)) host.pausePending = true;
+                  if (isToolPauseResult(result)) {
+                    paused = true;
+                    host.pausePending = true;
+                  }
                   return keepToolResultWhole(tool.name, args)
                     ? result
                     : boundAgentToolResult(result);
@@ -690,7 +700,7 @@ function toAgentTool(
               durationMs: Math.max(0, Date.now() - startedAt),
               ...(result === undefined ? {} : { result }),
               ...(failure === undefined ? {} : { error: failure }),
-              ...(host.pausePending ? { paused: true } : {}),
+              ...(paused ? { paused: true } : {}),
             };
             try {
               void Promise.resolve(host.request.onToolCompleted?.(completion)).catch(

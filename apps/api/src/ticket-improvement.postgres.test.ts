@@ -2,7 +2,7 @@ import { createHash, randomUUID } from "node:crypto";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import type { BackgroundJob, JobPublisher } from "@rakazo/adapter-kit";
+import type { AgentRunRequest, BackgroundJob, JobPublisher } from "@rakazo/adapter-kit";
 import {
   createBackgroundJobHandlers,
   createRunExecutor,
@@ -30,6 +30,7 @@ import {
   getCurrentTaughtSkillRevision,
   listPinnedTaughtSkillRevisions,
   saveTaughtSkillRevision,
+  taughtSkillPlaybookHash,
 } from "../../../packages/adapters/src/taught-skill-revisions.js";
 import {
   badDeliveryPlaybook,
@@ -37,7 +38,7 @@ import {
   goodDeliveryPlaybook,
   OfflineTicketImprovementRuntime,
 } from "../../../packages/adapters/src/ticket-improvement.test-fixtures.js";
-import type { WorkImprovementComparison } from "../../../packages/adapters/src/work-improvement.js";
+import type { WorkImprovementComposition } from "../../../packages/adapters/src/work-improvement-compose.js";
 import { getOwnedArtifact } from "./artifacts.js";
 import { resolveThreadTarget, sendThreadMessage } from "./thread-target.js";
 
@@ -59,10 +60,7 @@ pg("ticket improvement through chat and background jobs (PostgreSQL)", () => {
       let identity: Awaited<ReturnType<typeof provisionMessagingIdentity>> | undefined;
       try {
         identity = await runAsSystem("ticket improvement fixture", () =>
-          provisionMessagingIdentity(
-            prisma,
-            { provider: "email", address },
-          ),
+          provisionMessagingIdentity(prisma, { provider: "email", address }),
         );
         const { spaceId, userId, botId } = identity;
         const actor = { spaceId, userId, email: address, isDeploymentOwner: false };
@@ -131,6 +129,17 @@ pg("ticket improvement through chat and background jobs (PostgreSQL)", () => {
           let correctionRunId = "";
           let nextRunId = "";
           let handledWhileRunning = false;
+          let composerCalls = 0;
+          let composerRequest: AgentRunRequest | undefined;
+          const proposedPlaybook = scenario === "bad" ? badDeliveryPlaybook : goodDeliveryPlaybook;
+          const composedPlaybook =
+            scenario === "bad"
+              ? badDeliveryPlaybook
+              : {
+                  ...goodDeliveryPlaybook,
+                  howToCheck:
+                    "Check complete directory evidence, then require the final upload receipt.",
+                };
           let handlers: ReturnType<typeof createBackgroundJobHandlers>;
           const runtime = new OfflineTicketImprovementRuntime(async (request) => {
             const execute = request.executeTool!;
@@ -217,8 +226,12 @@ pg("ticket improvement through chat and background jobs (PostgreSQL)", () => {
                     handlers["harness.reflect"]({ runId: assignedRunId, auto: true }),
                   ).rejects.toThrow("Offline checkpoint write interrupted");
                   expect(runtime.proposalCalls).toBe(1);
-                  expect(runtime.comparisonCalls).toBe(14);
+                  expect(runtime.comparisonCalls).toBe(28);
+                  expect(composerCalls).toBe(1);
                   await handlers["harness.reflect"]({ runId: assignedRunId, auto: true });
+                  expect(runtime.proposalCalls).toBe(1);
+                  expect(runtime.comparisonCalls).toBe(28);
+                  expect(composerCalls).toBe(1);
                 } finally {
                   injected.mockRestore();
                 }
@@ -238,7 +251,7 @@ pg("ticket improvement through chat and background jobs (PostgreSQL)", () => {
                 "load-chosen-revision",
               )) as { revision: { snapshot: { playbook: unknown } } };
               expect(loaded.revision.snapshot.playbook).toEqual(
-                scenario === "bad" ? baselineDeliveryPlaybook : goodDeliveryPlaybook,
+                scenario === "bad" ? baselineDeliveryPlaybook : composedPlaybook,
               );
               return "The next delivery uses the chosen revision.";
             }
@@ -247,7 +260,52 @@ pg("ticket improvement through chat and background jobs (PostgreSQL)", () => {
           runtime.proposal = {
             kind: "candidate",
             quote: CORRECTION,
-            playbook: scenario === "bad" ? badDeliveryPlaybook : goodDeliveryPlaybook,
+            playbook: proposedPlaybook,
+          };
+          const run = runtime.run.bind(runtime);
+          runtime.run = async function* (request, context) {
+            if (
+              request.usageOperationKind !== "learning" ||
+              request.runId.endsWith(":proposal") ||
+              request.tools.length > 0
+            ) {
+              yield* run(request, context);
+              return;
+            }
+            runtime.requests.push(request);
+            composerCalls++;
+            composerRequest = request;
+            expect(request.tools).toEqual([]);
+            expect(request.history).toEqual([]);
+            expect(request.executeTool).toBeUndefined();
+            expect(request.fallbackModels).toBeUndefined();
+            const observer = request.model.callObserver!;
+            const callId = `${request.runId}:compose-call`;
+            const reservation = await observer.beforeCall({
+              callId,
+              runId: request.runId,
+              provider: request.model.provider,
+              modelId: request.model.id,
+              inputTokensEstimate: 80,
+              maxOutputTokens: request.model.maxTokens ?? 512,
+            });
+            const usage = {
+              type: "usage" as const,
+              provider: request.model.provider,
+              model: request.model.id,
+              callId,
+              inputTokens: 20,
+              outputTokens: 10,
+              totalTokens: 30,
+              costUsd: 0,
+              usageSource: "deterministic_offline_composer",
+            };
+            await observer.afterCall(reservation, usage);
+            await request.onUsage!(usage);
+            yield {
+              type: "done",
+              text: JSON.stringify({ kind: "compose", playbook: composedPlaybook }),
+            };
           };
           const deps = {
             ...base,
@@ -303,6 +361,7 @@ pg("ticket improvement through chat and background jobs (PostgreSQL)", () => {
           });
           expect(runtime.proposalCalls).toBe(0);
           expect(runtime.comparisonCalls).toBe(0);
+          expect(composerCalls).toBe(0);
           const feedback = await sendThreadMessage(base, actor, originTarget, {
             text: CORRECTION,
             replyToMessageId: receipt.id,
@@ -336,26 +395,90 @@ pg("ticket improvement through chat and background jobs (PostgreSQL)", () => {
             status: string;
             candidateRevisionId: string;
             comparisonArtifact: { id: string; version: number; hash: string };
-            comparison: WorkImprovementComparison;
+            comparison: WorkImprovementComposition;
           };
           expect(result.status).toBe(scenario === "bad" ? "retained" : "adopted");
+          expect(result).toMatchObject({
+            proposal: {
+              result: { kind: "candidate", quote: CORRECTION, playbook: proposedPlaybook },
+            },
+            source: {
+              receiptMessageId: receipt.id,
+              receipt: {
+                schema: 1,
+                ticketId,
+                runId: assignedRunId,
+                version: 1,
+                summary: "Installation passed and upload was selected.",
+              },
+            },
+            comparison: {
+              schemaVersion: "work-improvement.composition.v1",
+              initial: { candidate: { playbook: proposedPlaybook } },
+              composition: {
+                status: "composed",
+                candidate: { playbook: composedPlaybook },
+                error: null,
+                totalTokens: 30,
+                costUsd: 0,
+                usage: [
+                  {
+                    callId: `${composerRequest!.runId}:compose-call`,
+                    totalTokens: 30,
+                    costUsd: 0,
+                    usageSource: "deterministic_offline_composer",
+                  },
+                ],
+              },
+              composed: { candidate: { playbook: composedPlaybook } },
+            },
+          });
           expect(result.comparison.decision).toBe(scenario === "bad" ? "reject" : "adopt");
-          expect(result.comparison.execution.runtime.id).toBe("deterministic-offline-file-tools");
-          expect(result.comparison.summary.improvements).toEqual(["stale", "selected"]);
-          expect(result.comparison.summary.candidate.falsePositiveCompletions).toBe(0);
-          for (const entry of result.comparison.cases) {
-            expect(entry.baseline.workspaceId).not.toBe(entry.candidate.workspaceId);
-            expect(entry.baseline.tools[0]).toMatchObject({
-              name: "read_file",
-              status: "succeeded",
-              result: { path: "request.json", content: expect.any(String) },
-            });
-            expect(entry.candidate.tools[1]).toMatchObject({
-              name: "read_file",
-              status: "succeeded",
-              result: { path: "manifest.json", content: expect.any(String) },
-            });
+          const { initial, composition, composed } = result.comparison;
+          expect(composed).not.toBeNull();
+          for (const comparison of [initial, composed!]) {
+            expect(comparison.decision).toBe(scenario === "bad" ? "reject" : "adopt");
+            expect(comparison.execution.runtime.id).toBe("deterministic-offline-file-tools");
+            expect(comparison.summary.improvements).toEqual(["stale", "selected"]);
+            expect(comparison.summary.candidate.falsePositiveCompletions).toBe(0);
+            expect(comparison.cases).toHaveLength(7);
+            for (const entry of comparison.cases) {
+              expect(entry.baseline.workspaceId).not.toBe(entry.candidate.workspaceId);
+              expect(entry.baseline.tools[0]).toMatchObject({
+                name: "read_file",
+                status: "succeeded",
+                result: { path: "request.json", content: expect.any(String) },
+              });
+              expect(entry.candidate.tools[1]).toMatchObject({
+                name: "read_file",
+                status: "succeeded",
+                result: { path: "manifest.json", content: expect.any(String) },
+              });
+            }
           }
+          expect(
+            new Set(
+              [initial, composed!].flatMap((comparison) =>
+                comparison.cases.flatMap((entry) => [
+                  entry.baseline.workspaceId,
+                  entry.candidate.workspaceId,
+                ]),
+              ),
+            ).size,
+          ).toBe(28);
+          expect(composition.execution.model).toEqual(initial.execution.model);
+          expect(composed!.execution.model).toEqual(initial.execution.model);
+          expect(composed!.candidate.revision).toBe(composition.candidate!.revision);
+          expect(result.comparison.retainedRevision).toBe(
+            scenario === "bad" ? baseline.id : composed!.candidate.revision,
+          );
+          const rerunIds = new Set(composed!.cases.map((entry) => entry.candidate.runId));
+          const rerunRequests = runtime.requests.filter((request) => rerunIds.has(request.runId));
+          expect(rerunRequests).toHaveLength(7);
+          for (const request of rerunRequests)
+            expect(JSON.parse(request.instructions.split("\n").at(-1)!).playbook).toEqual(
+              composedPlaybook,
+            );
           const canonical = await prisma.artifact.findUniqueOrThrow({
             where: { id: result.comparisonArtifact.id },
           });
@@ -377,7 +500,11 @@ pg("ticket improvement through chat and background jobs (PostgreSQL)", () => {
           expect(bytes.toString()).not.toContain("offline-model-key");
           const chosen = await getCurrentTaughtSkillRevision(prisma, actor, skill.id);
           expect(chosen.id).toBe(scenario === "bad" ? baseline.id : result.candidateRevisionId);
-          if (scenario !== "bad")
+          if (scenario !== "bad") {
+            expect(chosen.snapshot.playbook).toEqual(composedPlaybook);
+            expect(taughtSkillPlaybookHash(composedPlaybook)).not.toBe(
+              taughtSkillPlaybookHash(proposedPlaybook),
+            );
             expect(chosen.snapshot.trial).toMatchObject({
               artifactId: canonical.id,
               version: canonical.version,
@@ -386,7 +513,9 @@ pg("ticket improvement through chat and background jobs (PostgreSQL)", () => {
               protectedCasesPassed: true,
               falsePasses: 0,
               withinBudget: true,
+              candidatePlaybookHash: taughtSkillPlaybookHash(composed!.candidate.playbook),
             });
+          }
           const originalPins = await listPinnedTaughtSkillRevisions(prisma, actor, assignedRunId);
           expect(originalPins).toMatchObject([
             { id: baseline.id, snapshot: { playbook: baselineDeliveryPlaybook } },
@@ -407,7 +536,8 @@ pg("ticket improvement through chat and background jobs (PostgreSQL)", () => {
           const artifactCount = await prisma.artifact.count({ where: { runId: assignedRunId } });
           await handlers["harness.reflect"]({ runId: assignedRunId, auto: true });
           expect(runtime.proposalCalls).toBe(1);
-          expect(runtime.comparisonCalls).toBe(14);
+          expect(runtime.comparisonCalls).toBe(28);
+          expect(composerCalls).toBe(1);
           expect(await prisma.artifact.count({ where: { runId: assignedRunId } })).toBe(
             artifactCount,
           );
@@ -423,8 +553,26 @@ pg("ticket improvement through chat and background jobs (PostgreSQL)", () => {
           const costs = await prisma.usageRecord.findMany({
             where: { spaceId, userId, parentRunId: assignedRunId, operationKind: "learning" },
           });
-          expect(costs).toHaveLength(runtime.proposalCalls + runtime.comparisonCalls);
+          expect(costs).toHaveLength(
+            runtime.proposalCalls + runtime.comparisonCalls + composerCalls,
+          );
+          expect(costs).toHaveLength(30);
           expect(costs.every((cost) => cost.totalTokens === 30 && cost.costUsd === 0)).toBe(true);
+          expect(
+            costs.filter((cost) => cost.callId === `${composerRequest!.runId}:compose-call`),
+          ).toMatchObject([
+            {
+              botId: workerBot.id,
+              provider: initial.execution.model.provider,
+              model: initial.execution.model.id,
+              parentRunId: assignedRunId,
+              operationKind: "learning",
+              operationId: `${initial.comparisonId}:comparison:${composerRequest!.runId}`,
+              totalTokens: 30,
+              costUsd: 0,
+              usageSource: "deterministic_offline_composer",
+            },
+          ]);
         });
       } finally {
         vi.unstubAllEnvs();

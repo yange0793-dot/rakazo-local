@@ -4,6 +4,7 @@ import type {
   ComputerRef,
   ConnectorTool,
   MediaGenerationProvider,
+  MemorySourceFact,
   PaidServiceProvider,
   SandboxProvider,
   SemanticMemoryProvider,
@@ -41,11 +42,13 @@ import { PausedTurnToolsUnavailableError } from "./run-lifecycle.js";
 import { publishMessage } from "./run-messages.js";
 import { subagentMarksUnread } from "./run-notifications.js";
 import { secretPausedToolResult } from "./run-secret.js";
+import { saveRunTicketPendingCall } from "./run-ticket-state.js";
 import type { createRunTrustLoaders } from "./run-trust.js";
 import type { inferScript } from "./scripted-runtime.js";
 import type { LoopGuardStreak } from "./tool-loop.js";
 import type { ToolRefusal } from "./tool-refusal.js";
 import { refusal } from "./tool-refusal.js";
+import type { TurnCheckpoint } from "./turn-checkpoint.js";
 import { restoreTurnCheckpoint, unresolvedTurnCheckpointCalls } from "./turn-checkpoint.js";
 
 export type RunningHelper = Omit<Extract<MessageBlock, { kind: "subagent" }>, "kind">;
@@ -307,6 +310,10 @@ export interface RunContext {
   memory: {
     semantic: SemanticMemoryProvider | null;
     scope: ReturnType<typeof effectiveMemoryScope> | null;
+    /** Successful full exact reads in this run; discovery candidates are never added. */
+    observedFacts?: MemorySourceFact[];
+    /** Resume could not recover every exact-read dependency; implicit derivation is disabled. */
+    recoveryUnavailable?: boolean;
   };
   scripted: boolean;
   script: ReturnType<typeof inferScript> | undefined;
@@ -439,15 +446,27 @@ export async function persistTurnCheckpoint(ctx: RunContext, executionId?: strin
   const effects = ctx.state.effects;
   const capture = executionId ? effects.pendingTurnCheckpoints.get(executionId) : undefined;
   if (capture) {
-    const saved = JSON.parse(capture());
+    const saved = JSON.parse(capture()) as TurnCheckpoint;
     saved.effectOccurrences = effects.occurrences;
     saved.ownInstructionsBaseline = ctx.state.ownInstructionsBaseline;
     await saveRunTurnCheckpoint(deps.prisma, run, workerId, fence, JSON.stringify(saved));
     effects.storedTurnCheckpoint = true;
+    if (run.ticketId) {
+      const pending = unresolvedTurnCheckpointCalls(saved.messages).find(
+        (call) => call.id === saved.pendingToolCallId,
+      );
+      if (pending)
+        await saveRunTicketPendingCall(ctx, {
+          toolCallId: pending.id,
+          toolName: pending.name,
+          effectId: null,
+        });
+    }
   } else if (effects.storedTurnCheckpoint) {
     // Helper calls have no saved turn. An earlier pause's turn must not resume this one.
     await dropRunTurnCheckpoint(deps.prisma, run, workerId, fence);
     effects.storedTurnCheckpoint = false;
+    if (run.ticketId) await saveRunTicketPendingCall(ctx, null);
   }
 }
 

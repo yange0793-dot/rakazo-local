@@ -18,6 +18,7 @@ import {
 import type { PrismaClient, ThreadEvents } from "@rakazo/db";
 import { clearEndedRunState, teamChatRunClientNonce } from "@rakazo/db";
 import { getLogger } from "@rakazo/logging";
+import { routeTicketSourceEventInTransaction } from "../../../packages/adapters/src/ticket-subscriptions.js";
 import type { InboundAttachmentStore } from "./inbound-attachments.js";
 import { storeInboundAttachments } from "./inbound-attachments.js";
 import type { MessagingReceipts } from "./messaging-receipts.js";
@@ -64,6 +65,7 @@ export interface TeamChatBridgeDeps {
   storeAttachment?: InboundAttachmentStore;
   providerId: string;
   botId: string;
+  ticketBoardEnabled?: boolean;
   workspaceId?: string;
   isAvailable?: () => Promise<boolean>;
   conversationPrefix?: string;
@@ -301,6 +303,17 @@ export class TeamChatBridge {
       });
     }
     await this.ensureTranscriptMessage(externalMessage, conversation, message.attachments ?? []);
+    if (await this.routeSubscribedMessage(externalMessage.id)) {
+      return {
+        spaceId: conversation.spaceId,
+        userId: conversation.userId,
+        botId: conversation.botId,
+        threadId: conversation.thread.id,
+        ...(options?.queueAgent === false
+          ? { deferred: false, externalMessageId: externalMessage.id }
+          : {}),
+      };
+    }
     if (options?.queueAgent === false) {
       const deferred =
         (externalMessage.status === "deferred" &&
@@ -611,6 +624,62 @@ export class TeamChatBridge {
     }
   }
 
+  private async routeSubscribedMessage(externalMessageId: string): Promise<boolean> {
+    if (!this.deps.ticketBoardEnabled) return false;
+    const outcome = await this.deps.prisma.$transaction(async (tx) => {
+      await tx.$queryRaw`SELECT id FROM external_messages WHERE id = ${externalMessageId} FOR UPDATE`;
+      const message = await tx.externalMessage.findFirst({
+        where: {
+          id: externalMessageId,
+          externalConversation: this.conversationScope(),
+        },
+        include: {
+          threadMessage: { select: { id: true, seq: true } },
+          externalConversation: true,
+        },
+      });
+      if (!message?.threadMessage) return { routed: false };
+      const alreadyRouted = message.engagementReason === "ticket_subscription";
+      if (
+        !alreadyRouted &&
+        (!["received", "observed", "deferred"].includes(message.status) ||
+          isRoutingOwnershipReason(message.engagementReason))
+      )
+        return { routed: false };
+      const conversation = message.externalConversation;
+      const route = await routeTicketSourceEventInTransaction(tx, {
+        spaceId: conversation.spaceId,
+        userId: conversation.userId,
+        botId: conversation.botId,
+        ticketBoardEnabled: true,
+        event: {
+          source: { type: "externalConversation", externalConversationId: conversation.id },
+          eventId: message.providerEventId,
+          messageId: message.threadMessage.id,
+          position: message.threadMessage.seq,
+        },
+      });
+      if (route.status !== "routed") return { routed: alreadyRouted };
+      await tx.externalMessage.update({
+        where: { id: message.id },
+        data: { status: "ignored", engagementReason: "ticket_subscription", nextAttemptAt: null },
+      });
+      const run = route.runId
+        ? await tx.run.findFirst({
+            where: { id: route.runId, ticketId: route.ticketId, spaceId: conversation.spaceId },
+            select: { id: true, status: true },
+          })
+        : null;
+      return { routed: true, run };
+    });
+    if (outcome.run?.status === "queued") {
+      await this.deps.jobs.enqueue(runContinueJob(outcome.run.id)).catch((error) => {
+        getLogger().warn("ticket source wake deferred to reconciliation", error);
+      });
+    }
+    return outcome.routed;
+  }
+
   /**
    * Release expired routing ownership left by a stopped process before
    * reconciliation starts. Active claims (future nextAttemptAt) stay owned by a
@@ -845,6 +914,19 @@ export class TeamChatBridge {
       },
       data: { status: "received", engagementReason: null, nextAttemptAt: null },
     });
+    if (this.deps.ticketBoardEnabled) {
+      const sources = await this.deps.prisma.externalMessage.findMany({
+        where: {
+          status: { in: ["received", "observed"] },
+          threadMessageId: { not: null },
+          externalConversation: this.conversationScope(),
+        },
+        select: { id: true },
+        orderBy: { createdAt: "asc" },
+        take: BATCH_SIZE,
+      });
+      for (const source of sources) await this.routeSubscribedMessage(source.id);
+    }
     await this.ambient.evaluateAmbient(now);
     const received = await this.deps.prisma.externalMessage.findMany({
       where: {
@@ -991,6 +1073,7 @@ export class TeamChatBridge {
   }): Promise<void> {
     const thread = message.externalConversation.thread;
     if (!thread) throw new Error("Team chat conversation has no Rakazo thread");
+    if (await this.routeSubscribedMessage(message.id)) return;
     // In-flight routine wakes own the row via engagementReason; never start a
     // fallback TeamChat agent until that claim is cleared.
     if (isRoutingOwnershipReason(message.engagementReason)) {

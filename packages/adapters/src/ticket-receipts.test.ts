@@ -1,7 +1,7 @@
 import type { Prisma } from "@rakazo/db";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { loadAgentTicketContext } from "./ticket-context.js";
-import { createTicket, updateTicket } from "./ticket-tools.js";
+import { createTicket, getTicket, updateTicket } from "./ticket-tools.js";
 
 const now = new Date("2026-01-01T00:00:00Z");
 const origin = {
@@ -40,6 +40,8 @@ function setup() {
   > = [];
   const tx = {
     board: { update: vi.fn(async () => ({ nextNumber: ++board.nextNumber })) },
+    bot: { findFirst: vi.fn(async () => null) },
+    message: { findFirst: vi.fn(async () => ({ id: origin.messageId }) as { id: string } | null) },
     run: {
       findFirst: vi.fn(async () => sourceRun as typeof sourceRun | null),
       update: vi.fn(async ({ data }: { data: { ticketId: string } }) =>
@@ -77,6 +79,8 @@ function setup() {
   const prisma = {
     board: { findUnique: vi.fn(async () => board) },
     bot: { findFirst: vi.fn(async () => ({ id: input.botId })) },
+    ticket: tx.ticket,
+    ticketComment: { findMany: vi.fn(async () => []) },
     $transaction: vi.fn(async (fn: (client: typeof tx) => Promise<unknown>) => fn(tx)),
   };
   return {
@@ -92,6 +96,47 @@ beforeEach(() => vi.stubEnv("TICKET_WORK_RECEIPTS", "true"));
 afterEach(() => vi.unstubAllEnvs());
 
 describe("chat ticket assignment", () => {
+  it.each(["missing origin", "receipts disabled"])(
+    "rejects new file requirements without an eligible receipt: %s",
+    async (reason) => {
+      const s = setup();
+      if (reason === "receipts disabled") vi.stubEnv("TICKET_WORK_RECEIPTS", "false");
+      expect(
+        await createTicket(s.deps, {
+          ...input,
+          origin: reason === "missing origin" ? undefined : origin,
+          fileDeliveryRequirements: {
+            version: 1,
+            items: [{ id: "report", kind: "artifact", description: "Deliver report" }],
+          },
+        }),
+      ).toEqual({ error: "File-delivery requirements need an eligible original chat receipt." });
+      expect(s.tx.ticket.create).not.toHaveBeenCalled();
+      expect(s.tx.board.update).not.toHaveBeenCalled();
+      expect(s.changes).not.toHaveBeenCalled();
+    },
+  );
+
+  it("fixes file requirements when creating the ticket and preserves them on a replay", async () => {
+    const s = setup();
+    const requirements = {
+      version: 1,
+      items: [
+        { id: "report", kind: "artifact", description: "Deliver report", name: "report.txt" },
+      ],
+    };
+    await createTicket(s.deps, { ...input, fileDeliveryRequirements: requirements });
+    await createTicket(s.deps, {
+      ...input,
+      fileDeliveryRequirements: {
+        ...requirements,
+        items: [{ ...requirements.items[0], id: "other" }],
+      },
+    });
+    expect(s.tickets).toHaveLength(1);
+    expect(s.tickets[0]?.fileDeliveryRequirements).toEqual(requirements);
+  });
+
   it("attaches self-assignment to the current run and reuses repeated creation", async () => {
     const s = setup();
     const first = await createTicket(s.deps, input);
@@ -147,6 +192,176 @@ describe("chat ticket assignment", () => {
     expect(s.sourceRun.ticketId).toBe("ticket-1");
     expect(s.tx.task.create).not.toHaveBeenCalled();
     expect(s.changes).toHaveBeenCalledWith(expect.objectContaining({ wakeAssignee: false }));
+  });
+});
+
+describe("file-delivery requirement revisions", () => {
+  const requirements = {
+    version: 1,
+    items: [{ id: "report", kind: "artifact", description: "Deliver report", name: "report.txt" }],
+  };
+  const replacement = {
+    items: [
+      { id: "table", kind: "artifact", description: "Deliver table", name: "table.csv" },
+      { id: "coverage", kind: "semantic", description: "Cover the updated request" },
+    ],
+  };
+  const revision = {
+    spaceId: input.spaceId,
+    userId: input.userId,
+    botId: input.botId,
+    runId: origin.runId,
+    threadId: origin.threadId,
+    ownerAuthored: true,
+    id: "ticket-1",
+    expectedRequirementsVersion: 1,
+    fileDeliveryRequirements: replacement,
+  };
+
+  it("replaces the complete set, reopens completed work, and preserves the historical receipt", async () => {
+    const s = setup();
+    expect(
+      await createTicket(s.deps, { ...input, fileDeliveryRequirements: requirements }),
+    ).toHaveProperty("delivery.requirements", requirements);
+    Object.assign(s.tickets[0]!, { status: "done", completedAt: now, receiptVersion: 4 });
+    s.changes.mockClear();
+
+    const changed = await updateTicket(s.deps, revision);
+    expect(changed).toMatchObject({
+      ticket: { status: "review", completedAt: null },
+      delivery: { previousVersion: 4, requirements: { version: 2, items: replacement.items } },
+    });
+    expect(s.tickets[0]).toMatchObject({
+      fileDeliveryRequirements: { version: 2, items: replacement.items },
+      receiptVersion: 4,
+    });
+    expect(s.tx.ticket.update).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: { id: "ticket-1", fileDeliveryRequirements: { path: ["version"], equals: 1 } },
+      }),
+    );
+    expect(await getTicket(s.deps, { spaceId: input.spaceId, ref: "ticket-1" })).toHaveProperty(
+      "delivery.requirements",
+      { version: 2, items: replacement.items },
+    );
+    expect(s.changes).toHaveBeenCalledOnce();
+    expect(s.changes).toHaveBeenCalledWith(expect.objectContaining({ wakeAssignee: false }));
+  });
+
+  it("rejects a lost CAS and lets the creator API revise the current version", async () => {
+    const s = setup();
+    await createTicket(s.deps, { ...input, fileDeliveryRequirements: requirements });
+    await updateTicket(s.deps, revision);
+    s.changes.mockClear();
+    s.tx.ticket.update.mockClear();
+    expect(await updateTicket(s.deps, revision)).toHaveProperty(
+      "error",
+      expect.stringContaining("Requirements changed"),
+    );
+    expect(s.tx.ticket.update).not.toHaveBeenCalled();
+    expect(s.changes).not.toHaveBeenCalled();
+    const api = await updateTicket(s.deps, {
+      spaceId: input.spaceId,
+      userId: input.userId,
+      id: "ticket-1",
+      expectedRequirementsVersion: 2,
+      fileDeliveryRequirements: { items: requirements.items },
+    });
+    expect(api).toHaveProperty("delivery.requirements", { version: 3, items: requirements.items });
+    expect(s.changes).toHaveBeenCalledWith(expect.objectContaining({ wakeAssignee: true }));
+  });
+
+  it.each([
+    { userId: "other-user" },
+    { botId: "assignee-bot" },
+    { threadId: "unrelated-thread" },
+    { ownerAuthored: false },
+    { runId: undefined },
+  ])("rejects an unauthorized requirement editor: %j", async (editor) => {
+    const s = setup();
+    await createTicket(s.deps, { ...input, fileDeliveryRequirements: requirements });
+    s.tickets[0]!.assigneeBotId = "assignee-bot";
+    s.changes.mockClear();
+    expect(await updateTicket(s.deps, { ...revision, ...editor })).toHaveProperty("error");
+    expect(s.tx.ticket.update).not.toHaveBeenCalled();
+    expect(s.tickets[0]?.fileDeliveryRequirements).toEqual(requirements);
+    expect(s.changes).not.toHaveBeenCalled();
+  });
+
+  it("checks the original owner request and current owner run inside the transaction", async () => {
+    const s = setup();
+    await createTicket(s.deps, { ...input, fileDeliveryRequirements: requirements });
+    s.tx.message.findFirst.mockResolvedValueOnce(null);
+    expect(await updateTicket(s.deps, revision)).toHaveProperty(
+      "error",
+      "Original request is unavailable.",
+    );
+    expect(s.tx.message.findFirst).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: expect.objectContaining({
+          id: origin.messageId,
+          authorUserId: input.userId,
+          thread: expect.objectContaining({ spaceId: input.spaceId, externalConversationId: null }),
+        }),
+      }),
+    );
+    s.tx.run.findFirst.mockResolvedValueOnce(null);
+    expect(await updateTicket(s.deps, revision)).toHaveProperty(
+      "error",
+      "Requirements change does not match its owner execution.",
+    );
+    expect(s.tx.run.findFirst).toHaveBeenLastCalledWith(
+      expect.objectContaining({
+        where: expect.objectContaining({
+          id: origin.runId,
+          botId: input.botId,
+          threadId: origin.threadId,
+          sourceMessage: { threadId: origin.threadId, role: "user", authorUserId: input.userId },
+        }),
+      }),
+    );
+    expect(s.tx.ticket.update).not.toHaveBeenCalled();
+  });
+
+  it.each(["legacy", "disabled"])(
+    "does not introduce revision semantics for %s tickets",
+    async (mode) => {
+      const s = setup();
+      await createTicket(s.deps, {
+        ...input,
+        ...(mode === "legacy" ? {} : { fileDeliveryRequirements: requirements }),
+      });
+      if (mode === "disabled") vi.stubEnv("TICKET_WORK_RECEIPTS", "false");
+      expect(await updateTicket(s.deps, revision)).toHaveProperty("error");
+      expect(s.tx.ticket.update).not.toHaveBeenCalled();
+      expect(
+        await updateTicket(s.deps, {
+          spaceId: input.spaceId,
+          userId: input.userId,
+          id: "ticket-1",
+          title: "Ordinary edit",
+        }),
+      ).toHaveProperty("ticket.title", "Ordinary edit");
+    },
+  );
+
+  it("keeps creation at version one and preserves an already revised set on create replay", async () => {
+    const s = setup();
+    expect(
+      await createTicket(s.deps, {
+        ...input,
+        fileDeliveryRequirements: { ...requirements, version: 2 },
+      }),
+    ).toHaveProperty("error");
+    expect(s.tx.ticket.create).not.toHaveBeenCalled();
+    await createTicket(s.deps, { ...input, fileDeliveryRequirements: requirements });
+    await updateTicket(s.deps, revision);
+    const replay = await createTicket(s.deps, { ...input, fileDeliveryRequirements: requirements });
+    expect(replay).toHaveProperty("delivery.requirements", {
+      version: 2,
+      items: replacement.items,
+    });
+    expect(s.tx.ticket.create).toHaveBeenCalledOnce();
   });
 });
 

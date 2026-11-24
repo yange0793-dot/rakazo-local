@@ -15,6 +15,7 @@ const store = vi.hoisted(() => ({
   correct: vi.fn(),
   authorizeScope: vi.fn(),
   resolveCandidates: vi.fn(),
+  read: vi.fn(),
   syncIndexWork: vi.fn(),
 }));
 vi.mock("@rakazo/db", async (original) => {
@@ -29,6 +30,7 @@ vi.mock("@rakazo/db", async (original) => {
       correct = store.correct;
       authorizeScope = store.authorizeScope;
       resolveCandidates = store.resolveCandidates;
+      read = store.read;
       syncIndexWork = store.syncIndexWork;
     },
   };
@@ -65,6 +67,12 @@ beforeEach(() => {
   store.resolveCandidates.mockResolvedValue([
     { id: "fact-a", revision: 1, memory: "DB text", score: 0.9 },
   ]);
+  store.read.mockResolvedValue({
+    id: "fact-a",
+    revision: 1,
+    memory: "DB text",
+    score: 1,
+  });
   store.forget.mockResolvedValue({ id: "fact-a", expired: true, reason: null });
 });
 
@@ -131,6 +139,42 @@ describe("managed local memory provider", () => {
       }),
       ctx.signal,
     );
+  });
+
+  it("delegates exact reads to the authoritative store and preserves sanitized not-found results", async () => {
+    const f = fixture();
+    const request = {
+      id: "lesson-a",
+      expectedRevision: 7,
+      botId: "bot-a",
+      threadId: "thread-a",
+      historyGeneration: 3,
+      scope: "isolated" as const,
+      kind: "lesson" as const,
+    };
+    store.read.mockResolvedValueOnce({
+      id: request.id,
+      revision: request.expectedRevision,
+      memory: "Full lesson body from the authoritative store.",
+      score: 1,
+    });
+    expect(await f.provider.read!(request, ctx)).toEqual({
+      ok: true,
+      value: {
+        id: request.id,
+        revision: request.expectedRevision,
+        memory: "Full lesson body from the authoritative store.",
+        score: 1,
+      },
+    });
+    expect(store.read).toHaveBeenCalledWith(request, ctx);
+    expect(f.index.search).not.toHaveBeenCalled();
+    store.read.mockRejectedValueOnce(new IsolationError());
+    expect(await f.provider.read!(request, ctx)).toEqual({
+      ok: false,
+      error: "Memory fact not found in this scope.",
+      code: "NOT_FOUND",
+    });
   });
 
   it("lets later candidates refill a small final limit after stale top hits are filtered", async () => {

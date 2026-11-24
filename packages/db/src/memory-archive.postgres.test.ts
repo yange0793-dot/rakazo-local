@@ -3,7 +3,10 @@ import type { AdapterContext } from "@rakazo/adapter-kit";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import type { PrismaClient } from "./client.js";
 import { createDb } from "./client.js";
+import type { FinalizeRunInput } from "./events.js";
+import { finalizeRun } from "./events.js";
 import { MemoryArchiveStore } from "./memory-archive.js";
+import { createThreadMessage } from "./messages.js";
 import { runAsSystem, runAsTenant } from "./row-security.js";
 import { IsolationError } from "./scope.js";
 import { SemanticFactStore } from "./semantic-facts.js";
@@ -96,6 +99,61 @@ postgres("automatic memory archive (isolated PostgreSQL)", () => {
         },
       });
       return id;
+    });
+  }
+
+  async function activeTurn(text: string, thread: string, bot: string) {
+    return system("synthetic active archive turn", async () => {
+      const source = await createThreadMessage(prisma, {
+        threadId: thread,
+        role: "user",
+        authorUserId: userId,
+        blocks: [{ kind: "text", text }],
+        markUnread: false,
+      });
+      const task = await prisma.task.create({
+        data: {
+          spaceId,
+          botId: bot,
+          threadId: thread,
+          userId,
+          prompt: text,
+          status: "running",
+        },
+      });
+      const run = await prisma.run.create({
+        data: {
+          spaceId,
+          botId: bot,
+          threadId: thread,
+          userId,
+          taskId: task.id,
+          sourceMessageId: source.id,
+          trigger: "user",
+          status: "running",
+          startedAt: new Date(),
+          leaseOwner: "archive-worker",
+          leaseFence: 1,
+        },
+      });
+      const attempt = await prisma.attempt.create({
+        data: { runId: run.id, fence: 1, status: "running" },
+      });
+      const input = {
+        spaceId,
+        botId: bot,
+        threadId: thread,
+        runId: run.id,
+        taskId: task.id,
+        attemptId: attempt.id,
+        leaseOwner: "archive-worker",
+        leaseFence: 1,
+        outcome: "completed",
+        blocks: [{ kind: "text", text: "Understood." }],
+        markUnread: false,
+        memoryArchiveAt: new Date(Date.now() + 60_000),
+      } satisfies FinalizeRunInput;
+      return { source, input };
     });
   }
 
@@ -408,5 +466,137 @@ postgres("automatic memory archive (isolated PostgreSQL)", () => {
         (fact) => fact.content === "Keep replies brief.",
       ),
     ).toHaveLength(1);
+  });
+
+  it("rolls back completion and its first intent together, then recovers the source without publication", async () => {
+    const target = { threadId: peerThreadId, botId: peerBotId, userId };
+    const peerCtx = { ...ctx, botId: peerBotId };
+    const first = await activeTurn("Keep the first source.", peerThreadId, peerBotId);
+    const failure = new Error("synthetic failure after archive intent write");
+    const failing = prisma.$extends({
+      query: {
+        memoryArchiveProgress: {
+          async upsert({ args, query }) {
+            await query(args);
+            throw failure;
+          },
+        },
+      },
+    }) as unknown as PrismaClient;
+
+    await expect(runAsTenant(peerCtx, () => finalizeRun(failing, first.input))).rejects.toThrow(
+      failure.message,
+    );
+
+    await runAsTenant(peerCtx, async () => {
+      expect(await prisma.run.findUnique({ where: { id: first.input.runId } })).toMatchObject({
+        status: "running",
+        completedAt: null,
+        leaseOwner: "archive-worker",
+        leaseFence: 1,
+      });
+      expect(
+        await prisma.attempt.findUnique({ where: { id: first.input.attemptId } }),
+      ).toMatchObject({
+        status: "running",
+        finishedAt: null,
+      });
+      expect(await prisma.task.findUnique({ where: { id: first.input.taskId } })).toMatchObject({
+        status: "running",
+      });
+      expect(await prisma.message.count({ where: { runId: first.input.runId } })).toBe(0);
+      expect(await prisma.event.count({ where: { runId: first.input.runId } })).toBe(0);
+      expect(
+        await prisma.memoryArchiveProgress.findUnique({ where: { threadId: peerThreadId } }),
+      ).toBeNull();
+      expect(await prisma.thread.findUnique({ where: { id: peerThreadId } })).toMatchObject({
+        nextMessageSeq: first.source.seq + 1,
+      });
+    });
+    expect((await archive.pending()).some((pointer) => pointer.threadId === peerThreadId)).toBe(
+      false,
+    );
+
+    await expect(runAsTenant(peerCtx, () => finalizeRun(prisma, first.input))).resolves.toEqual({
+      continuationRunId: null,
+      memoryArchiveAt: first.input.memoryArchiveAt,
+    });
+    // No publisher ran after commit. A fresh worker discovers the pointer from Postgres.
+    const recovered = new MemoryArchiveStore(prisma);
+    expect(
+      (await recovered.pending()).find((pointer) => pointer.threadId === peerThreadId),
+    ).toEqual({
+      ...target,
+      spaceId,
+      availableAt: first.input.memoryArchiveAt,
+    });
+    expect(
+      (await recovered.loadBatch(target, peerCtx))?.newSources.map((source) => source.id),
+    ).toEqual([first.source.id]);
+
+    const second = await activeTurn("Keep the next source too.", peerThreadId, peerBotId);
+    await runAsTenant(peerCtx, () => finalizeRun(prisma, second.input));
+    expect(
+      await runAsTenant(peerCtx, () =>
+        prisma.memoryArchiveProgress.findUnique({ where: { threadId: peerThreadId } }),
+      ),
+    ).toMatchObject({
+      processedUpToSeq: first.source.seq - 1,
+      throughSeq: second.source.seq + 1,
+      pending: true,
+      availableAt: second.input.memoryArchiveAt,
+    });
+    expect(
+      (await recovered.loadBatch(target, peerCtx))?.newSources.map((source) => source.id),
+    ).toEqual([first.source.id, second.source.id]);
+  });
+
+  it("keeps disabled history and a retired generation outside the first completed archive", async () => {
+    const bot = await system("synthetic archive enable fixture", () =>
+      prisma.bot.create({
+        data: { spaceId, userId, name: "Archive boundary bot", color: "ink" },
+      }),
+    );
+    const thread = await system("synthetic archive enable thread", () =>
+      prisma.thread.create({ data: { spaceId, userId, botId: bot.id } }),
+    );
+    const localCtx = { ...ctx, botId: bot.id };
+    const target = { threadId: thread.id, botId: bot.id, userId };
+    const disabled = await activeTurn("Before automatic memory was enabled.", thread.id, bot.id);
+    await expect(
+      runAsTenant(localCtx, () =>
+        finalizeRun(prisma, { ...disabled.input, memoryArchiveAt: undefined }),
+      ),
+    ).resolves.toEqual({ continuationRunId: null });
+    expect(
+      await runAsTenant(localCtx, () =>
+        prisma.memoryArchiveProgress.findUnique({ where: { threadId: thread.id } }),
+      ),
+    ).toBeNull();
+
+    const enabled = await activeTurn("The first enabled source.", thread.id, bot.id);
+    await runAsTenant(localCtx, () => finalizeRun(prisma, enabled.input));
+    const batch = await archive.loadBatch(target, localCtx);
+    expect(batch?.newSources.map((source) => source.id)).toEqual([enabled.source.id]);
+    expect(batch?.fromSeq).toBe(enabled.source.seq);
+    expect(batch?.messages.find((message) => message.id === disabled.source.id)?.isNew).toBe(false);
+
+    await runAsTenant(localCtx, () =>
+      prisma.$transaction(async (tx) => {
+        await tx.message.deleteMany({ where: { threadId: thread.id } });
+        await tx.thread.update({
+          where: { id: thread.id },
+          data: { historyCompactionGeneration: { increment: 1 } },
+        });
+      }),
+    );
+    expect(await archive.loadBatch(target, localCtx)).toBeNull();
+    expect((await archive.pending()).some((pointer) => pointer.threadId === thread.id)).toBe(false);
+
+    const afterClear = await activeTurn("The first source after clear.", thread.id, bot.id);
+    await runAsTenant(localCtx, () => finalizeRun(prisma, afterClear.input));
+    const fresh = await archive.loadBatch(target, localCtx);
+    expect(fresh).toMatchObject({ generation: 1, fromSeq: afterClear.source.seq });
+    expect(fresh?.newSources.map((source) => source.id)).toEqual([afterClear.source.id]);
   });
 });

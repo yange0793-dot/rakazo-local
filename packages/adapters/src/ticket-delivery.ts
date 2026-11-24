@@ -1,6 +1,10 @@
 import { createHash, randomUUID } from "node:crypto";
-import type { MessageBlock } from "@rakazo/contracts";
-import { TicketWorkResult } from "@rakazo/contracts";
+import type { MessageBlock, TicketFileDeliveryAcceptance } from "@rakazo/contracts";
+import {
+  TicketFileDeliveryAcceptanceSchema,
+  TicketFileDeliveryRequirementsSchema,
+  TicketWorkResult,
+} from "@rakazo/contracts";
 import { messageBlockForArtifact, redactSecrets } from "@rakazo/core";
 import type { Artifact, Run } from "@rakazo/db";
 import {
@@ -12,7 +16,11 @@ import {
   touchGroupUpdatedAt,
 } from "@rakazo/db";
 import { getLogger } from "@rakazo/logging";
+import { z } from "zod";
 import type { ExecutorDeps } from "./executor-deps.js";
+import type { FileDeliveryAcceptanceInput } from "./file-delivery-acceptance.js";
+import { evaluateFileDeliveryAcceptanceWithJudge } from "./file-delivery-acceptance.js";
+import type { FileDeliveryJudge } from "./file-delivery-judge.js";
 import { runLeaseFor } from "./run-messages.js";
 import { attachWorkspaceFileToThread } from "./thread-artifacts.js";
 import { ticketReceiptsEnabled } from "./ticket-receipt-config.js";
@@ -23,7 +31,7 @@ export async function deliverTicketWork(
   deps: Pick<
     ExecutorDeps,
     "artifacts" | "prisma" | "events" | "onTicketChange" | "runLease" | "ticketBoardEnabled"
-  >,
+  > & { fileDeliveryJudge?: FileDeliveryJudge },
   run: Pick<Run, "id" | "spaceId" | "botId" | "threadId" | "ticketId" | "userId">,
   input: { id: string; result: unknown; ownerAuthored: boolean; secrets: string[] },
 ) {
@@ -39,7 +47,7 @@ export async function deliverTicketWork(
         .join("; "),
     };
   }
-  const { previousVersion, summary, findings, artifactIds = [] } = parsed.data;
+  const { previousVersion, summary, findings, artifactIds = [], fileDelivery } = parsed.data;
   const ticket = await deps.prisma.ticket.findFirst({
     where: {
       id: input.id,
@@ -85,6 +93,15 @@ export async function deliverTicketWork(
   ) {
     return { error: "Only this assignment or its original owner chat can deliver the result." };
   }
+  const savedRequirements =
+    ticket.fileDeliveryRequirements == null
+      ? undefined
+      : TicketFileDeliveryRequirementsSchema.safeParse(ticket.fileDeliveryRequirements);
+  if (savedRequirements && !savedRequirements.success)
+    return { error: "Saved file-delivery requirements are unavailable." };
+  const requirements = savedRequirements?.success ? savedRequirements.data : undefined;
+  if (fileDelivery && !requirements)
+    return { error: "File-delivery requirements must be fixed when the ticket is created." };
   const author = ticket.createdByBotId;
   const ref = `${ticket.board.ticketPrefix}-${ticket.number}`;
   const clean = (text: string) => redactSecrets(text, input.secrets);
@@ -96,18 +113,72 @@ export async function deliverTicketWork(
       evidence: clean(finding.evidence),
     })),
     artifactIds: [...new Set(artifactIds)].sort(),
+    ...(fileDelivery ? { fileDelivery } : {}),
   };
-  const status = result.findings.every((finding) => finding.outcome === "pass") ? "done" : "review";
+  const reportedDone = result.findings.every((finding) => finding.outcome === "pass");
+  let status = !requirements && reportedDone ? "done" : "review";
   const version = previousVersion + 1;
   const digest = createHash("sha256").update(JSON.stringify(result)).digest("hex");
   const clientNonce = `work-receipt:${ticket.id}:${version}:${digest}`;
-  const previousDelivery = () =>
-    deps.prisma.message.findFirst({
+  const context = {
+    operationId: clientNonce,
+    traceId: clientNonce,
+    spaceId: run.spaceId,
+    userId: run.userId,
+    botId: author,
+    runId: run.id,
+    signal: new AbortController().signal,
+  };
+  const previousDelivery = async () => {
+    const message = await deps.prisma.message.findFirst({
       where: { threadId: origin.id, role: "bot", botId: author, clientNonce },
-      select: { id: true },
+      select: { id: true, blocks: true },
     });
+    if (!message) return null;
+    if (!requirements)
+      return { ok: true, version, messageId: message.id, status: reportedDone ? "done" : "review" };
+    // Replay the immutable receipt, not today's artifact/effect observations or ticket status.
+    const fileIds = (message.blocks as MessageBlock[]).flatMap((block) =>
+      block.kind === "file" ? [block.artifactId] : [],
+    );
+    const artifact = await deps.prisma.artifact.findFirst({
+      where: {
+        id: { in: fileIds },
+        spaceId: run.spaceId,
+        userId: run.userId,
+        botId: author,
+        groupId: origin.groupId,
+        name: `work-${ticket.id}.json`,
+        mimeType: "application/json",
+      },
+    });
+    if (!artifact) return { error: "Original receipt is unavailable." };
+    const bytes = await store.get(artifact.storageKey, context);
+    if (createHash("sha256").update(bytes).digest("hex") !== artifact.hash)
+      return { error: "Original receipt hash mismatch." };
+    const saved = z
+      .object({
+        schema: z.literal(1),
+        ticketId: z.literal(ticket.id),
+        version: z.literal(version),
+        acceptance: TicketFileDeliveryAcceptanceSchema,
+      })
+      .safeParse(JSON.parse(new TextDecoder().decode(bytes)));
+    if (!saved.success) return { error: "Original receipt acceptance is unavailable." };
+    return {
+      ok: true,
+      version,
+      messageId: message.id,
+      requirementsVersion: saved.data.acceptance.requirementsVersion,
+      status: reportedDone && saved.data.acceptance.status === "verified" ? "done" : "review",
+      acceptance: saved.data.acceptance,
+    };
+  };
   const previous = await previousDelivery();
-  if (previous) return { ok: true, version, messageId: previous.id, status };
+  if (previous) return previous;
+  if (requirements && fileDelivery && fileDelivery.requirementsVersion !== requirements.version) {
+    return { error: "Requirements changed. Read ticket_get before delivering this work." };
+  }
   if (ticket.receiptVersion !== previousVersion) {
     return { error: "Receipt changed. Read ticket_get before revising it." };
   }
@@ -132,26 +203,43 @@ export async function deliverTicketWork(
     return { error: "An evidence file is unavailable to this assignment or the original chat." };
   }
   const sourceById = new Map(sources.map((source) => [source.id, source]));
-  const context = {
-    operationId: clientNonce,
-    traceId: clientNonce,
-    spaceId: run.spaceId,
-    userId: run.userId,
-    botId: author,
-    runId: run.id,
-    signal: new AbortController().signal,
-  };
   const copies: Artifact[] = [];
   const files: Array<{ source: Artifact; visible: Artifact }> = [];
+  const observedArtifacts: FileDeliveryAcceptanceInput["artifacts"][number][] = [];
+  let acceptance: TicketFileDeliveryAcceptance | undefined;
   let committed: { id: string; seq: number } | undefined;
   try {
     for (const id of result.artifactIds) {
       const source = sourceById.get(id)!;
-      if (source.groupId === origin.groupId && (origin.groupId || source.botId === author)) {
+      const alreadyVisible =
+        source.groupId === origin.groupId && (origin.groupId || source.botId === author);
+      let sourceBytes: Uint8Array | undefined;
+      if (requirements || !alreadyVisible) {
+        try {
+          sourceBytes = await store.get(source.storageKey, {
+            ...context,
+            botId: source.botId ?? run.botId,
+          });
+        } catch (error) {
+          // A missing read is unknown evidence. A file still needing a copy cannot be delivered.
+          if (!alreadyVisible) throw error;
+        }
+      }
+      if (requirements)
+        observedArtifacts.push({
+          id: source.id,
+          name: source.name,
+          mimeType: source.mimeType,
+          version: source.version,
+          hash: source.hash,
+          bytes: sourceBytes,
+          observedAt: new Date().toISOString(),
+        });
+      if (alreadyVisible) {
         files.push({ source, visible: source });
         continue;
       }
-      const bytes = await store.get(source.storageKey, { ...context, botId: run.botId });
+      const bytes = sourceBytes!;
       const stored = await store.put(
         { name: source.name, mimeType: source.mimeType, bytes },
         context,
@@ -175,6 +263,32 @@ export async function deliverTicketWork(
       copies.push(copy);
       files.push({ source, visible: copy });
     }
+    if (requirements) {
+      const effectIds =
+        fileDelivery?.evidenceRefs.flatMap((ref) =>
+          ref.kind === "effect" ? [ref.effectId] : [],
+        ) ?? [];
+      const effects = effectIds.length
+        ? await deps.prisma.externalEffect.findMany({
+            where: { id: { in: effectIds }, spaceId: run.spaceId, runId: run.id },
+            select: { id: true, kind: true, status: true, result: true, updatedAt: true },
+          })
+        : [];
+      acceptance = await evaluateFileDeliveryAcceptanceWithJudge(
+        {
+          requirements,
+          fileDelivery,
+          deliveredArtifactIds: result.artifactIds,
+          artifacts: observedArtifacts,
+          effects: effects.map((effect) => ({
+            ...effect,
+            observedAt: effect.updatedAt.toISOString(),
+          })),
+        },
+        { judge: deps.fileDeliveryJudge, context },
+      );
+      status = reportedDone && acceptance.status === "verified" ? "done" : "review";
+    }
     const bytes = new TextEncoder().encode(
       JSON.stringify(
         {
@@ -186,6 +300,7 @@ export async function deliverTicketWork(
           runId: run.id,
           observedAt: new Date().toISOString(),
           ...result,
+          ...(requirements ? { requirements, acceptance } : {}),
           artifactIds: files.map(({ visible }) => visible.id),
           artifacts: files.map(({ source, visible }) => ({
             id: visible.id,
@@ -248,6 +363,8 @@ export async function deliverTicketWork(
             select: { id: true },
           });
           if (!source) throw new WorkDeliveryConflict("Original request is unavailable.");
+          // Requirements edits and work-state saves lock the ticket before touching its run.
+          await tx.$queryRaw`SELECT id FROM tickets WHERE id = ${ticket.id} AND "spaceId" = ${run.spaceId} FOR UPDATE`;
           const linked = await tx.run.updateMany({
             where: {
               id: run.id,
@@ -271,6 +388,14 @@ export async function deliverTicketWork(
               receiptVersion: previousVersion,
               originThreadId: origin.id,
               originMessageId: source.id,
+              ...(requirements
+                ? {
+                    fileDeliveryRequirements: {
+                      path: ["version"],
+                      equals: requirements.version,
+                    },
+                  }
+                : {}),
               ...(assigned ? { assigneeBotId: run.botId } : {}),
             },
             data: {
@@ -281,7 +406,7 @@ export async function deliverTicketWork(
           });
           if (changed.count !== 1)
             throw new WorkDeliveryConflict(
-              "Receipt or assignee changed. Read ticket_get before revising it.",
+              "Receipt, requirements, or assignee changed. Read ticket_get before revising it.",
             );
           for (const copy of copies) await tx.artifact.create({ data: copy });
           const blocks: MessageBlock[] = [
@@ -323,12 +448,12 @@ export async function deliverTicketWork(
     await Promise.allSettled(copies.map((copy) => store.remove(copy.storageKey, context)));
     if (!(error instanceof WorkDeliveryConflict) && !(error instanceof IsolationError)) throw error;
     const duplicate = await previousDelivery();
-    return duplicate
-      ? { ok: true, version, messageId: duplicate.id, status }
-      : {
-          error:
-            error instanceof WorkDeliveryConflict ? error.message : "Original chat is unavailable.",
-        };
+    return (
+      duplicate ?? {
+        error:
+          error instanceof WorkDeliveryConflict ? error.message : "Original chat is unavailable.",
+      }
+    );
   }
   if (!committed) throw new Error("Missing committed ticket receipt");
   await deps.events
@@ -341,5 +466,11 @@ export async function deliverTicketWork(
     assigneeBotId: ticket.assigneeBotId,
     wakeAssignee: false,
   });
-  return { ok: true, version, messageId: committed.id, status };
+  return {
+    ok: true,
+    version,
+    messageId: committed.id,
+    status,
+    ...(acceptance ? { requirementsVersion: acceptance.requirementsVersion, acceptance } : {}),
+  };
 }

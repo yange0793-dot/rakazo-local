@@ -145,8 +145,15 @@ describe("installed messaging isolation", () => {
 
   it("resolves workspace credentials for queued replies, even in a fresh worker", async () => {
     const f = fixture();
-    await f.messaging.sendToThread({ threadId: "slack~a:C1:1.001", body: "reply" }, context);
-    expect(f.sends).toHaveBeenCalledWith("token-a", { threadId: "slack:C1:1.001", body: "reply" });
+    await f.messaging.sendToThread(
+      { threadId: "slack~a:C1:1.001", body: "reply", idempotencyKey: "msg:stable" },
+      context,
+    );
+    expect(f.sends).toHaveBeenCalledWith("token-a", {
+      threadId: "slack:C1:1.001",
+      body: "reply",
+      idempotencyKey: "msg:stable",
+    });
     await f.messaging.acknowledge("slack~a:C1:1.001", "Ta:1.001", context);
     expect(f.receipts).toHaveBeenCalledWith("token-a", "slack:C1:1.001", "1.001");
     expect(f.surfaces).toHaveBeenCalledTimes(1);

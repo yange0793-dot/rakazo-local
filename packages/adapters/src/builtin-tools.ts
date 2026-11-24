@@ -25,11 +25,16 @@ import {
   TICKET_PRIORITIES,
   TICKET_STATUSES,
   TICKET_TITLE_MAX_LENGTH,
+  TicketFileDeliveryRequirementsSchema,
+  TicketFileDeliveryRequirementsUpdateSchema,
+  TicketSubscriptionSourceSchema,
   TicketWorkResult,
+  TicketWorkStateUpdateSchema,
 } from "@rakazo/contracts";
 import { z } from "zod";
 import { allowPrivateHttpSecretOrigins } from "./bot-secrets.js";
 import { BROWSER_ACT_KINDS } from "./browser-tools.js";
+import { ToolSourceFactsSchema } from "./memory-derivation.js";
 import { SCHEDULE_TIMING_FIELDS } from "./schedule-tools.js";
 import { SCRATCHPAD_NOTES_MAX_LENGTH, SCRATCHPAD_TITLE_MAX_LENGTH } from "./scratchpad-tools.js";
 import { messageUserMaxLength } from "./user-progress.js";
@@ -427,6 +432,7 @@ export const builtinAgentTools: ConnectorTool[] = [
   },
   {
     name: "list_files",
+    readOnly: true,
     description:
       "List files and directories in this bot's home. On a Team Computer, relative paths use the bot folder; use shared/... for shared work or bots/... to inspect the Team root.",
     inputSchema: {
@@ -436,6 +442,7 @@ export const builtinAgentTools: ConnectorTool[] = [
   },
   {
     name: "read_file",
+    readOnly: true,
     description:
       "Read a UTF-8 text file from this bot's home. On a Team Computer, relative paths use the bot folder and shared/... accesses shared work. Open visual or binary files with open_path instead. Large files come back in line ranges; follow nextOffset to read on. sizeBytes and sha256 describe the full raw file, including when paginated; sha256 is null if secret redaction changed the decoded content.",
     inputSchema: {
@@ -783,6 +790,7 @@ export const builtinAgentTools: ConnectorTool[] = [
       properties: {
         content: { type: "string" },
         old_text: { type: "string" },
+        source_facts: z.toJSONSchema(ToolSourceFactsSchema),
       },
       required: ["content"],
     },
@@ -796,6 +804,7 @@ export const builtinAgentTools: ConnectorTool[] = [
       properties: {
         path: { type: "string", description: "Document name, for example MEMORY.md." },
         content: { type: "string", description: "The document's complete new content." },
+        source_facts: z.toJSONSchema(ToolSourceFactsSchema),
       },
       required: ["path", "content"],
     },
@@ -1236,16 +1245,52 @@ export const builtinAgentTools: ConnectorTool[] = [
   },
   {
     name: "recall_memory",
-    description: `Search durable memory for facts relevant to a query. Returns up to ${SEMANTIC_RECALL_DEFAULT_LIMIT} facts by default, or limit up to ${SEMANTIC_RECALL_MAX_LIMIT}, within a text budget; reports omitted facts. Use a larger limit or narrower topic when relevant facts are missing. scope defaults to current; in a direct user chat, isolated searches this bot, shared searches this space's shared facts (some providers also include this bot), and all searches both. Citations identify the searched scope, source namespace when available, and revision. Corrections and forgetting still require the fact's original namespace. A missing result does not prove a fact was never saved; do not rewrite past events from this search alone. Once current facts answer the question, answer without repeating equivalent searches.`,
+    description: `Search durable memory for facts relevant to a query, or use kind "lesson" to find up to 3 prior lesson cues. Fact search returns up to ${SEMANTIC_RECALL_DEFAULT_LIMIT} facts by default, or limit up to ${SEMANTIC_RECALL_MAX_LIMIT}, within a text budget; reports omitted results. scope defaults to current; for lessons, current means this bot's isolated scope. In a direct user chat, isolated searches this bot, shared searches this space's shared facts (some providers also include this bot), and all searches both. Citations identify scope, source namespace when available, id and revision. Read a full cited lesson or fact with id and expected_revision, without query or limit; keep kind "lesson" for a lesson and use the cited scope for a fact. Stale or out-of-scope citations are not returned. Corrections and forgetting still require the fact's original namespace. A missing result does not prove a fact was never saved; do not rewrite past events from this search alone. Once current facts answer the question, answer without repeating equivalent searches.`,
     inputSchema: {
-      type: "object",
-      properties: {
-        query: { type: "string" },
-        limit: { type: "integer", minimum: 1, maximum: SEMANTIC_RECALL_MAX_LIMIT },
-        scope: { type: "string", enum: ["current", "isolated", "shared", "all"] },
-      },
-      required: ["query"],
-      additionalProperties: false,
+      oneOf: [
+        {
+          type: "object",
+          properties: {
+            query: { type: "string" },
+            limit: { type: "integer", minimum: 1, maximum: SEMANTIC_RECALL_MAX_LIMIT },
+            scope: { type: "string", enum: ["current", "isolated", "shared", "all"] },
+          },
+          required: ["query"],
+          additionalProperties: false,
+        },
+        {
+          type: "object",
+          properties: {
+            query: { type: "string" },
+            limit: { type: "integer", minimum: 1, maximum: SEMANTIC_RECALL_MAX_LIMIT },
+            scope: { type: "string", enum: ["current", "isolated"] },
+            kind: { type: "string", enum: ["lesson"] },
+          },
+          required: ["query", "kind"],
+          additionalProperties: false,
+        },
+        {
+          type: "object",
+          properties: {
+            id: { type: "string", minLength: 1 },
+            expected_revision: { type: "integer", minimum: 1 },
+            scope: { type: "string", enum: ["current", "isolated", "shared"] },
+          },
+          required: ["id", "expected_revision"],
+          additionalProperties: false,
+        },
+        {
+          type: "object",
+          properties: {
+            id: { type: "string", minLength: 1 },
+            expected_revision: { type: "integer", minimum: 1 },
+            scope: { type: "string", enum: ["current", "isolated"] },
+            kind: { type: "string", enum: ["lesson"] },
+          },
+          required: ["id", "expected_revision", "kind"],
+          additionalProperties: false,
+        },
+      ],
     },
   },
   {
@@ -1378,7 +1423,8 @@ export const builtinAgentTools: ConnectorTool[] = [
   },
   {
     name: "ticket_get",
-    description: "Read a ticket by reference or id, with comments.",
+    description:
+      "Read a ticket by reference or id, with comments and the current task's saved work state.",
     inputSchema: {
       type: "object",
       properties: {
@@ -1390,7 +1436,8 @@ export const builtinAgentTools: ConnectorTool[] = [
   },
   {
     name: "ticket_create",
-    description: "Create a ticket. Owner defaults to you.",
+    description:
+      "Create a ticket. Owner defaults to you. For file delivery, fix the requirements before working; use version 1.",
     inputSchema: {
       type: "object",
       properties: {
@@ -1413,6 +1460,7 @@ export const builtinAgentTools: ConnectorTool[] = [
           type: "string",
           description: "Bot in this space to own it. Defaults to you.",
         },
+        fileDeliveryRequirements: z.toJSONSchema(TicketFileDeliveryRequirementsSchema),
       },
       required: ["title"],
     },
@@ -1420,7 +1468,7 @@ export const builtinAgentTools: ConnectorTool[] = [
   {
     name: "ticket_update",
     description:
-      "Update progress, or deliver to the original chat with id and result alone. Use delivery.previousVersion from ticket_get.",
+      "Update progress or revise file requirements using their current version. Save resumable state with id and workState alone, using its current versions from ticket_get. Deliver to the original chat with id and result alone; use delivery.previousVersion from ticket_get.",
     inputSchema: {
       type: "object",
       properties: {
@@ -1430,7 +1478,10 @@ export const builtinAgentTools: ConnectorTool[] = [
         priority: { type: "string", enum: TICKET_PRIORITIES },
         status: { type: "string", enum: TICKET_STATUSES },
         ownerBotId: { type: "string" },
+        expectedRequirementsVersion: { type: "integer", minimum: 1 },
+        fileDeliveryRequirements: z.toJSONSchema(TicketFileDeliveryRequirementsUpdateSchema),
         result: z.toJSONSchema(TicketWorkResult),
+        workState: z.toJSONSchema(TicketWorkStateUpdateSchema),
       },
       required: ["id"],
     },
@@ -1449,6 +1500,30 @@ export const builtinAgentTools: ConnectorTool[] = [
         },
       },
       required: ["id", "body"],
+    },
+  },
+  {
+    name: "ticket_subscribe",
+    description:
+      "Subscribe an owned ticket to new messages in an existing owned chat or external conversation.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        id: { type: "string", description: "Ticket id." },
+        source: z.toJSONSchema(TicketSubscriptionSourceSchema),
+      },
+      required: ["id", "source"],
+      additionalProperties: false,
+    },
+  },
+  {
+    name: "ticket_unsubscribe",
+    description: "Cancel a ticket's source subscription.",
+    inputSchema: {
+      type: "object",
+      properties: { subscriptionId: { type: "string" } },
+      required: ["subscriptionId"],
+      additionalProperties: false,
     },
   },
   {
