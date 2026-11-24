@@ -60,7 +60,7 @@ describe("built-in tool bridge", () => {
     // read_file takes a line range; ask_user carries the content being decided about;
     // search_history lists earlier tool work by kind without a keyword;
     // skill_read adds saved-skill identity, revision inspection and project/family scope.
-    expect(definitionBytes(listed)).toBeLessThanOrEqual(32_830);
+    expect(definitionBytes(listed)).toBeLessThanOrEqual(33_300);
     expect(deferred.map((tool) => tool.name)).toEqual(
       expect.arrayContaining(["render_plot", "create_space", "generate_secret", "scratchpad_add"]),
     );

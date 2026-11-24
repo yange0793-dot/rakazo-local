@@ -259,6 +259,8 @@ describe("builtin tools", () => {
       "ticket_create",
       "ticket_update",
       "ticket_comment",
+      "ticket_subscribe",
+      "ticket_unsubscribe",
     ];
     const enabled = selectBuiltinToolsForRun({ ...options, ticketBoardEnabled: true }).map(
       (tool) => tool.name,

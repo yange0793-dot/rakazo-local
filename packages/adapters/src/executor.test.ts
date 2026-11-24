@@ -4619,6 +4619,8 @@ describe("ticket board tool capability", () => {
     "ticket_create",
     "ticket_update",
     "ticket_comment",
+    "ticket_subscribe",
+    "ticket_unsubscribe",
   ];
   it("omits ticket tools by default and when disabled", () => {
     for (const ticketBoardEnabled of [undefined, false]) {

@@ -570,6 +570,7 @@ services:
     environment:
       <<: *app-environment
       GRAPHILE_WORKER_CONCURRENCY:
+      RAKAZO_GIT_SHA:
     volumes:
       - appdata:/data
     networks:
