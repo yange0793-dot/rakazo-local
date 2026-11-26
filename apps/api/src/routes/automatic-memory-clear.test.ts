@@ -1,6 +1,6 @@
 import { createRouterClient } from "@orpc/server";
 import type { Actor } from "@rakazo/contracts";
-import { ThreadClearConflictError } from "@rakazo/db";
+import { ThreadArchiveCoverageError, ThreadClearConflictError } from "@rakazo/db";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { RouterDeps } from "../router.js";
 import type { ThreadTarget } from "../thread-target.js";
@@ -9,7 +9,7 @@ import { threadsRoutes } from "./threads.js";
 
 const archive = vi.hoisted(() => ({
   prepareClear: vi.fn(),
-  hasPending: vi.fn(),
+  observeClear: vi.fn(),
 }));
 
 vi.mock("@rakazo/db", async (importOriginal) => {
@@ -20,8 +20,8 @@ vi.mock("@rakazo/db", async (importOriginal) => {
       prepareClear(...args: unknown[]) {
         return archive.prepareClear(...args);
       }
-      hasPending(...args: unknown[]) {
-        return archive.hasPending(...args);
+      observeClear(...args: unknown[]) {
+        return archive.observeClear(...args);
       }
     },
   };
@@ -67,7 +67,6 @@ const groupTarget = {
 function setup(
   options: {
     archive?: boolean;
-    pending?: boolean;
     target?: ThreadTarget;
     archiveError?: Error;
     clearError?: Error;
@@ -75,7 +74,7 @@ function setup(
 ) {
   resolved.target = options.target ?? directTarget;
   archive.prepareClear.mockResolvedValue({ generation: 4, nextMessageSeq: 9 });
-  archive.hasPending.mockResolvedValue(options.pending ?? false);
+  archive.observeClear.mockResolvedValue({ generation: 4, nextMessageSeq: 9 });
   const clearThread = vi.fn(async (_input: Record<string, unknown>) => {
     if (options.clearError) throw options.clearError;
     return { cancelledRunIds: [], historyCompactionGeneration: 3 };
@@ -84,10 +83,12 @@ function setup(
     if (options.archiveError) throw options.archiveError;
   });
   const resolve = vi.fn(async () => null);
+  const purgeHistory = vi.fn(async () => { throw new Error("unexpected managed purge"); });
   const deps = {
     prisma: {},
     events: { clearThread },
     memoryProviders: { resolve },
+    semanticFacts: { purgeHistory },
     jobs: { cancel: vi.fn(async () => {}), enqueue: vi.fn(async () => {}) },
     env: { agentRuntime: "scripted" },
     ...(options.archive === false ? {} : { archiveConversationMemory }),
@@ -99,7 +100,7 @@ function setup(
     resolved.target && (resolved.target as ThreadTarget).kind === "group"
       ? { groupId: "group-1" }
       : { botId: "bot-1" };
-  return { client, input, clearThread, archiveConversationMemory, resolve };
+  return { client, input, clearThread, archiveConversationMemory, resolve, purgeHistory };
 }
 
 describe("clear with automatic memory", () => {
@@ -133,6 +134,7 @@ describe("clear with automatic memory", () => {
         botId: "bot-1",
         expectedGeneration: 4,
         expectedNextMessageSeq: 9,
+        archiveCoverage: "required",
       }),
     );
     const order = (mock: { mock: { invocationCallOrder: number[] } }) =>
@@ -155,32 +157,40 @@ describe("clear with automatic memory", () => {
   });
 
   it("refuses a clear with pending automatic memory when no extractor is configured", async () => {
-    const { client, input, clearThread } = setup({ archive: false, pending: true });
+    const { client, input, clearThread } = setup({
+      archive: false,
+      clearError: new ThreadArchiveCoverageError(),
+    });
 
     await expect(client.threads.clear(input)).rejects.toMatchObject({
       code: "SERVICE_UNAVAILABLE",
       message: "Memory archiving is unavailable. No messages were deleted.",
     });
-    expect(archive.hasPending).toHaveBeenCalledExactlyOnceWith(
+    expect(archive.observeClear).toHaveBeenCalledExactlyOnceWith(
       { threadId: "thread-1", botId: "bot-1", userId: "user-1" },
       expect.objectContaining({ operationId: "thread-archive:thread-1" }),
     );
     expect(stop).not.toHaveBeenCalled();
-    expect(clearThread).not.toHaveBeenCalled();
+    expect(clearThread).toHaveBeenCalledWith(expect.objectContaining({
+      expectedGeneration: 4,
+      expectedNextMessageSeq: 9,
+    }));
   });
 
-  it("clears without a fence when nothing is pending and no extractor is configured", async () => {
-    const { client, input, clearThread, archiveConversationMemory } = setup({
+  it("pins the head even without an extractor and relies on transactional managed purge", async () => {
+    const { client, input, clearThread, archiveConversationMemory, purgeHistory } = setup({
       archive: false,
-      pending: false,
     });
 
     await expect(client.threads.clear(input)).resolves.toEqual({ ok: true });
     expect(archiveConversationMemory).not.toHaveBeenCalled();
     expect(archive.prepareClear).not.toHaveBeenCalled();
     expect(clearThread).toHaveBeenCalledOnce();
-    expect(clearThread.mock.calls[0]![0]).not.toHaveProperty("expectedGeneration");
-    expect(clearThread.mock.calls[0]![0]).not.toHaveProperty("expectedNextMessageSeq");
+    expect(clearThread.mock.calls[0]![0]).toMatchObject({
+      expectedGeneration: 4,
+      expectedNextMessageSeq: 9,
+    });
+    expect(purgeHistory).not.toHaveBeenCalled();
   });
 
   it("surfaces a generation/head conflict instead of acknowledging the clear", async () => {
@@ -192,7 +202,7 @@ describe("clear with automatic memory", () => {
     await expect(client.threads.clear(input)).rejects.toMatchObject({ code: "CONFLICT" });
     expect(clearThread).toHaveBeenCalledOnce();
     expect(archive.prepareClear).not.toHaveBeenCalled();
-    expect(archive.hasPending).not.toHaveBeenCalled();
+    expect(archive.observeClear).not.toHaveBeenCalled();
   });
 
   it("never drains or fences a group or another owner's chat", async () => {
@@ -205,7 +215,7 @@ describe("clear with automatic memory", () => {
 
       await expect(client.threads.clear(input)).resolves.toEqual({ ok: true });
       expect(archive.prepareClear).not.toHaveBeenCalled();
-      expect(archive.hasPending).not.toHaveBeenCalled();
+      expect(archive.observeClear).not.toHaveBeenCalled();
       expect(archiveConversationMemory).not.toHaveBeenCalled();
       expect(clearThread).toHaveBeenCalledOnce();
       expect(clearThread.mock.calls[0]![0]).not.toHaveProperty("expectedGeneration");

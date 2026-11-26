@@ -420,6 +420,8 @@ describe("runAutoReviewJudge instructions", () => {
     await runAutoReviewJudge({
       runtime: runtime as never,
       checker: { provider: "openrouter", model: "x", thinkingLevel: "low" },
+      apiProtocol: "anthropic-messages",
+      reasoningCapabilities: { mode: "adaptive", levels: ["low", "medium", "high"] },
       prompt: "test",
       runId: "run",
       spaceId: "ws",
@@ -428,6 +430,11 @@ describe("runAutoReviewJudge instructions", () => {
       threadId: "thread",
     });
     expect(captured?.model?.thinkingLevel).toBe("low");
+    expect(captured?.model?.apiProtocol).toBe("anthropic-messages");
+    expect(captured?.model?.reasoningCapabilities).toEqual({
+      mode: "adaptive",
+      levels: ["low", "medium", "high"],
+    });
   });
 });
 

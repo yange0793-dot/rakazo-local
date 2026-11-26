@@ -1,5 +1,7 @@
 # Rakazo
 
+This repository publishes a locally developed version of [upstream Rakazo](https://github.com/elie222/rakazo). See [Local Version](LOCAL_VERSION.md) for the local changes and native runtime sources. The original project attribution and license are retained.
+
 [English](./README.md) | [简体中文](./README.zh-CN.md) | [日本語](./README.ja.md)
 
 [![GitHub stars](https://img.shields.io/github/stars/elie222/rakazo?labelColor=black&style=for-the-badge&color=2563EB)](https://github.com/elie222/rakazo/stargazers)
@@ -314,7 +316,7 @@ infra/      local services and computer images
 docs/       architecture, operations, and release guides
 ```
 
-Common checks:
+Available checks (choose based on the change; do not run them as a batch):
 
 ```bash
 pnpm lint

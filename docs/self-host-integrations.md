@@ -5,10 +5,12 @@ messaging, cloud coding agents and payments.
 
 ## Web search and page reading
 
-Builtin `web_search` and `web_fetch` use keyless HTTP search (DuckDuckGo HTML) and local
-Readability extraction by default. To choose [Parallel Search MCP](https://docs.parallel.ai/integrations/mcp/search-mcp),
-set `WEB_PROVIDER=parallel` in `.env` and restart both the API and worker. The same bot tools
-then return search excerpts and extracted page markdown through HTTPS MCP at
+Builtin `web_search` and `web_fetch` use TinyFish Search and Fetch by default. Set
+`TINYFISH_API_KEY` in `.env`; Compose passes it to both the API and worker. Search queries and
+requested page URLs are sent to TinyFish over HTTPS. To choose
+[Parallel Search MCP](https://docs.parallel.ai/integrations/mcp/search-mcp), set
+`WEB_PROVIDER=parallel` in `.env` and restart both the API and worker. The same bot tools then
+return search excerpts and extracted page markdown through HTTPS MCP at
 `https://search.parallel.ai/mcp`. Search uses Fast mode without an account or API key.
 
 This option sends search queries and requested page URLs to Parallel, which retrieves pages
@@ -17,15 +19,18 @@ on its servers. Conversation accounting uses an HMAC of internal IDs keyed by
 distinct session IDs. Rotating that secret resets the session IDs; the existing development-only
 encryption-key fallback also applies here. Anonymous access has service limits; rate-limit and provider errors are returned
 to the bot without switching providers. Per-bot disabled web tools remain disabled. Set
-`WEB_PROVIDER=keyless-http` (or remove the setting) to return to the default.
+`WEB_PROVIDER=tinyfish` (or remove the setting) to return to the default.
 
 To choose [Keenable](https://docs.keenable.ai) instead, set `WEB_PROVIDER=keenable` and restart
 both the API and worker. The same bot tools then return search snippets and extracted page
 markdown through HTTPS MCP at `https://api.keenable.ai/mcp`, without an account or API key. This
 option sends search queries and requested page URLs to Keenable, which retrieves pages on its
 servers. Anonymous access is rate limited per IP address; set `KEENABLE_API_KEY` on the API and
-worker to send a key and lift those limits. Errors, per-bot disabled tools and the way back to
-the default work as described for Parallel.
+worker to send a key and lift those limits. Errors and per-bot disabled tools work as described
+for Parallel.
+
+Set `WEB_PROVIDER=keyless-http` to use the legacy DuckDuckGo HTML search and local Readability
+extractor instead.
 
 ## Self-hosted memory
 

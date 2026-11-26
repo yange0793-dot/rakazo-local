@@ -12,8 +12,6 @@ const APPROVAL_EXEMPT_TOOLS = new Set([
   "read_file",
   "read_history",
   "search_history",
-  "write_file",
-  "shell",
   "open_path",
   "launch_app",
   "remember",
@@ -90,7 +88,7 @@ export const TAINT_GATED_BUILTIN_TOOLS: ReadonlySet<string> = new Set([
  * - `add_mcp_server` always asks: a server can point at local services, and its tools are then
  *   judged by their names alone.
  *
- * A saved always-allow rule still lets any of them through, and Never ask still runs them: this
+ * A saved always-allow rule still lets any of them through, and bypass mode skips ordinary prompts: this
  * only keeps the approval model from deciding them on its own.
  */
 export function toolNeedsPersonApproval(input: {
@@ -107,6 +105,8 @@ export function toolNeedsPersonApproval(input: {
 }
 
 const APPROVAL_REQUIRED_BUILTIN_TOOLS = new Set([
+  "shell",
+  "write_file",
   "generate_image",
   "generate_video",
   "service_call",
@@ -231,7 +231,7 @@ export function toolRequiresApproval(
 /**
  * A run a webhook or an email started carries text someone else may have written, so a built-in
  * that changes something is gated there even if the owner's own runs never ask for it. It is gated
- * like any other consequential action: Always allow, the approval model or Never ask can pass it.
+ * like any other consequential action: an Allow rule, the review model or bypass mode can pass it.
  */
 export function outsideRunToolRequiresApproval(trigger: string, toolName: string): boolean {
   return trigger === "webhook" && !OUTSIDE_RUN_SAFE_BUILTIN_TOOLS.has(toolName);
@@ -483,8 +483,7 @@ export function decisiveActionApprovalRules(
 
 /**
  * Deterministic rule resolution. A block always wins, so a narrower allow cannot punch through it.
- * Otherwise the most specific rule decides, and `site`, the destination of an outbound fetch,
- * beats a rule for the tool.
+ * Among remaining matches, ask takes precedence over allow.
  */
 export function resolveActionApprovalDetail(input: {
   toolName: string;
@@ -515,15 +514,14 @@ export function resolveActionApprovalDetail(input: {
     };
   }
 
-  const highestSpecificity = Math.max(...matchingRules.map(ruleSpecificity));
-  const winners = matchingRules.filter((rule) => ruleSpecificity(rule) === highestSpecificity);
-  const askingRules = winners.filter((rule) => rule.effect === "require_approval");
+  const askingRules = matchingRules.filter((rule) => rule.effect === "require_approval");
   if (askingRules.length > 0) {
+    const specificity = Math.max(...askingRules.map(ruleSpecificity));
     return {
       decision: "ask",
       source: "require_approval",
       matchingRules,
-      decisiveRules: askingRules,
+      decisiveRules: askingRules.filter((rule) => ruleSpecificity(rule) === specificity),
     };
   }
   return { decision: "allow", source: "always_allow", matchingRules, decisiveRules: [] };
@@ -595,11 +593,22 @@ export function resolveActionApprovalForTools(input: {
     });
   const parts = input.tools.map(resolve);
   const wrapper = input.wrapper ? resolve(input.wrapper) : undefined;
-  if (wrapper?.decision === "deny") parts.push(wrapper);
+  if (wrapper && wrapper.decision !== "allow") parts.push(wrapper);
   const matchingRules = [...new Set(parts.flatMap((part) => part.matchingRules))];
   const strictest =
     parts.find((part) => part.decision === "deny") ?? parts.find((part) => part.decision === "ask");
-  if (strictest) return { ...strictest, matchingRules };
+  if (strictest)
+    return {
+      ...strictest,
+      matchingRules,
+      decisiveRules: [
+        ...new Set(
+          parts
+            .filter((part) => part.decision === strictest.decision)
+            .flatMap((part) => part.decisiveRules),
+        ),
+      ],
+    };
   const allAllowed = parts.length > 0 && parts.every((part) => part.source === "always_allow");
   return {
     decision: "allow",
@@ -610,44 +619,26 @@ export function resolveActionApprovalForTools(input: {
 }
 
 /**
- * How much a space asks before acting. `never` runs everything without waiting, `auto` lets the approval model pass what
- * fits the owner's request, and `ask` asks before anything that changes something.
+ * The three approval modes exposed by Rakazo.
  */
-export type ApprovalMode = "never" | "auto" | "ask";
-
-/** The mode a stored preference means. Skipping approvals is Never ask, an enabled review is Auto. */
-export function approvalModeFromPreference(preference: {
-  enabled: boolean;
-  skipApprovals: boolean;
-}): ApprovalMode {
-  if (preference.skipApprovals) return "never";
-  return preference.enabled ? "auto" : "ask";
-}
-
-export function approvalPreferenceFromMode(mode: ApprovalMode): {
-  enabled: boolean;
-  skipApprovals: boolean;
-} {
-  return { enabled: mode === "auto", skipApprovals: mode === "never" };
-}
+export type ApprovalMode = "auto" | "ask" | "bypermission";
 
 export type AutoReviewJudgeDecision = "pass" | "ask" | "error";
 
 /**
- * The gate after rule resolution. A block refuses in every mode. A purchase asks in every mode, Never
- * ask included, and no allow rule or review passes it. An approval a person must give
- * asks, except in Never ask, which never waits: there it runs, unless `steerable` says outside
- * text could have asked for it. Otherwise Never ask runs it, an ask rule asks, and anything that
- * would ask goes to the approval model in Auto, falling back to asking when no model is set up.
+ * Auto delegates ordinary prompts to the approval model; ask prompts for them; bypermission
+ * executes without approval prompts.
  */
 export function planActionGate(input: {
   resolved: ActionApprovalResolved;
   mode: ApprovalMode;
   /** Needs a person whatever the rules say (see toolRequiresExplicitApproval). */
   mandatory?: boolean;
-  /** Never ask refuses it: the owner did not start this run, or outside content entered it. */
+  /** Compatibility context for actions whose authority depends on who started the run. */
   steerable?: boolean;
   consequential: boolean;
+  editAction?: boolean;
+  planReadOnly?: boolean;
   /**
    * A read whose arguments outside content may have chosen (see connectorReadRequiresApproval).
    * It goes to a connection the owner set up, so only the approval model checks it.
@@ -659,14 +650,10 @@ export function planActionGate(input: {
   /** A click that completes a purchase: a person approves it each time, in every mode. */
   purchase?: boolean;
 }): "ask" | "allow" | "judge" | "deny" {
+  if (input.mode === "bypermission") return "allow";
   if (input.resolved.decision === "deny") return "deny";
-  if (input.purchase) return "ask";
-  if (input.mandatory) {
-    if (input.mode !== "never") return "ask";
-    return input.steerable ? "deny" : "allow";
-  }
-  if (input.mode === "never") return "allow";
   if (input.resolved.decision === "ask") return "ask";
+  if (input.purchase || input.mandatory) return "ask";
   const review = input.mode === "auto" && input.checkerConfigured ? "judge" : "ask";
   // A rule for the whole tool is not a choice of sites, so it never allows a new one; only a site
   // rule does, and that makes the site no longer new. The approval model judges a new site on the
@@ -737,12 +724,12 @@ export function receiptItems<Item extends { name: string }>(
 /** The order rule lists group by: what goes through, what asks, what is refused. */
 export const APPROVAL_RULE_EFFECTS = ["always_allow", "require_approval", "deny"] as const;
 
-/** Whether a rule with this effect does anything in this mode: Never ask honours only blocks. */
+/** Bypermission skips Ask and Allow prompts, while explicit Deny rules remain effective. */
 export function approvalRuleApplies(
   mode: ApprovalMode | null | undefined,
   effect: ActionApprovalRule["effect"],
 ): boolean {
-  return mode !== "never" || effect === "deny";
+  return mode !== "bypermission" || effect === "deny";
 }
 
 /**

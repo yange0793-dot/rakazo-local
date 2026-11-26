@@ -1,6 +1,7 @@
 import * as SecureStore from "expo-secure-store";
 import * as Sharing from "expo-sharing";
 import { beforeEach, describe, expect, it, vi } from "vitest";
+import type * as Api from "./api";
 
 const state = vi.hoisted(() => ({
   files: new Map<string, string>(),
@@ -63,6 +64,7 @@ vi.mock("./session", () => ({
 }));
 vi.mock("./api-server", () => ({}));
 vi.mock("./api-live", () => ({}));
+vi.mock("./ai-consent", () => ({ promptAiConsent: vi.fn() }));
 vi.mock("./api", () => ({
   rpc: state.rpc,
   currentApiBase: () => state.apiBase,
@@ -95,6 +97,36 @@ beforeEach(() => {
 });
 
 describe("artifact preview caches", () => {
+  it("leaves no preview file or cache sidecar when the RPC returns incomplete bytes", async () => {
+    const transport = await vi.importActual<typeof Api>("./api");
+    transport.setCachedApiBase(state.apiBase);
+    state.rpc.mockImplementation((proc, input, options) =>
+      proc === "me" ? { userId: state.userId } : transport.rpc("artifacts/get", input, options),
+    );
+    const fetch = vi.fn(
+      async () =>
+        new Response(
+          JSON.stringify({
+            json: { id: "art-1", size: 3, contentBase64: "AQI=" },
+          }),
+        ),
+    );
+    vi.stubGlobal("fetch", fetch);
+    try {
+      const api = await load();
+      await expect(api.imageArtifactPreview(target, "art-1", "image/png")).rejects.toThrow(
+        "Incomplete artifact download",
+      );
+      expect(fetch).toHaveBeenCalledOnce();
+      expect(state.getSize).not.toHaveBeenCalled();
+      expect([...state.files.keys()].filter((path) => /art-1\.png(?:\.json)?$/.test(path))).toEqual(
+        [],
+      );
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
   it("keeps the large-payload download timeout and captured auth context", async () => {
     const api = await load();
     await api.audioArtifactUri(target, "art-1", "audio/mpeg");

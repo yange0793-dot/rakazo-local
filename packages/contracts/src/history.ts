@@ -102,6 +102,9 @@ export const HistoryReadInputSchema = z.object({
   runAfterId: Id.optional(),
   artifactAfterId: Id.optional(),
   outcomeAfterSeq: z.number().int().nonnegative().optional(),
+  toolAfterId: Id.optional(),
+  toolEffectId: Id.optional(),
+  toolTextOffset: z.number().int().nonnegative().optional(),
   textOffset: z.number().int().nonnegative().optional(),
   /** Continues the anchor message's attachment list from a returned nextAttachmentOffset. */
   attachmentOffset: z.number().int().nonnegative().optional(),

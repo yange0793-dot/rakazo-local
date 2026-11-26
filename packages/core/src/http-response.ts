@@ -1,3 +1,5 @@
+import { withAbort } from "./async.js";
+
 export class ResponseBodyTooLargeError extends Error {
   constructor(maxBytes: number) {
     super(`Response body exceeds ${maxBytes} bytes`);
@@ -18,9 +20,17 @@ export async function readBoundedJsonResponse<T>(
     cancelResponseBody(response);
     throw new ResponseBodyTooLargeError(maxBytes);
   }
-  if (!response.body) return JSON.parse("") as T;
+  const body = response.body;
+  if (!body) {
+    // Some fetch implementations expose an already buffered response only through Body methods.
+    if (signal?.aborted) throw signal.reason ?? new Error("Request aborted");
+    const pending = response.arrayBuffer();
+    const bytes = await (signal ? withAbort(pending, signal, "Request aborted") : pending);
+    if (bytes.byteLength > maxBytes) throw new ResponseBodyTooLargeError(maxBytes);
+    return JSON.parse(new TextDecoder().decode(bytes)) as T;
+  }
 
-  const reader = response.body.getReader();
+  const reader = body.getReader();
   const chunks: Uint8Array[] = [];
   let total = 0;
   try {

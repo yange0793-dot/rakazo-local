@@ -50,49 +50,60 @@ internal class NotificationStorage(context: Context) {
       putBoolean(ATTENTION, value.needsAttention)
     }
 
-  var endpoint: String
-    get() = preferences.getString(ENDPOINT, "").orEmpty()
-    set(value) = commit { putString(ENDPOINT, value) }
-
-  var spaceId: String
-    get() = preferences.getString(SPACE_ID, "").orEmpty()
-    set(value) = commit { putString(SPACE_ID, value) }
-
-  var locale: String
+  val locale: String
     get() = preferences.getString(LOCALE, "").orEmpty()
-    set(value) = commit { putString(LOCALE, value) }
 
-  var token: String
-    get() = readSecret(TOKEN)
-    set(value) = writeSecret(TOKEN, value)
+  val token: String
+    get() = decrypt(preferences.getString(TOKEN, null))
 
-  /** The server's custom request headers as a JSON object; they can hold an access proxy's secret. */
-  var headers: String
-    get() = readSecret(HEADERS)
-    set(value) = writeSecret(HEADERS, value)
+  inner class Connection(private val values: Map<String, *>) {
+    val endpoint = values[ENDPOINT] as? String ?: ""
+    val spaceId = values[SPACE_ID] as? String ?: ""
+    val locale = values[LOCALE] as? String ?: ""
+    val encodedToken = values[TOKEN] as? String
+    val token: String get() = decrypt(encodedToken)
+    val headers: String by lazy { decrypt(values[HEADERS] as? String) }
+  }
 
-  private fun readSecret(name: String): String {
-    val encoded = preferences.getString(name, null) ?: return ""
+  /** Endpoint and credentials come from one preferences snapshot. */
+  fun connection() = Connection(preferences.all)
+
+  fun saveConnection(
+    endpoint: String,
+    token: String,
+    headers: String,
+    spaceId: String? = null,
+    locale: String? = null,
+  ) = commit {
+    putString(ENDPOINT, endpoint)
+    putString(TOKEN, encrypt(token))
+    putString(HEADERS, encrypt(headers))
+    if (spaceId != null) putString(SPACE_ID, spaceId)
+    if (locale != null) putString(LOCALE, locale)
+  }
+
+  fun clearConnection() = commit {
+    remove(TOKEN)
+    remove(HEADERS)
+    remove(SPACE_ID)
+  }
+
+  private fun decrypt(encoded: String?): String {
+    if (encoded == null) return ""
     return runCatching {
       val bytes = Base64.decode(encoded, Base64.NO_WRAP)
       val cipher = Cipher.getInstance(TRANSFORMATION)
       cipher.init(Cipher.DECRYPT_MODE, key(), GCMParameterSpec(128, bytes, 0, IV_SIZE))
       String(cipher.doFinal(bytes, IV_SIZE, bytes.size - IV_SIZE), Charsets.UTF_8)
-    }.getOrElse {
-      commit { remove(name) }
-      ""
-    }
+    }.getOrDefault("")
   }
 
-  private fun writeSecret(name: String, value: String) {
-    if (value.isEmpty()) {
-      commit { remove(name) }
-      return
-    }
+  private fun encrypt(value: String): String? {
+    if (value.isEmpty()) return null
     val cipher = Cipher.getInstance(TRANSFORMATION)
     cipher.init(Cipher.ENCRYPT_MODE, key())
     val encrypted = cipher.iv + cipher.doFinal(value.toByteArray(Charsets.UTF_8))
-    commit { putString(name, Base64.encodeToString(encrypted, Base64.NO_WRAP)) }
+    return Base64.encodeToString(encrypted, Base64.NO_WRAP)
   }
 
   private fun key(): SecretKey {

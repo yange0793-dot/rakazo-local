@@ -62,7 +62,7 @@ jobs:
           gh api --paginate "repos/$GITHUB_REPOSITORY/pulls/$pr/files?per_page=100" --jq '.[].filename' > "$dir/files.txt"
           # Only changes the web app can show; the agent decides the rest.
           if ! grep -E '^(apps/web/(src/|public/|index\.html$)|packages/(ui-web|ui-tokens|chat-ui|page-kit)/)' "$dir/files.txt" |
-            grep -Evq '(\.test\.[cm]?[jt]sx?|\.spec\.[cm]?[jt]sx?)$'; then
+            grep -Ev '(\.test\.[cm]?[jt]sx?|\.spec\.[cm]?[jt]sx?)$' > /dev/null; then
             echo "No web UI changes; skipping."
             exit 0
           fi

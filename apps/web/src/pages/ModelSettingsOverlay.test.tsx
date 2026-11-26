@@ -1,6 +1,7 @@
 // @vitest-environment jsdom
 
 import { i18n } from "@lingui/core";
+import type { ModelConnectInput, ModelRole, ModelRoleChoice, SettingsScope } from "@rakazo/contracts";
 import type * as UiWeb from "@rakazo/ui-web";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import type { ComponentProps, ReactNode } from "react";
@@ -23,7 +24,6 @@ const models = vi.hoisted(() => ({
   connect: vi.fn(),
   disconnect: vi.fn(),
   rename: vi.fn(),
-  setDefault: vi.fn(),
   probeOpenAiCompatible: vi.fn(),
   beginOAuth: vi.fn(),
   cancelOAuth: vi.fn(),
@@ -363,8 +363,6 @@ beforeEach(() => {
   models.credentials.mockResolvedValue([]);
   autoReview.get.mockResolvedValue({
     mode: "ask",
-    enabled: false,
-    skipApprovals: false,
     checkerAvailable: true,
   });
   models.connect.mockResolvedValue({});
@@ -377,7 +375,7 @@ beforeEach(() => {
       ...patch,
     }),
   );
-  // The main role's first slot is the space default once its provider is connected.
+  // The main role has a default once its provider is connected.
   models.role.mockImplementation(async ({ role }: { role: string }) => {
     if (role !== "main") return { primary: null, backups: [] };
     const [me, credentials] = await Promise.all([rpc.me(), models.credentials()]);
@@ -597,7 +595,6 @@ it("shows the approval model only in Auto", async () => {
   autoReview.get.mockResolvedValue({
     mode: "auto",
     enabled: true,
-    skipApprovals: false,
     checkerAvailable: false,
   });
   const auto = await renderSettings();
@@ -680,7 +677,7 @@ it("connects a custom server from Add fallback without replacing the main model,
   const view = await renderSettings();
   try {
     await openPicker("Add fallback");
-    expect(pickerOptions()).toEqual(["DeepSeek Chat", "OpenAI-compatible"]);
+    expect(pickerOptions()).toEqual(["OpenAI-compatible"]);
     await choose("OpenAI-compatible");
     expect(titles(view.container)).toEqual(["Connect OpenAI-compatible"]);
     await typeInto(baseUrlField(view.container), "https://fallback.example.test/v1");
@@ -732,11 +729,37 @@ it("connects a custom server from Add fallback without replacing the main model,
   }
 });
 
-it("connects the main model from the empty default row as the space default", async () => {
+function mockMainModelConnect(scope: SettingsScope) {
+  let primary: ModelRoleChoice | null = null;
+  models.role.mockImplementation(async (input: { role: ModelRole; scope?: SettingsScope }) => ({
+    primary: input.role === "main" && input.scope === scope ? primary : null,
+    backups: [],
+  }));
+  models.connect.mockImplementationOnce(async (input: ModelConnectInput) => {
+    const isDefault = input.makeDefault !== false && input.scope === scope && Boolean(input.modelId);
+    const saved = {
+      id: "cred-main",
+      provider: input.provider,
+      label: "Main connection",
+      hasKey: false,
+      isDefault,
+      baseUrl: input.baseUrl,
+      modelId: input.modelId,
+    };
+    if (isDefault && input.modelId) {
+      primary = { provider: input.provider, modelId: input.modelId, credentialId: saved.id };
+    }
+    models.credentials.mockResolvedValue([saved]);
+    return saved;
+  });
+}
+
+it("connects the main model from the empty default row as the account default", async () => {
   vi.mocked(rpc.me).mockResolvedValue({
     ...account("deepseek", "deepseek-chat"),
     needsModel: true,
   });
+  mockMainModelConnect("account");
   const view = await renderSettings();
   try {
     await pick("Change Main model", "OpenAI-compatible");
@@ -760,6 +783,9 @@ it("connects the main model from the empty default row as the space default", as
     // The connection already made it the main model, so the list reloads instead of writing.
     expect(models.setRole).not.toHaveBeenCalled();
     expect(models.role.mock.calls.length).toBeGreaterThan(loads);
+    expect(section("main").querySelector('[data-testid="model-role-row-1"]')?.textContent).toContain(
+      "main-model",
+    );
     expect(titles(view.container)).toEqual([]);
   } finally {
     await view.unmount();
@@ -771,6 +797,7 @@ it("shows a Space only its own role lists and makes a new connection its main mo
     ...account("deepseek", "deepseek-chat"),
     needsModel: true,
   });
+  mockMainModelConnect("space");
   const view = await renderSettings(true, testQueryClient(), "space");
   try {
     expect(view.container.querySelector('[data-testid="model-role-main"]')).not.toBeNull();
@@ -794,6 +821,10 @@ it("shows a Space only its own role lists and makes a new connection its main mo
         makeDefault: true,
         scope: "space",
       }),
+    );
+    expect(models.setRole).not.toHaveBeenCalled();
+    expect(section("main").querySelector('[data-testid="model-role-row-1"]')?.textContent).toContain(
+      "space-model",
     );
   } finally {
     await view.unmount();
@@ -1249,7 +1280,7 @@ it("keeps the chosen protocol when the endpoint changes and probes with it", asy
   }
 });
 
-it("clamps a staged effort when the protocol switch drops the level", async () => {
+it("keeps the shared effort selection when a protocol maps it to a lower wire level", async () => {
   const view = await renderCompatible({
     ...compatibleCredential,
     reasoning: true,
@@ -1258,17 +1289,17 @@ it("clamps a staged effort when the protocol switch drops the level", async () =
   try {
     expect(effortField(view.container).value).toBe("max");
     await chooseProtocol(view.container, "anthropic-messages");
-    expect(effortField(view.container).value).toBe("high");
+    expect(effortField(view.container).value).toBe("max");
     await click(buttons(view.container, "Save")[0]);
     expect(models.connect).toHaveBeenLastCalledWith(
-      expect.objectContaining({ apiProtocol: "anthropic-messages", thinkingLevel: "high" }),
+      expect.objectContaining({ apiProtocol: "anthropic-messages", thinkingLevel: "max" }),
     );
   } finally {
     await view.unmount();
   }
 });
 
-it("uses declared adaptive effort levels in the connection form", async () => {
+it("offers all effort levels regardless of adaptive catalog metadata", async () => {
   const view = await renderCompatible({
     ...compatibleCredential,
     apiProtocol: "anthropic-messages",
@@ -1279,7 +1310,14 @@ it("uses declared adaptive effort levels in the connection form", async () => {
   try {
     const effort = effortField(view.container);
     expect(effort.value).toBe("max");
-    expect([...effort.options].map((option) => option.value)).toEqual(["low", "high", "max"]);
+    expect([...effort.options].map((option) => option.value)).toEqual([
+      "minimal",
+      "low",
+      "medium",
+      "high",
+      "xhigh",
+      "max",
+    ]);
     await click(buttons(view.container, "Save")[0]);
     expect(models.connect).toHaveBeenLastCalledWith(
       expect.objectContaining({ apiProtocol: "anthropic-messages", thinkingLevel: "max" }),

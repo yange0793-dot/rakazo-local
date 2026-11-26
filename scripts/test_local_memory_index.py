@@ -115,6 +115,34 @@ class FakeBackend:
         return SimpleNamespace(ok=True)
 
 
+def assert_delete_cancels_delayed_upsert(test, index, request):
+    pending = threading.Event()
+    release = threading.Event()
+    embedder = index.embedder
+
+    def embed(input):
+        pending.set()
+        if not release.wait(5):
+            raise TimeoutError("fixture did not release the embedding")
+        return embedder(input=input)
+
+    index.embedder = embed
+    try:
+        with ThreadPoolExecutor(max_workers=1) as pool:
+            upsert = pool.submit(index.upsert, request)
+            try:
+                test.assertTrue(pending.wait(5))
+                index.remove({key: request[key] for key in ("namespace", "indexId")})
+            finally:
+                release.set()
+            test.assertEqual(upsert.result(timeout=5), {"ok": True})
+    finally:
+        index.embedder = embedder
+
+    storage_id = index.storage_id(request["namespace"], request["indexId"])
+    test.assertEqual(index.collection.get(ids=[storage_id], include=["documents"]).documents, [])
+
+
 class IndexTests(unittest.TestCase):
     def setUp(self):
         self.backend = FakeBackend()
@@ -133,6 +161,9 @@ class IndexTests(unittest.TestCase):
         self.index.remove({"namespace": request["namespace"], "indexId": request["indexId"]})
         self.index.remove({"namespace": request["namespace"], "indexId": request["indexId"]})
         self.assertEqual(self.backend.collection.count(), 0)
+
+    def test_delete_prevents_an_already_embedding_upsert_from_restoring_the_document(self):
+        assert_delete_cancels_delayed_upsert(self, self.index, self.input())
 
     def test_namespace_and_revision_ids_do_not_collide(self):
         self.index.upsert(self.input())
@@ -501,6 +532,11 @@ class InstalledBackendSmoke(unittest.TestCase):
                 index.remove({"namespace": "space-a", "indexId": "fact-a:1"})
                 index.remove({"namespace": "space-a", "indexId": "fact-a:1"})
                 self.assertEqual(index.search({"namespace": "space-a", "query": "synthetic-query", "limit": 5}), {"candidates": []})
+                self.assertEqual(index.collection.count(), 1)
+                assert_delete_cancels_delayed_upsert(self, index, {
+                    "namespace": "space-a", "indexId": "fact-a:1", "id": "fact-a",
+                    "revision": 1, "content": "synthetic-a",
+                })
                 self.assertEqual(index.collection.count(), 1)
             finally:
                 backend.close()

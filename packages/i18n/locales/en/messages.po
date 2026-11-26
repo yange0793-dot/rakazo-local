@@ -906,6 +906,10 @@ msgstr "About {kb} KB of memory no longer reaches the bot."
 msgid "About {label}"
 msgstr "About {label}"
 
+#: apps/web/src/pages/shell/bot-settings-sections.tsx
+msgid "Accept edits"
+msgstr "Accept edits"
+
 #: apps/web/src/components/ComputerProviderSettings.tsx
 msgid "Access key ID"
 msgstr "Access key ID"
@@ -1962,6 +1966,10 @@ msgstr "Built-in"
 #: apps/web/src/components/AskCard.tsx
 msgid "Button “{button}” · read from the page, not checked"
 msgstr "Button “{button}” · read from the page, not checked"
+
+#: apps/web/src/pages/shell/bot-settings-sections.tsx
+msgid "Bypass permissions"
+msgstr "Bypass permissions"
 
 #: apps/mobile/components/thread-composer.tsx
 #: apps/web/src/pages/shell/chat-header.tsx
@@ -4732,6 +4740,10 @@ msgstr "Docs"
 #: apps/web/src/pages/KnowledgeSection.tsx
 msgid "Document changed. Reopen to edit the latest version."
 msgstr "Document changed. Reopen to edit the latest version."
+
+#: apps/web/src/pages/shell/bot-settings-sections.tsx
+msgid "Don't ask"
+msgstr "Don't ask"
 
 #: apps/mobile/app/sign-in.tsx
 #: apps/web/src/pages/Auth.tsx
@@ -7942,6 +7954,10 @@ msgstr "Pinned"
 msgid "Plan"
 msgstr "Plan"
 
+#: apps/web/src/pages/shell/bot-settings-sections.tsx
+msgid "Plan only"
+msgstr "Plan only"
+
 #: apps/mobile/components/audio-attachment.tsx
 #: apps/mobile/components/voice-player-bar.tsx
 msgid "Play"
@@ -10642,6 +10658,10 @@ msgstr "This server is already connected. Disconnect it first to authorize again
 #: packages/i18n/src/run-error.ts
 msgid "This server's tool result does not fit the model. Turn off Keep tool results whole for that server, or choose another model."
 msgstr "This server's tool result does not fit the model. Turn off Keep tool results whole for that server, or choose another model."
+
+#: apps/web/src/pages/shell/bot-settings-sections.tsx
+msgid "This space only"
+msgstr "This space only"
 
 #: apps/mobile/app/(settings)/model-connection.tsx
 #: apps/web/src/pages/model-settings/connection-controls.tsx

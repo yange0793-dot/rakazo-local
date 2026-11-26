@@ -326,7 +326,7 @@ function fixture(runId = "run-1") {
         { effect: "require_approval", matchKind: "tool", matchValue: "browser_act" },
       ]),
     },
-    userActionAutoReviewPreference: { findUnique: vi.fn(async () => ({ enabled: false })) },
+    userActionAutoReviewPreference: { findUnique: vi.fn(async () => ({ mode: "ask" })) },
     externalEffect,
   };
   const pauseRunForInput = vi.fn(async () => {

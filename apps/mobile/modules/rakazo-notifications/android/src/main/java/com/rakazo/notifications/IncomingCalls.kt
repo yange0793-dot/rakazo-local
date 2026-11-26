@@ -7,6 +7,7 @@ import android.media.RingtoneManager
 import android.os.*
 import android.view.Gravity
 import android.widget.*
+import androidx.core.content.ContextCompat
 import com.google.firebase.messaging.RemoteMessage
 import expo.modules.notifications.service.ExpoFirebaseMessagingService
 import org.json.JSONObject
@@ -130,12 +131,11 @@ internal object IncomingCalls {
   fun decline(context: Context, call: JSONObject, done: () -> Unit) {
     // Remembered like a call settled elsewhere, so a re-report from the app cannot ring it again.
     settled(context, call)
-    val storage = NotificationStorage(context)
-    val endpoint = storage.endpoint
-    val token = storage.token
-    val headers = storage.headers
+    val session = NotificationStorage(context).connection()
     executor.execute {
       try {
+        val endpoint = session.endpoint
+        val token = session.token
         if (!fresh(call) || token.isBlank() || !isAllowedNotificationEndpoint(endpoint)) return@execute
         val connection = URI("${endpoint.trimEnd('/')}/rpc/notifications/declineIncomingCall").toURL().openConnection() as HttpURLConnection
         connection.instanceFollowRedirects = false
@@ -143,7 +143,7 @@ internal object IncomingCalls {
         connection.readTimeout = 5000
         connection.requestMethod = "POST"
         connection.doOutput = true
-        val custom = runCatching { JSONObject(headers) }.getOrDefault(JSONObject())
+        val custom = runCatching { JSONObject(session.headers) }.getOrDefault(JSONObject())
         for (key in custom.keys()) connection.setRequestProperty(key, custom.getString(key))
         connection.setRequestProperty("x-rakazo-install-id", token)
         connection.setRequestProperty("Origin", "rakazo://")
@@ -198,8 +198,7 @@ class IncomingCallActivity : Activity() {
       }
     }
     receiver = closed
-    if (Build.VERSION.SDK_INT >= 33) registerReceiver(closed, IntentFilter(IncomingCalls.CHANGED), Context.RECEIVER_NOT_EXPORTED)
-    else registerReceiver(closed, IntentFilter(IncomingCalls.CHANGED))
+    ContextCompat.registerReceiver(this, closed, IntentFilter(IncomingCalls.CHANGED), ContextCompat.RECEIVER_NOT_EXPORTED)
     handler.postDelayed(expire, maxOf(0, IncomingCalls.expiry(call) - System.currentTimeMillis()))
   }
   override fun onDestroy() { receiver?.let { unregisterReceiver(it) }; handler.removeCallbacks(expire); super.onDestroy() }

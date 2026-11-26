@@ -227,6 +227,8 @@ class LocalIndex:
         self.embedding_lock = threading.Lock()
         self.pending_embeddings: dict[str, Future] = {}
         self.pending_lock = threading.Lock()
+        self.projection_lock = threading.Lock()
+        self.active_upserts: dict[str, set[threading.Event]] = {}
 
     def vector(self, text: str) -> list[float]:
         # Facts and lessons search different namespaces with the same query. Share only
@@ -274,20 +276,39 @@ class LocalIndex:
         fact_id = text_field(data, "id", 256)
         revision = revision_field(data)
         content = text_field(data, "content", MAX_TEXT_BYTES)
-        self.collection.upsert(
-            ids=[self.storage_id(namespace, index_id)],
-            # Native FTS5/BM25 needs text in this private index; authority stays in Postgres.
-            documents=[lexical_text(content)],
-            metadatas=[{"wing": namespace, "namespace": namespace, "id": fact_id, "revision": revision}],
-            embeddings=[self.vector(content)],
-        )
+        storage_id = self.storage_id(namespace, index_id)
+        retired = threading.Event()
+        with self.projection_lock:
+            self.active_upserts.setdefault(storage_id, set()).add(retired)
+        try:
+            vector = self.vector(content)
+            document = lexical_text(content)
+            with self.projection_lock:
+                if not retired.is_set():
+                    self.collection.upsert(
+                        ids=[storage_id],
+                        documents=[document],
+                        metadatas=[{"wing": namespace, "namespace": namespace, "id": fact_id, "revision": revision}],
+                        embeddings=[vector],
+                    )
+        finally:
+            with self.projection_lock:
+                active = self.active_upserts[storage_id]
+                active.remove(retired)
+                if not active:
+                    del self.active_upserts[storage_id]
         return {"ok": True}
 
     def remove(self, request: object) -> dict:
         data = fields(request, {"namespace", "indexId"})
         namespace = text_field(data, "namespace", 512)
         index_id = text_field(data, "indexId", 256)
-        self.collection.delete(ids=[self.storage_id(namespace, index_id)])
+        storage_id = self.storage_id(namespace, index_id)
+        with self.projection_lock:
+            self.collection.delete(ids=[storage_id])
+            # The HTTP client can time out while the server is still embedding this revision.
+            for retired in self.active_upserts.get(storage_id, ()):
+                retired.set()
         return {"ok": True}
 
     def search(self, request: object) -> dict:
@@ -375,7 +396,9 @@ class IndexRequestHandler(BaseHTTPRequestHandler):
         auth = self.headers.get_all("Authorization", [])
         if (
             not ipaddress.ip_address(self.client_address[0]).is_loopback or
-            len(auth) != 1 or not hmac.compare_digest(auth[0], f"Bearer {self.server.token}")
+            len(auth) != 1 or not hmac.compare_digest(
+                auth[0].encode("latin-1"), f"Bearer {self.server.token}".encode("ascii")
+            )
         ):
             self.reply(401, {"error": "Unauthorized."})
             return False

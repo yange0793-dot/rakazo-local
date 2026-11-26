@@ -510,7 +510,9 @@ export class CreateOSSandboxProvider implements SandboxProvider {
     if (result.result?.stdout) yield { type: "stdout", data: result.result.stdout };
     if (result.result?.stderr) yield { type: "stderr", data: result.result.stderr };
     if (result.result?.error) yield { type: "stderr", data: `${result.result.error}\n` };
-    yield { type: "exit", code: result.result?.exit_code ?? (result.result?.error ? 1 : 0) };
+    if (result.result?.exit_code == null && !result.result?.error)
+      yield { type: "stderr", data: "CreateOS command did not report an exit code\n" };
+    yield { type: "exit", code: result.result?.exit_code ?? 1 };
   }
 
   async connectScreen(

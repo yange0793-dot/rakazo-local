@@ -1,10 +1,5 @@
 import { Trans, useLingui } from "@lingui/react/macro";
-import type {
-  ActionApprovalRule,
-  ActionAutoReviewSettings,
-  ApprovalMode,
-  SettingsScope,
-} from "@rakazo/contracts";
+import type { ActionApprovalRule, SettingsScope } from "@rakazo/contracts";
 import type { ApprovalRuleChoice } from "@rakazo/core";
 import {
   APPROVAL_RULE_EFFECTS,
@@ -37,7 +32,7 @@ import { errorText } from "../lib/user-error";
 import { SettingsGroup, SettingsRow } from "./SettingsRows";
 import { SpendingLimitSettings } from "./SpendingLimitSettings";
 
-const segmented = "rounded-lg bg-muted p-1";
+const segmented = "flex flex-wrap rounded-lg bg-muted p-1";
 const segment = "h-7 px-3 text-body-sm aria-pressed:bg-background aria-pressed:shadow-sm";
 
 /** Approvals for the account, or for the bound Space when it customizes them. */
@@ -57,23 +52,10 @@ export function ApprovalRulesSettings({ scope }: { scope: SettingsScope }) {
   const [actionError, setError] = useState<string | null>(null);
   const error =
     actionError ?? (loadFailed ? errorText(loadFailed, t`Could not load approval rules`) : null);
-  const modes: Array<{ mode: ApprovalMode; label: string }> = [
-    { mode: "never", label: t`Never ask` },
-    // Auto needs an approval model; it stays listed while chosen so the choice is visible.
-    ...(autoReview?.checkerAvailable || autoReview?.mode === "auto"
-      ? [{ mode: "auto" as const, label: t`Auto` }]
-      : []),
-    { mode: "ask", label: t`Ask` },
-  ];
-
   function setRules(update: (current: ActionApprovalRule[]) => ActionApprovalRule[]) {
     return writeSaved(queryClient, queries.approvalRules.list.queryKey({ input }), (current) =>
       update(current ?? []),
     );
-  }
-
-  function setAutoReview(next: ActionAutoReviewSettings) {
-    return writeSaved(queryClient, queries.autoReview.get.queryKey({ input }), () => next);
   }
 
   async function save(work: () => Promise<unknown>, failure: string) {
@@ -88,12 +70,6 @@ export function ApprovalRulesSettings({ scope }: { scope: SettingsScope }) {
       setSaving(false);
     }
   }
-
-  const setMode = (mode: ApprovalMode) =>
-    save(
-      async () => setAutoReview(await rpc.autoReview.set({ scope, mode })),
-      t`Could not save Auto Review`,
-    );
 
   async function putRule(rule: Pick<ActionApprovalRule, "effect" | "matchKind" | "matchValue">) {
     if (rule.matchKind === "category") return;
@@ -135,16 +111,6 @@ export function ApprovalRulesSettings({ scope }: { scope: SettingsScope }) {
       await setRules((current) => current.filter((other) => other.id !== rule.id));
     }, t`Could not remove rule`);
 
-  const modeDetail =
-    autoReview?.mode === "auto" && !autoReview.checkerAvailable
-      ? t`Add a model in Settings to use this.`
-      : autoReview?.mode === "auto"
-        ? t`A model approves routine actions and asks you about the rest.`
-        : autoReview?.mode === "never"
-          ? t`Asks only before purchases and the first use of your computer. Only Block rules apply.`
-          : autoReview?.mode === "ask"
-            ? t`Asks before sending, spending or changing anything in your apps.`
-            : null;
   const groupTitles: Record<ActionApprovalRule["effect"], string> = {
     always_allow: t`Always allow`,
     require_approval: t`Always ask`,
@@ -154,34 +120,6 @@ export function ApprovalRulesSettings({ scope }: { scope: SettingsScope }) {
 
   return (
     <div data-testid="approval-settings" className="space-y-8">
-      <SettingsGroup>
-        <SettingsRow
-          label={<Trans>Mode</Trans>}
-          control={
-            <ToggleGroup
-              aria-label={t`Mode`}
-              data-testid="approval-mode"
-              value={autoReview ? [autoReview.mode] : []}
-              onValueChange={([next]) => {
-                if (next && next !== autoReview?.mode) void setMode(next as ApprovalMode);
-              }}
-              disabled={loading || saving || !autoReview}
-              spacing={1}
-              className={segmented}
-            >
-              {modes.map(({ mode, label }) => (
-                <ToggleGroupItem key={mode} value={mode} className={segment}>
-                  {label}
-                </ToggleGroupItem>
-              ))}
-            </ToggleGroup>
-          }
-        >
-          {modeDetail ? (
-            <p className="mt-1 text-body-sm text-muted-foreground">{modeDetail}</p>
-          ) : null}
-        </SettingsRow>
-      </SettingsGroup>
       {/* Spending is the person's own across every Space, so it is set with the account's approvals. */}
       {scope === "account" ? <SpendingLimitSettings /> : null}
       <AddRulePicker
@@ -192,7 +130,7 @@ export function ApprovalRulesSettings({ scope }: { scope: SettingsScope }) {
       {groups.map(({ effect, title }) => {
         const matching = rules.filter((rule) => rule.effect === effect);
         if (matching.length === 0) return null;
-        // Never ask runs everything a block does not stop, so these rules wait for another mode.
+        // Bypass ignores saved Allow rules; Ask and Deny remain active.
         const unused = !approvalRuleApplies(autoReview?.mode, effect);
         return (
           <div

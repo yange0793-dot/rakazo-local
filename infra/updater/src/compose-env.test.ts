@@ -63,6 +63,8 @@ const NOT_PASSED: Record<string, string> = {
   RAKAZO_DB_PACKAGE_DIR: "passed only to the migration CLI by the desktop app's native stack",
   RAKAZO_ENV_FILE: "set by the desktop app's native stack so no stray .env is read",
   RAKAZO_ALLOW_DESKTOP_SANDBOX: "local desktop sandbox opt-in; Compose uses its supervisor",
+  WORKER_HEALTH_FILE: "host-native stack path; each Compose worker has its own /tmp",
+  WORKER_HEALTH_PID: "set by host-native probes; Compose probes their isolated worker container",
   LOCAL_VM_CLI: LOCAL_VM,
   LOCAL_VM_COMPUTER_IMAGE: LOCAL_VM,
   LOCAL_VM_CPUS: LOCAL_VM,
@@ -206,7 +208,14 @@ describe("api and worker environment allowlists", () => {
   it("finds the reads it is meant to find", () => {
     const api = expectedKeys("api");
     const worker = expectedKeys("worker");
-    for (const key of ["DATABASE_URL", "ENCRYPTION_KEY", "OPENROUTER_API_KEY", "E2B_API_KEY"]) {
+    for (const key of [
+      "DATABASE_URL",
+      "ENCRYPTION_KEY",
+      "OPENROUTER_API_KEY",
+      "E2B_API_KEY",
+      "AGENT_RUNTIME_ROUTES",
+      "TINYFISH_API_KEY",
+    ]) {
       expect(api).toContain(key);
       expect(worker).toContain(key);
     }

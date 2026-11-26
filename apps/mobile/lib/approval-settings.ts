@@ -3,6 +3,7 @@ import type { ActionAutoReviewSettings, ApprovalMode } from "@rakazo/contracts";
 import { useFocusEffect } from "expo-router";
 import { useCallback, useMemo, useRef, useState } from "react";
 import { Alert } from "react-native";
+import { rpc } from "./api";
 import type { SettingsTarget } from "./settings-target";
 import { settingsRpc } from "./settings-target";
 import { errorText } from "./user-error";
@@ -17,13 +18,12 @@ export type ApprovalSettings = {
 };
 
 /**
- * The approval mode and the number of saved rules, for the Approvals rows in settings. Reads
- * again whenever the screen regains focus, so the count follows rules removed on the rules list.
- * Without `enabled` (a Space that follows the account) nothing is read.
+ * Without a target, edit the mode that applies in the active Space. The account and Space
+ * management screens also read their saved rule counts when they regain focus.
  */
-export function useApprovalSettings(target: SettingsTarget, enabled = true): ApprovalSettings {
-  const rpc = useMemo(() => settingsRpc(target), [target]);
-  const scope = target.scope;
+export function useApprovalSettings(target?: SettingsTarget, enabled = true): ApprovalSettings {
+  const targetRpc = useMemo(() => (target ? settingsRpc(target) : rpc), [target]);
+  const scope = target?.scope;
   const { t } = useLingui();
   const [settings, setSettings] = useState<ActionAutoReviewSettings | null>(null);
   const [ruleCount, setRuleCount] = useState(0);
@@ -54,7 +54,10 @@ export function useApprovalSettings(target: SettingsTarget, enabled = true): App
       }
       let current = true;
       const savesAtRead = saves.current;
-      void Promise.all([rpc("autoReview/get", { scope }), rpc("approvalRules/list", { scope })])
+      void Promise.all([
+        targetRpc("autoReview/get", scope ? { scope } : {}),
+        scope ? targetRpc("approvalRules/list", { scope }) : [],
+      ])
         .then(([nextSettings, rules]) => {
           if (!current) return;
           // A save doesn't change the rules, so a read it overtook still brings a fresh count.
@@ -70,7 +73,7 @@ export function useApprovalSettings(target: SettingsTarget, enabled = true): App
       return () => {
         current = false;
       };
-    }, [attempt, enabled, rpc, scope, t]),
+    }, [attempt, enabled, targetRpc, scope, t]),
   );
 
   async function setMode(mode: ApprovalMode) {
@@ -82,7 +85,7 @@ export function useApprovalSettings(target: SettingsTarget, enabled = true): App
     setPending(true);
     setSettings({ ...previous, mode });
     try {
-      const saved = await rpc("autoReview/set", { scope, mode });
+      const saved = await targetRpc("autoReview/set", scope ? { scope, mode } : { mode });
       if (resets.current === resetsAtSave) setSettings(saved);
     } catch (err) {
       if (resets.current === resetsAtSave) setSettings(previous);

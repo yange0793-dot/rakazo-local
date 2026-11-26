@@ -152,6 +152,15 @@ describe("Hermes backup zip", () => {
     { name: "plugins/", content: "" },
   ]);
 
+  it("opens a ZIP whose archive comment contains the end-record signature", async () => {
+    const comment = new Uint8Array(23);
+    new DataView(comment.buffer).setUint32(0, 0x06054b50, true);
+    const archived = join([backup, comment]);
+    new DataView(archived.buffer).setUint16(backup.length - 2, comment.length, true);
+
+    expect((await read(archived)).files.get(".hermes/SOUL.md")).toBe("Direct.\n");
+  });
+
   it("lists files under .hermes and reads only the ones an import uses", async () => {
     const { paths, files } = await read(backup);
     expect(paths).toContain(".hermes/state.db");

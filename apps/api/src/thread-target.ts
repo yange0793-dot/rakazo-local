@@ -41,10 +41,12 @@ import {
   loadMessageAuthor,
   lockSpaceGroup,
   primaryActiveRun,
+  readManagedInputCheckpoint,
   retireWaitingQuestionInTransaction,
   SpaceDeletionInProgressError,
   spaceTakesWork,
   THREAD_LOCK_TRANSACTION_OPTIONS,
+  threadHasManagedWork,
   touchGroupUpdatedAt,
   withTransactionRetry,
 } from "@rakazo/db";
@@ -525,7 +527,7 @@ export async function sendThreadMessage(
     replyQuote?: string;
     fromPage?: true;
     clientNonce?: string;
-    /** No model to start a turn: the send may only stop active work. */
+    /** Without a model, a send can only stop work or answer a native managed question. */
     noModel?: boolean;
   },
   releaseTakeover?: (runId: string) => Promise<void>,
@@ -642,6 +644,82 @@ export async function sendThreadMessage(
             run.userId === actor.userId,
         )?.id;
 
+      const answerManagedQuestion = async (
+        message: Awaited<ReturnType<typeof createThreadMessageInTransaction>>,
+        blocks: MessageBlock[],
+        attachments: MessageBlock[],
+      ) => {
+        if (!input.text?.trim() || routineRuns.length || input.mentions?.length) return null;
+        const waiting = await tx.run.findMany({
+          where: {
+            spaceId: actor.spaceId,
+            userId: actor.userId,
+            status: "waiting_input",
+            trigger: "bot_message",
+            clientNonce: { startsWith: "work-event-input:" },
+            ticket: {
+              originThreadId: target.threadId,
+              managedVersion: { gt: 0 },
+              stopRequestedAt: null,
+            },
+          },
+          select: {
+            id: true,
+            taskId: true,
+            botId: true,
+            status: true,
+            userId: true,
+            trigger: true,
+            checkpoint: true,
+          },
+        });
+        for (const run of waiting) {
+          if (!readManagedInputCheckpoint(run.checkpoint)) continue;
+          const answer = { ...composerAnswerInput(message), runId: run.id };
+          if (!(await eligibleWaitingTextAnswer(tx, answer))) continue;
+          if (attachments.length)
+            throw new ORPCError("BAD_REQUEST", {
+              message: "This external question accepts a text answer only.",
+            });
+          if (!(await answerWaitingRunWithTextInTransaction(tx, answer)))
+            throw new ORPCError("CONFLICT", {
+              message: "This prompt is no longer awaiting an answer",
+            });
+          const resumed = await tx.run.findUniqueOrThrow({
+            where: { id: run.id },
+            select: { status: true },
+          });
+          await tx.message.update({ where: { id: message.id }, data: { runId: run.id } });
+          if (target.kind === "group") await touchGroupUpdatedAt(tx, target.groupId);
+          const event = await appendEventInTransaction(tx, {
+            spaceId: actor.spaceId,
+            threadId: target.threadId,
+            botId: run.botId,
+            type: "thread.message.created",
+            runId: run.id,
+            payload: {
+              messageId: message.id,
+              seq: message.seq,
+              role: "user",
+              blocks,
+              author,
+              callId,
+              runIds: [run.id],
+              replyToMessageId,
+              replyQuote,
+              replyPreview,
+            },
+          });
+          return {
+            message,
+            runs: [{ ...run, status: resumed.status }],
+            routineRuns,
+            eventSeq: event.seq,
+          };
+        }
+        return null;
+      };
+
       if (target.kind === "bot") {
         const mentionTargets = splitMentionTargets(input.mentions);
         const { blocks: attachmentBlocks, artifacts } = await resolveSendAttachments(
@@ -673,6 +751,7 @@ export async function sendThreadMessage(
             modelProvider: true,
             modelId: true,
             modelPinned: true,
+            modelCredentialId: true,
             thinkingLevel: true,
           },
         });
@@ -697,7 +776,43 @@ export async function sendThreadMessage(
           clientNonce: input.clientNonce,
         });
         // A bare "stop" from the owner while work is active is the Stop button, not a reply.
-        const stopping = activeRuns.length > 0 && !routineRuns.length && isStopMessage(input);
+        const managedStop =
+          !routineRuns.length &&
+          isStopMessage(input) &&
+          (await threadHasManagedWork(tx, { ...actor, threadId: target.threadId }));
+        const stopping =
+          !routineRuns.length && isStopMessage(input) && (activeRuns.length > 0 || managedStop);
+        if (managedStop && !activeRuns.length) {
+          const previous = await tx.run.findFirst({
+            where: { spaceId: actor.spaceId, userId: actor.userId, threadId: target.threadId },
+            orderBy: { createdAt: "desc" },
+            select: { id: true, taskId: true, botId: true, status: true, userId: true },
+          });
+          if (!previous) throw new IsolationError("Original work execution is unavailable.");
+          const event = await appendEventInTransaction(tx, {
+            spaceId: actor.spaceId,
+            threadId: target.threadId,
+            botId: target.botId,
+            type: "thread.message.created",
+            payload: {
+              messageId: message.id,
+              seq: message.seq,
+              role: "user",
+              blocks,
+              author,
+              runIds: [previous.id],
+              replyToMessageId,
+              replyQuote,
+              replyPreview,
+            },
+          });
+          const stop = await cancelThreadRuns(actor, target, { botId: target.botId })(tx);
+          return { message, runs: [previous], routineRuns, eventSeq: event.seq, stop };
+        }
+        if (!stopping) {
+          const managedAnswer = await answerManagedQuestion(message, blocks, attachmentBlocks);
+          if (managedAnswer) return managedAnswer;
+        }
         if (input.noModel && !stopping) {
           throw new ORPCError("BAD_REQUEST", { message: MODEL_REQUIRED_SEND_ERROR });
         }
@@ -944,12 +1059,15 @@ export async function sendThreadMessage(
           modelProvider: true,
           modelId: true,
           modelPinned: true,
+          modelCredentialId: true,
           thinkingLevel: true,
           updatedAt: true,
         },
       });
       // A plain message while members wait on the user answers the latest question only.
-      const asking = namesNobody ? latestWaitingRun(activeRuns) : undefined;
+      const asking = namesNobody
+        ? latestWaitingRun(activeRuns.filter((run) => run.userId === actor.userId))
+        : undefined;
       if (asking) {
         targetBotIds = [asking.botId];
         namesNobody = false;
@@ -979,7 +1097,7 @@ export async function sendThreadMessage(
       });
       // A bare "stop" while any member, or a helper it started, works is the Stop button,
       // as in a bot's own chat.
-      const working =
+      let working =
         !routineRuns.length && isStopMessage(input)
           ? await tx.run.findFirst({
               where: {
@@ -995,6 +1113,18 @@ export async function sendThreadMessage(
               select: { id: true, taskId: true, botId: true, status: true, userId: true },
             })
           : null;
+      if (
+        !working &&
+        !routineRuns.length &&
+        isStopMessage(input) &&
+        (await threadHasManagedWork(tx, { ...actor, threadId: target.threadId }))
+      ) {
+        working = await tx.run.findFirst({
+          where: { spaceId: actor.spaceId, userId: actor.userId, threadId: target.threadId },
+          orderBy: { createdAt: "desc" },
+          select: { id: true, taskId: true, botId: true, status: true, userId: true },
+        });
+      }
       if (working) {
         await touchGroupUpdatedAt(tx, target.groupId);
         const event = await appendEventInTransaction(tx, {
@@ -1024,6 +1154,8 @@ export async function sendThreadMessage(
         )(tx);
         return { message, runs: [working], routineRuns, eventSeq: event.seq, stop };
       }
+      const managedAnswer = await answerManagedQuestion(message, blocks, attachmentBlocks);
+      if (managedAnswer) return managedAnswer;
       if (input.noModel) {
         throw new ORPCError("BAD_REQUEST", { message: MODEL_REQUIRED_SEND_ERROR });
       }

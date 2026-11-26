@@ -1,6 +1,7 @@
 // @vitest-environment jsdom
 
-import type { Bot } from "@rakazo/contracts";
+import type * as LinguiCore from "@lingui/core";
+import type { ActionAutoReviewSettings, Bot } from "@rakazo/contracts";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import type { ComponentProps, ReactNode } from "react";
 import { act } from "react";
@@ -8,15 +9,27 @@ import type { Root } from "react-dom/client";
 import { createRoot } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
+vi.mock("@lingui/core", async (importOriginal) => {
+  const actual = await importOriginal<typeof LinguiCore>();
+  return { ...actual, i18n: actual.setupI18n({ locale: "en", messages: { en: {} } }) };
+});
+
 vi.mock("../../lib/rpc", () => {
   const rpc = {
     voice: { voices: vi.fn(async () => []) },
     models: {
       credentials: vi.fn(async () => []),
       list: vi.fn(async () => []),
-      role: vi.fn(async () => ({ primary: null, fallbacks: [] })),
+      role: vi.fn(async () => ({ primary: null, backups: [] })),
       setRole: vi.fn(async () => undefined),
     },
+    autoReview: {
+      get: vi.fn(async (): Promise<ActionAutoReviewSettings> => ({
+        mode: "ask",
+        checkerAvailable: false,
+      })),
+    },
+    spaceSettings: { overrides: vi.fn(async () => []) },
     me: vi.fn(async () => ({})),
     // This server receives no email, so the panel offers no address.
     bots: { emailAddress: vi.fn(async () => null) },
@@ -531,6 +544,8 @@ it("uses section headings without repeating notification or model row labels", a
   expect(notification?.textContent?.trim()).toBe("When it finishes or needs input");
   const model = container.querySelector('label[for$="-model"]');
   expect(model?.className).toBe("sr-only");
+  expect(container.querySelector('select[aria-label="Provider"]')).not.toBeNull();
+  expect(container.querySelector('select[aria-label="Model"]')).not.toBeNull();
 });
 
 it("treats cross-space communication as on unless turned off", async () => {

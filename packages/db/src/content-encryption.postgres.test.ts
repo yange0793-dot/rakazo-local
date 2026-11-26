@@ -444,6 +444,39 @@ describePostgres("content encryption (PostgreSQL)", () => {
       await migrateContent(prisma, { mode: "encrypt" });
     }));
 
+  it("migrates execution requests without changing a missing result", () =>
+    runAsSystem("test fixture", async () => {
+      const id = `enc-execution-${suffix}`;
+      await raw.query(
+        `INSERT INTO external_agent_executions
+           (id, "spaceId", "userId", "ownerBotId", "threadId", "ticketId", "operationKey", provider,
+            route, request, "updatedAt")
+         VALUES ($1, $2, $3, $4, $5, 'fixture-ticket', $1, 'fixture', '{}', $6::jsonb, now())`,
+        [id, spaceId, userId, botId, threadId, JSON.stringify({ text: "Synthetic request." })],
+      );
+      try {
+        const status = async () =>
+          (await contentEncryptionStatus(prisma)).tables.find(
+            (table) => table.table === "external_agent_executions",
+          )!.plaintext;
+        const before = await status();
+        expect(before).toBeGreaterThan(0);
+        await migrateContent(prisma, { mode: "encrypt" });
+        expect(await status()).toBe(0);
+        expect(await prisma.externalAgentExecution.findUniqueOrThrow({ where: { id } }))
+          .toMatchObject({ request: { text: "Synthetic request." }, result: null });
+        await migrateContent(prisma, { mode: "decrypt" });
+        const { rows } = await raw.query(
+          "SELECT request, result IS NULL AS missing FROM external_agent_executions WHERE id = $1",
+          [id],
+        );
+        expect(rows).toEqual([{ request: { text: "Synthetic request." }, missing: true }]);
+      } finally {
+        await prisma.externalAgentExecution.deleteMany({ where: { id, spaceId } });
+        await migrateContent(prisma, { mode: "encrypt" });
+      }
+    }));
+
   it("re-wraps space keys under a new master key and re-encrypts content", () =>
     runAsSystem("test fixture", async () => {
       const message = await createThreadMessage(prisma, {

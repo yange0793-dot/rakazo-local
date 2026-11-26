@@ -1,6 +1,7 @@
 // @vitest-environment jsdom
 
 import type { ModelCredential } from "@rakazo/contracts";
+import { modelOptionKey } from "@rakazo/core";
 import { notifyManager } from "@tanstack/react-query";
 import type { CSSProperties, ReactNode, Ref } from "react";
 import { act, createElement, useEffect, useImperativeHandle } from "react";
@@ -38,6 +39,10 @@ const mocks = vi.hoisted(() => ({
   vendorLabels: false,
   subscriptionSignIn: false,
   secondConnection: false,
+  roleCredentials: undefined as ModelCredential[] | undefined,
+  botModel: undefined as
+    | { modelProvider: string; modelId: string; modelCredentialId: string }
+    | undefined,
   catalogSource: undefined as ModelCredential["catalogSource"],
   alert: vi.fn(),
   prompt: vi.fn(),
@@ -148,6 +153,9 @@ vi.mock("./api", () => ({
         expiresInSeconds: 600,
       };
     if (procedure === "models/completeOAuth") return mocks.completeOAuth(options?.signal);
+    if (procedure === "autoReview/get") return { mode: "ask", checkerAvailable: false };
+    if (procedure === "autoReview/set")
+      return { ...(input as { mode: string }), checkerAvailable: false };
     if (procedure === "bots/update") return mocks.update(input);
     if (procedure === "models/role") {
       const main = (input as { role: string }).role === "main";
@@ -178,7 +186,13 @@ vi.mock("./api", () => ({
     }
     if (procedure === "models/setDefault") return result;
     if (procedure === "bots/get")
-      return { id: "bot-fixture", name: "Fixture", title: "", computerMode: "team" };
+      return {
+        id: "bot-fixture",
+        name: "Fixture",
+        title: "",
+        computerMode: "team",
+        ...mocks.botModel,
+      };
     if (procedure === "me")
       return {
         userId: "user-fixture",
@@ -217,6 +231,7 @@ vi.mock("./api", () => ({
                     }))
                   : []),
               ];
+    if (procedure === "models/credentials" && mocks.roleCredentials) return mocks.roleCredentials;
     if (procedure === "models/credentials")
       return mocks.connected
         ? [
@@ -599,6 +614,8 @@ beforeEach(() => {
   mocks.vendorLabels = false;
   mocks.subscriptionSignIn = false;
   mocks.secondConnection = false;
+  mocks.roleCredentials = undefined;
+  mocks.botModel = undefined;
   mocks.catalogSource = undefined;
   mocks.backups = [];
   mocks.primary = null;
@@ -625,31 +642,131 @@ describe("chat settings model row", () => {
   it("opens the searchable model list when there are too many models for a menu", async () => {
     mocks.params = { botId: "bot-fixture" };
     await render();
+    expect(container.querySelector('[data-menu="Provider"]')).not.toBeNull();
+    await act(async () =>
+      mocks.menus.get("Provider")!.onPressAction({
+        nativeEvent: { event: `choice:connection:${CREDENTIAL_ID}` },
+      }),
+    );
     expect(container.querySelector('[data-menu="Model"]')).toBeNull();
     const row = container.querySelector<HTMLButtonElement>('button[aria-label="Model"]');
-    expect(row?.getAttribute("aria-valuetext")).toBe("Space default (Model 1)");
+    expect(row?.getAttribute("aria-valuetext")).toBe("Model 1");
     act(() => row!.click());
     expect(mocks.push).toHaveBeenCalledExactlyOnceWith({
       pathname: "/bot-model",
-      params: { botId: "bot-fixture", value: "" },
+      params: {
+        botId: "bot-fixture",
+        value: modelOptionKey("openrouter", "vendor/model-1", CREDENTIAL_ID),
+        channel: `connection:${CREDENTIAL_ID}`,
+      },
     });
+  });
+
+  it("picks the effective approval mode directly below Thinking without forcing a scope", async () => {
+    mocks.params = { botId: "bot-fixture", focus: "model" };
+    await act(async () => root.render(<BotSettingsScreen />));
+    const group = container.querySelector('section[aria-label="Model"]')!;
+    expect(
+      [...group.querySelectorAll<HTMLElement>("[data-menu]")].map((el) => el.dataset.menu),
+    ).toEqual(["Provider", "Model", "Thinking", "Approvals"]);
+    const row = group.querySelector('[aria-label="Approvals"]')!;
+    expect(row.getAttribute("aria-valuetext")).toBe("Ask");
+    expect(mocks.rpc).toHaveBeenCalledWith("autoReview/get", {});
+    expect(mocks.rpc.mock.calls.some(([proc]) => proc === "approvalRules/list")).toBe(false);
+
+    const menu = mocks.menus.get("Approvals")!;
+    expect(menu.actions.map((action) => action.title)).toEqual([
+      "Auto",
+      "Ask",
+      "Bypass permissions",
+    ]);
+    await act(async () => menu.onPressAction({ nativeEvent: { event: "choice:bypermission" } }));
+    expect(mocks.rpc).toHaveBeenCalledWith("autoReview/set", { mode: "bypermission" });
+    expect(row.getAttribute("aria-valuetext")).toBe("Bypass permissions");
+    expect(mocks.update).not.toHaveBeenCalled();
   });
 
   it("stages the model the list hands back until Save", async () => {
     mocks.params = { botId: "bot-fixture" };
     await render();
-    mocks.params = { botId: "bot-fixture", model: "openrouter::vendor/model-3" };
+    mocks.params = {
+      botId: "bot-fixture",
+      model: modelOptionKey("openrouter", "vendor/model-3", CREDENTIAL_ID),
+    };
     await act(async () => root.render(<BotSettingsScreen />));
     expect(mocks.setParams).toHaveBeenCalledWith({ model: undefined });
     const row = container.querySelector('button[aria-label="Model"]');
-    expect(row?.getAttribute("aria-valuetext")).toBe("Model 3 (OpenRouter)");
+    expect(row?.getAttribute("aria-valuetext")).toBe("Model 3");
     expect(mocks.update).not.toHaveBeenCalled();
     const save = [...container.querySelectorAll("button")].find(
       (button) => button.textContent === "Save",
     );
     await act(async () => save!.click());
     expect(mocks.update).toHaveBeenCalledWith(
-      expect.objectContaining({ modelProvider: "openrouter", modelId: "vendor/model-3" }),
+      expect.objectContaining({
+        modelProvider: "openrouter",
+        modelId: "vendor/model-3",
+        modelCredentialId: CREDENTIAL_ID,
+      }),
+    );
+  });
+
+  it("saves and reloads a different channel of the same model", async () => {
+    const provider = "openai-compatible";
+    const modelId = "shared";
+    const a = {
+      id: "channel-a",
+      label: "Channel A",
+      provider,
+      modelId,
+      isDefault: true,
+      hasKey: false,
+      savedModelId: modelId,
+      enabledModelIds: [modelId],
+    };
+    const b = {
+      ...a,
+      id: "channel-b",
+      label: "Channel B",
+      isDefault: false,
+      savedModelId: null,
+      enabledModelIds: [modelId, "b-only"],
+    };
+    mocks.roleCredentials = [b, a];
+    mocks.botModel = { modelProvider: provider, modelId, modelCredentialId: a.id };
+    mocks.params = { botId: "bot-fixture" };
+    await render();
+    expect(mocks.menus.get("Provider")!.actions.map((action) => action.title)).toEqual([
+      "Space default",
+      "Channel B",
+      "Channel A",
+    ]);
+    await act(async () =>
+      mocks.menus.get("Provider")!.onPressAction({
+        nativeEvent: { event: "choice:connection:channel-b" },
+      }),
+    );
+    expect(mocks.menus.get("Model")!.actions.map((action) => action.title)).toEqual([
+      "shared",
+      "b-only",
+    ]);
+    expect(mocks.update).not.toHaveBeenCalled();
+    const save = [...container.querySelectorAll("button")].find(
+      (button) => button.textContent === "Save",
+    )!;
+    await act(async () => save.click());
+    expect(mocks.update).toHaveBeenCalledWith(
+      expect.objectContaining({
+        modelProvider: provider,
+        modelId,
+        modelCredentialId: b.id,
+      }),
+    );
+    mocks.botModel = { modelProvider: provider, modelId, modelCredentialId: b.id };
+    await act(async () => root.render(<BotSettingsScreen key="reload" />));
+    act(() => container.querySelector<HTMLButtonElement>('button[aria-label="Advanced"]')!.click());
+    expect(container.querySelector('[aria-label="Provider"]')?.getAttribute("aria-valuetext")).toBe(
+      "Channel B",
     );
   });
 });
@@ -697,7 +814,10 @@ describe("chat model list", () => {
     act(() => (rows()[0] as HTMLButtonElement).click());
     expect(mocks.dismissTo).toHaveBeenCalledExactlyOnceWith({
       pathname: "/bot-settings",
-      params: { botId: "bot-fixture", model: "openrouter::vendor/model-7" },
+      params: {
+        botId: "bot-fixture",
+        model: modelOptionKey("openrouter", "vendor/model-7", CREDENTIAL_ID),
+      },
     });
   });
 
@@ -1169,7 +1289,7 @@ describe("model role lists", () => {
     expect(ids("Model 2")).toEqual(["moveUp", "moveDown", "manage", "remove"]);
     expect(ids("Model 3")).toEqual(["moveUp", "manage", "remove"]);
     expect(rowButton("Main model", "Model 1").getAttribute("data-accessibility-actions")).toBe(
-      "Thinking: Default,Thinking: Low,Thinking: Medium,Thinking: High,Move down,Manage OpenRouter,Remove",
+      "Thinking: Default,Thinking: Minimal,Thinking: Low,Thinking: Medium,Thinking: High,Thinking: Extra high,Thinking: Max,Move down,Manage OpenRouter,Remove",
     );
     await menuAction("Model 3", "moveUp");
     expect(rowTitles()).toEqual(["Model 1", "Model 3", "Model 2"]);
@@ -1199,9 +1319,12 @@ describe("model role lists", () => {
     const thinking = mocks.menus.get("Model 1")!.actions[0]!;
     expect(thinking.subactions!.map((action) => [action.title, action.state])).toEqual([
       ["Default", "off"],
+      ["Minimal", "off"],
       ["Low", "off"],
       ["Medium", "off"],
       ["High", "on"],
+      ["Extra high", "off"],
+      ["Max", "off"],
     ]);
     await menuAction("Model 1", "thinking:medium");
     await menuAction("Model 1", "thinking:");
@@ -1709,27 +1832,78 @@ describe("several connections for one provider", () => {
     mocks.secondConnection = true;
   });
 
-  it("lists each connection's models under its own name and saves the connection picked", async () => {
-    mocks.primary = model(1, CREDENTIAL_ID);
+  it.each([CREDENTIAL_ID, undefined])(
+    "offers the same fallback only on the unused connection: %s",
+    async (id) => {
+      mocks.primary = model(1, id);
+      await renderModels();
+      act(() =>
+        [...section("Main model").querySelectorAll("button")]
+          .find((button) => button.textContent === "Add fallback")!
+          .click(),
+      );
+      expect([...container.querySelectorAll("h2")].map((heading) => heading.textContent)).toEqual([
+        "OpenRouter",
+        "OpenRouter (Work)",
+      ]);
+      // The running model is offered again on the other account.
+      const picker = modelPickerRequest(mocks.params.requestId!)!;
+      expect(picker.choices.filter((choice) => choice.modelId === "vendor/model-1")).toHaveLength(
+        1,
+      );
+      const work = picker.choices.find(
+        (choice) =>
+          choice.providerLabel === "OpenRouter (Work)" && choice.modelId === "vendor/model-1",
+      )!;
+      await act(async () => picker.onSelect(work));
+      expect(roleSaves()).toEqual([{ backups: [model(1, WORK_CREDENTIAL_ID)] }]);
+    },
+  );
+
+  it("selects the same model from identically named gateway connections by credential ID", async () => {
+    const provider = "openai-compatible";
+    const modelId = "channel/chat";
+    mocks.roleCredentials = ["messages", "responses"].map((group) => ({
+      id: `connection-${group}`,
+      provider,
+      modelId,
+      label: "Gateway",
+      hasKey: false,
+      isDefault: false,
+      catalogSource: {
+        id: `source-${group}`,
+        group,
+        providerId: "channel",
+        label: "Source",
+        available: true,
+        unavailableModelIds: [],
+      },
+    }));
     await renderModels();
+    act(() => section("Main model").querySelector("button")!.click());
+    expect([...container.querySelectorAll("h2")].map((heading) => heading.textContent)).toEqual([
+      "Gateway (messages)",
+      "Gateway (responses)",
+    ]);
+    await act(async () =>
+      pickerRows()
+        .find((row) => row.getAttribute("aria-label") === `${modelId} (Gateway, responses)`)!
+        .click(),
+    );
     act(() =>
       [...section("Main model").querySelectorAll("button")]
         .find((button) => button.textContent === "Add fallback")!
         .click(),
     );
-    expect([...container.querySelectorAll("h2")].map((heading) => heading.textContent)).toEqual([
-      "OpenRouter",
-      "OpenRouter (Work)",
+    await act(async () =>
+      pickerRows()
+        .find((row) => row.getAttribute("aria-label") === `${modelId} (Gateway, messages)`)!
+        .click(),
+    );
+    expect(roleSaves()).toEqual([
+      { primary: { provider, modelId, credentialId: "connection-responses" }, backups: [] },
+      { backups: [{ provider, modelId, credentialId: "connection-messages" }] },
     ]);
-    // The running model is offered again on the other account.
-    const picker = modelPickerRequest(mocks.params.requestId!)!;
-    expect(picker.choices.filter((choice) => choice.modelId === "vendor/model-1")).toHaveLength(1);
-    const work = picker.choices.find(
-      (choice) =>
-        choice.providerLabel === "OpenRouter (Work)" && choice.modelId === "vendor/model-1",
-    )!;
-    await act(async () => picker.onSelect(work));
-    expect(roleSaves()).toEqual([{ backups: [model(1, WORK_CREDENTIAL_ID)] }]);
   });
 
   it("names a row's connection and manages that connection", async () => {

@@ -14,15 +14,15 @@ export function botsWithOwnModel<T extends Pick<Bot, "modelProvider" | "modelId"
   return bots.filter((bot) => Boolean(bot.modelProvider && bot.modelId));
 }
 
+/** Shared user-facing effort scale; adapters map it to each model's supported levels. */
+export const THINKING_LEVEL_OPTIONS = ["minimal", "low", "medium", "high", "xhigh", "max"] as const;
+
 /** Levels the compatible serializers can encode, not evidence of endpoint support. */
-export const COMPATIBLE_THINKING_LEVELS = [
-  "minimal",
-  "low",
-  "medium",
-  "high",
-  "xhigh",
-  "max",
-] as const;
+export const COMPATIBLE_THINKING_LEVELS = THINKING_LEVEL_OPTIONS;
+
+export function canSelectThinkingLevel(level: string, _supported?: readonly string[]): boolean {
+  return THINKING_LEVEL_OPTIONS.includes(level as (typeof THINKING_LEVEL_OPTIONS)[number]);
+}
 
 /** Explicit connection metadata; never inferred from a compatible model's name. */
 export type CompatibleReasoningCapabilities = {
@@ -51,7 +51,7 @@ export function compatibleThinkingLevels(
   );
 }
 
-const THINKING_LEVELS = ["off", ...COMPATIBLE_THINKING_LEVELS] as const;
+const THINKING_LEVELS = ["off", ...THINKING_LEVEL_OPTIONS] as const;
 
 /** Blank while the connection sets no cap of its own; the model's own ceiling applies. */
 export function connectionMaxTokensField(stored: number | undefined): string {
@@ -155,6 +155,7 @@ const DEEPSEEK_DISPLAY_MODEL_IDS: Record<string, string> = {
 
 export type ConnectedModelChoice = {
   key: string;
+  connectionId?: string;
   provider: string;
   modelId: string;
   label: string;
@@ -170,17 +171,21 @@ type CatalogModelRef = {
   id: string;
   label: string;
   providerName?: string;
+  credentialIds?: readonly string[];
   placeholder?: boolean;
   images?: boolean;
 };
 
 type CredentialModelRef = {
+  id?: string;
   provider: string;
   label: string;
   modelId?: string | null;
+  savedModelId?: string | null;
   enabledModelIds?: readonly string[] | null;
   isDefault?: boolean;
   preferenceRank?: number;
+  reconnectRequired?: boolean;
   catalogSource?: {
     available: boolean;
     unavailableModelIds: readonly string[];
@@ -202,11 +207,40 @@ function canonicalApiModelId(provider: string, modelId: string): string | undefi
   return canonical;
 }
 
-export function modelOptionKey(provider: string, modelId: string): string {
-  return `${canonicalPiProviderId(provider)}::${modelId}`;
+export function modelOptionKey(
+  provider: string,
+  modelId: string,
+  connectionId?: string | null,
+): string {
+  const canonical = canonicalPiProviderId(provider);
+  return connectionId
+    ? JSON.stringify([canonical, modelId, connectionId])
+    : `${canonical}::${modelId}`;
 }
 
-export function parseModelOptionKey(key: string): { provider: string; modelId: string } | null {
+export function parseModelOptionKey(
+  key: string,
+): { provider: string; modelId: string; connectionId?: string } | null {
+  if (key.startsWith("[")) {
+    try {
+      const parts: unknown = JSON.parse(key);
+      if (
+        Array.isArray(parts) &&
+        parts.length === 3 &&
+        typeof parts[0] === "string" &&
+        typeof parts[1] === "string" &&
+        typeof parts[2] === "string"
+      )
+        return {
+          provider: canonicalPiProviderId(parts[0]),
+          modelId: parts[1],
+          connectionId: parts[2],
+        };
+    } catch {
+      return null;
+    }
+    return null;
+  }
   const separator = key.indexOf("::");
   if (separator <= 0) return null;
   return {
@@ -279,27 +313,35 @@ export function credentialForModel<C extends CredentialModelRef>(
   modelId: string | null | undefined,
 ): C | undefined {
   if (!provider || !modelId) return undefined;
-  const candidates = credentials.filter((credential) => credential.provider === provider);
+  const candidates = credentials.filter(
+    (credential) => canonicalPiProviderId(credential.provider) === canonicalPiProviderId(provider),
+  );
+  const savedModel = (credential: C) =>
+    credential.savedModelId === undefined ? credential.modelId : credential.savedModelId;
+  const projectedDefault = (credential: C) =>
+    credential.savedModelId === undefined && credential.isDefault;
   const preferences = [...candidates].sort(
     (left, right) =>
-      Number(Boolean(right.isDefault)) - Number(Boolean(left.isDefault)) ||
+      Number(Boolean(projectedDefault(right))) - Number(Boolean(projectedDefault(left))) ||
       (left.preferenceRank ?? Infinity) - (right.preferenceRank ?? Infinity),
   );
-  const matching = preferences.filter((credential) => credential.modelId === modelId);
+  const matching = preferences.find((credential) => savedModel(credential) === modelId);
   const preferred =
     preferences.find(
       (credential) =>
-        credential.isDefault || credential.preferenceRank !== undefined || credential.modelId,
+        projectedDefault(credential) ||
+        credential.preferenceRank !== undefined ||
+        savedModel(credential),
     ) ?? candidates[0];
-  const selected = matching.find((credential) => credential.isDefault) ?? matching[0] ?? preferred;
   if (provider !== "openai-compatible")
     return (
-      matching[0] ?? candidates.find((credential) => credential.enabledModelIds?.includes(modelId))
+      matching ?? candidates.find((credential) => credential.enabledModelIds?.includes(modelId))
     );
+  const selected = matching ?? preferred;
   if (!selected) return undefined;
   const refs = candidates.map((credential) => ({
     credential,
-    defaultModel: credential.modelId,
+    defaultModel: savedModel(credential),
     enabledModelIds: credential.enabledModelIds,
   }));
   return selectCompatibleModelCredential(
@@ -318,17 +360,27 @@ export function credentialForModel<C extends CredentialModelRef>(
 export function connectedModelChoices(
   credentials: readonly CredentialModelRef[],
   catalog: readonly CatalogModelRef[],
+  pinConnection = false,
 ): ConnectedModelChoice[] {
   const choices: ConnectedModelChoice[] = [];
   const seen = new Set<string>();
+  const routes = new Map<string, CredentialModelRef | undefined>();
   for (const credential of credentials) {
-    if (credential.catalogSource?.available === false) continue;
+    if (credential.reconnectRequired || credential.catalogSource?.available === false) continue;
     const providerModels = catalog.filter(
       (entry) =>
         canonicalPiProviderId(entry.provider) === canonicalPiProviderId(credential.provider) &&
-        !entry.placeholder,
+        !entry.placeholder &&
+        (!pinConnection ||
+          !credential.id ||
+          !entry.credentialIds ||
+          entry.credentialIds.includes(credential.id)),
     );
-    const raw = credential.modelId?.trim() ?? "";
+    const raw =
+      (credential.savedModelId === undefined
+        ? credential.modelId
+        : credential.savedModelId
+      )?.trim() ?? "";
     const resolved = raw ? resolveSelectableModelId(providerModels, credential.provider, raw) : "";
     const resolvedInCatalog = providerModels.some(
       (entry) => resolveSelectableModelId(providerModels, entry.provider, entry.id) === resolved,
@@ -345,7 +397,33 @@ export function connectedModelChoices(
         : raw && !resolvedInCatalog
           ? [freeFormChoice(credential, resolved || raw)]
           : catalogChoices(providerModels);
-    choices.push(...next);
+    for (const choice of next) {
+      if (!pinConnection && credential.provider === "openai-compatible") {
+        if (!routes.has(choice.key))
+          routes.set(choice.key, credentialForModel(credentials, choice.provider, choice.modelId));
+        if (routes.get(choice.key) !== credential) continue;
+      }
+      choices.push(
+        credential.id
+          ? {
+              ...choice,
+              connectionId: credential.id,
+              key: pinConnection
+                ? modelOptionKey(choice.provider, choice.modelId, credential.id)
+                : choice.key,
+              ...(pinConnection
+                ? {
+                    providerLabel: credential.label,
+                    label: withConnectionName(
+                      choice.modelLabel ?? choice.modelId,
+                      credential.label,
+                    ),
+                  }
+                : {}),
+            }
+          : choice,
+      );
+    }
   }
   choices.push(...catalogChoices(catalog.filter((entry) => entry.managed && !entry.placeholder)));
   return choices.filter((choice) => {
@@ -357,6 +435,7 @@ export function connectedModelChoices(
 
 export type ChatModelChoice = {
   key: string;
+  connectionId?: string;
   label: string;
   provider?: string;
   modelId?: string;
@@ -365,7 +444,48 @@ export type ChatModelChoice = {
   title?: string;
   detail?: string;
   images?: boolean;
+  unavailable?: boolean;
 };
+
+export function modelChoiceChannelKey(choice: ChatModelChoice | undefined): string {
+  if (choice?.connectionId) return `connection:${choice.connectionId}`;
+  return choice?.provider ?? (choice?.key ? `saved:${choice.key}` : "");
+}
+
+export function connectionModelUnavailable(
+  credential: CredentialModelRef | undefined,
+  modelId: string | null | undefined,
+): boolean {
+  return Boolean(
+    credential?.reconnectRequired ||
+      (credential?.catalogSource &&
+        (!credential.catalogSource.available ||
+          (modelId && credential.catalogSource.unavailableModelIds.includes(modelId)))),
+  );
+}
+
+/** Highlight the runtime route of a legacy Bot without pinning it on unrelated saves. */
+export function botModelPickerKey(
+  key: string,
+  credentials: readonly CredentialModelRef[],
+  choices: readonly ConnectedModelChoice[],
+): string {
+  const model = parseModelOptionKey(key);
+  if (!model || model.connectionId) return key;
+  const credential =
+    credentialForModel(credentials, model.provider, model.modelId) ??
+    (model.provider !== "openai-compatible"
+      ? (credentials.find((ref) => ref.provider === model.provider && ref.isDefault) ??
+        credentials
+          .filter((ref) => ref.provider === model.provider)
+          .sort((a, b) => (a.preferenceRank ?? Infinity) - (b.preferenceRank ?? Infinity))[0])
+      : undefined);
+  if (credential?.id) return modelOptionKey(model.provider, model.modelId, credential.id);
+  return (
+    choices.find((choice) => choice.provider === model.provider && choice.modelId === model.modelId)
+      ?.key ?? key
+  );
+}
 
 /** Filter on full labels before shortening rows; saved/default choices stay first. */
 export function groupModelChoices(choices: readonly ChatModelChoice[], query: string) {
@@ -414,6 +534,7 @@ export function chatModelChoices(
       label: saved?.modelId ?? selectedKey,
       provider: saved?.provider,
       modelId: saved?.modelId,
+      connectionId: saved?.connectionId,
     });
   }
   return choices.concat(connected);

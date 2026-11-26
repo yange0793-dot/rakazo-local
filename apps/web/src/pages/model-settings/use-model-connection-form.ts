@@ -14,11 +14,10 @@ import {
 } from "@rakazo/contracts";
 import type { ConnectionFormFields } from "@rakazo/core";
 import {
-  clampCatalogThinkingLevel,
-  compatibleThinkingLevels,
   createModelProbe,
   initialModelProbeState,
   savedCompatibleModelIds,
+  THINKING_LEVEL_OPTIONS,
 } from "@rakazo/core";
 import { useMemo, useRef, useState } from "react";
 import type { ModelCatalogEntry } from "../../lib/model-auth";
@@ -85,17 +84,7 @@ export function useModelConnectionForm({
   );
   const selected = modelsForProvider.find((entry) => entry.id === modelId) ?? modelsForProvider[0];
   const isOpenAiCompatible = provider === OPENAI_COMPATIBLE_PROVIDER_ID;
-  const savedEndpointMatches = savedCompatibleEndpointMatches(baseUrl, credential?.baseUrl);
-  const reasoningCapabilities =
-    savedEndpointMatches && apiProtocol === (credential?.apiProtocol ?? "chat-completions")
-      ? credential?.reasoningCapabilities
-      : undefined;
-  const compatibleEffortLevels =
-    selected?.id === modelId &&
-    savedEndpointMatches &&
-    apiProtocol === (credential?.apiProtocol ?? "chat-completions")
-      ? (selected.thinkingLevels ?? compatibleThinkingLevels(apiProtocol, reasoningCapabilities))
-      : compatibleThinkingLevels(apiProtocol, reasoningCapabilities);
+  const compatibleEffortLevels = THINKING_LEVEL_OPTIONS;
   // The catalog names the IDs a provider needs besides its key.
   const { needsRouting, needsGateway, routingReady } = modelRoutingForm(selected?.routingFields, {
     accountId,
@@ -161,36 +150,12 @@ export function useModelConnectionForm({
 
   function updateApiProtocol(nextProtocol: ModelApiProtocol) {
     setApiProtocol(nextProtocol);
-    setThinkingLevel(
-      clampCatalogThinkingLevel(
-        thinkingLevel,
-        reasoning
-          ? compatibleThinkingLevels(
-              nextProtocol,
-              savedEndpointMatches &&
-                nextProtocol === (credential?.apiProtocol ?? "chat-completions")
-                ? credential?.reasoningCapabilities
-                : undefined,
-            )
-          : [],
-      ) as ThinkingLevel | null,
-    );
     resetOpenAiCompatibleProbe();
     invalidatePreflight();
   }
 
   function stageCompatibleModelId(nextModelId: string) {
     setModelId(nextModelId);
-    setThinkingLevel(
-      clampCatalogThinkingLevel(
-        credential?.modelId === nextModelId ? credential.thinkingLevel : null,
-        reasoning
-          ? ((savedEndpointMatches
-              ? modelsForProvider.find((entry) => entry.id === nextModelId)?.thinkingLevels
-              : undefined) ?? compatibleThinkingLevels(apiProtocol, reasoningCapabilities))
-          : [],
-      ) as ThinkingLevel | null,
-    );
   }
 
   async function probeServerModels() {

@@ -1,6 +1,6 @@
 import { execSync } from "node:child_process";
 import { globSync } from "node:fs";
-import { mkdir, writeFile } from "node:fs/promises";
+import { mkdir, rm, writeFile } from "node:fs/promises";
 import path from "node:path";
 import type { createApp } from "@rakazo/api/app";
 import { loadRootEnv } from "@rakazo/core/node/load-root-env";
@@ -39,6 +39,10 @@ if (integration && sandboxProvider !== "fake") {
 if (agentRuntime !== "pi" && agentRuntime !== "scripted") {
   throw new Error('Runtime must be "pi" or "scripted"');
 }
+if (integration && agentRuntime !== "scripted") {
+  throw new Error("Integration tests choose their runtime per suite");
+}
+if (integration && grepArg) throw new Error("Integration tests use --spec to select files");
 if (sandboxProvider === "e2b" && !process.env.E2B_API_KEY) {
   throw new Error("E2B_API_KEY is required when --sandbox=e2b");
 }
@@ -62,6 +66,7 @@ async function main() {
   const mode = integration ? "integration" : "e2e";
   const reportDir = path.resolve("test-report", mode);
   await mkdir(reportDir, { recursive: true });
+  await rm(path.join(reportDir, "summary.json"), { force: true });
   const container = await startPostgres();
   try {
     // Migrations run as the container superuser and the e2e API connects as the
@@ -83,7 +88,10 @@ async function main() {
     process.env.WAKEUP_DRIVER = "memory";
     process.env.SANDBOX_PROVIDER = sandboxProvider;
     process.env.AGENT_RUNTIME = agentRuntime;
+    process.env.AGENT_RUNTIME_ROUTES = "";
     process.env.RAKAZO_LIVE_MODEL_CATALOG = "off";
+    process.env.MODEL_CATALOG_SOURCES = "";
+    process.env.WEB_PROVIDER = "fake";
     if (!integration) {
       process.env.TICKET_BOARD_ENABLED = "true";
       process.env.PHONE_CALLS_ENABLED = "true";
@@ -237,9 +245,8 @@ async function main() {
       port: apiPort,
       hostname: "127.0.0.1",
     });
-    await waitForHealth(`http://127.0.0.1:${apiPort}/health`, 15_000);
-
     try {
+      await waitForHealth(`http://127.0.0.1:${apiPort}/health`, 15_000);
       try {
         await runProcess(
           "pnpm",
@@ -262,11 +269,17 @@ async function main() {
           },
         );
       } catch (error) {
-        const failedRuns = await handles.prisma.run.findMany({
-          where: { status: "failed" },
-          select: { id: true, error: true },
-        });
-        if (failedRuns.length) console.error("Failed agent runs:", failedRuns);
+        try {
+          const failedRuns = await runAsSystem("collect failed e2e runs", () =>
+            handles.prisma.run.findMany({
+              where: { status: "failed" },
+              select: { id: true, error: true },
+            }),
+          );
+          if (failedRuns.length) console.error("Failed agent runs:", failedRuns);
+        } catch (diagnosticError) {
+          console.error("Could not collect failed agent runs", diagnosticError);
+        }
         throw error;
       }
       // The API connects as the runtime login, where such a call returns nothing.
@@ -276,14 +289,6 @@ async function main() {
           `Database access without a tenant or system context:\n\n${unscoped.join("\n\n")}`,
         );
       }
-      await writeSummary(reportDir, {
-        ok: true,
-        mode,
-        sandbox: process.env.SANDBOX_PROVIDER,
-        runtime: process.env.AGENT_RUNTIME,
-        apiPort,
-        webPort,
-      });
     } finally {
       const cleanupErrors: unknown[] = [];
       const computers = await managedComputers(handles, runAsSystem).catch((error) => {
@@ -294,7 +299,7 @@ async function main() {
       if (activeRequests > 0) {
         await new Promise<void>((resolve) => requestWaiters.add(resolve));
       }
-      await handles.stop().catch(() => undefined);
+      await handles.stop().catch((error: unknown) => cleanupErrors.push(error));
       for (let index = 0; index < computers.length; index += 4) {
         const results = await Promise.allSettled(
           computers.slice(index, index + 4).map((computer) =>
@@ -321,10 +326,20 @@ async function main() {
       }
       if (cleanupErrors.length) {
         console.error(
-          new AggregateError(cleanupErrors, "Could not destroy every managed test sandbox"),
+          new AggregateError(cleanupErrors, "End-to-end test cleanup failed"),
         );
         process.exitCode = 1;
       }
+    }
+    if (!process.exitCode) {
+      await writeSummary(reportDir, {
+        ok: true,
+        mode,
+        sandbox: sandboxProvider,
+        runtime: agentRuntime,
+        apiPort,
+        webPort,
+      });
     }
   } finally {
     await container.stop().catch(() => undefined);

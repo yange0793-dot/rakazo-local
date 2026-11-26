@@ -187,6 +187,7 @@ function harness(
           entrypoints: {
             api: "apps/api/dist/index.js",
             worker: "apps/worker/dist/index.js",
+            workerHealth: "apps/worker/dist/health-check.js",
             web: "apps/web/dist-server/index.js",
             migrate: "apps/api/dist/cli/migrate-database.js",
           },
@@ -295,6 +296,33 @@ describe("NativeStackController", () => {
     expect(controller.hasProcesses()).toBe(false);
     // The runtime CLI passes SIGINT on, so Postgres shuts down fast and cleanly.
     expect(byName(DATABASE_CONTAINER)[0]?.signals).toEqual(["SIGINT"]);
+  });
+
+  it("waits for a heartbeat from its current worker in its private stack directory", async () => {
+    const { deps, byName, runs } = harness();
+    let probes = 0;
+    const controller = new NativeStackController({
+      ...deps,
+      run: async (binary, args, options) => {
+        const result = await deps.run(binary, args, options);
+        if (args[0]?.endsWith("health-check.js") && ++probes === 1) {
+          return { ...result, code: 1 };
+        }
+        return result;
+      },
+    });
+    expect((await controller.start()).phase).toBe("ready");
+    const [worker] = byName("apps/worker/dist/index.js");
+    const file = path.join(stackDir, "run", "worker-health.json");
+    expect(worker?.env.WORKER_HEALTH_FILE).toBe(file);
+    const checks = runs.filter(({ args }) => args[0]?.endsWith("health-check.js"));
+    expect(checks).toHaveLength(2);
+    for (const check of checks) {
+      expect(check.binary).toBe(deps.nodeBinary);
+      expect(check.env.WORKER_HEALTH_FILE).toBe(file);
+      expect(check.env.WORKER_HEALTH_PID).toBe(String(worker?.pid));
+    }
+    await controller.stop();
   });
 
   it("keeps its database and ports across restarts while they stay free", async () => {

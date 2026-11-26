@@ -51,10 +51,26 @@ overrides:
   react-server-dom-webpack@<19.3.1: 19.3.1
   "@xmldom/xmldom@>=0.8 <0.8.15": 0.8.15
   "@xmldom/xmldom@>=0.9 <0.9.12": 0.9.12
+  "@prisma/config@7.10.1>effect": 3.22.1
+  "@composio/client@2.0.1>effect": 3.22.1
+  "eas-cli@27.7.1>diff": 8.0.3
+  brace-expansion@<1.1.21: 1.1.21
   brace-expansion@>=2 <2.1.7: 2.1.7
   compression@<1.8.2: 1.8.2
   fast-xml-parser@>=5 <5.12.0: 5.12.0
   glob@>=13 <13.0.7: 13.0.7
+  # Install the Expo patches that remove Glob, within the SDK's declared ranges.
+  "expo@58.0.23>@expo/cli": 58.1.20
+  "expo@58.0.23>@expo/fingerprint": 0.21.10
+  "@expo/config@11.0.13>sucrase": 3.35.1
+  # These callers use the named Glob APIs still exported by 14.x.
+  "@expo/config@11.0.13>glob": 14.0.3
+  "@expo/config@55.0.10>glob": 14.0.3
+  "@expo/config-plugins@10.1.2>glob": 14.0.3
+  "@expo/config-plugins@55.0.7>glob": 14.0.3
+  "@sentry/bundler-plugins@10.75.2>glob": 14.0.3
+  "@sentry/bundler-plugins@11.8.0>glob": 14.0.3
+  "archiver-utils@5.0.2>glob": 14.0.3
   js-yaml@>=4 <4.3.2: 4.3.2
   markdown-it@>=14 <14.3.3: 14.3.3
   node-forge@<1.4.3: 1.4.3

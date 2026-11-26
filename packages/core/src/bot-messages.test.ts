@@ -63,6 +63,11 @@ describe("Unicode boundaries", () => {
 });
 
 describe("bot message silence", () => {
+  it("lets routine status end without a user-facing acknowledgement", () => {
+    expect(botMessageAllowsSilence("status", true)).toBe(true);
+    expect(botMessageAllowsSilence("status")).toBe(true);
+    expect(botMessageAllowsSilence("result", true)).toBe(false);
+  });
   it("surfaces an FYI when it replies to a delegated request", () => {
     expect(botMessageAllowsSilence("fyi", true)).toBe(false);
     expect(botMessageAllowsSilence("fyi")).toBe(true);

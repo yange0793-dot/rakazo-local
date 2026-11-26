@@ -1330,6 +1330,24 @@ export class McpOAuthBroker {
     };
   }
 
+  async pendingSpace(input: { sessionId: string; state: string; userId: string }): Promise<string> {
+    if (input.state !== input.sessionId) {
+      throw new Error("MCP OAuth session is invalid or expired");
+    }
+    const session = await runAsSystem("locate the signed-in user's MCP OAuth attempt", () =>
+      this.prisma.mcpOAuthSession.findFirst({
+        where: {
+          id: input.sessionId,
+          userId: input.userId,
+          createdAt: { gte: new Date(Date.now() - PENDING_TTL_MS) },
+        },
+        select: { spaceId: true },
+      }),
+    );
+    if (!session) throw new Error("MCP OAuth session is invalid or expired");
+    return session.spaceId;
+  }
+
   async complete(input: {
     sessionId: string;
     code: string;
@@ -1392,6 +1410,7 @@ export class McpOAuthBroker {
         id: input.sessionId,
         spaceId: input.spaceId,
         userId: input.userId,
+        createdAt: { gte: new Date(Date.now() - PENDING_TTL_MS) },
       },
     });
     if (consumed.count !== 1) throw new Error("MCP OAuth session is invalid or expired");

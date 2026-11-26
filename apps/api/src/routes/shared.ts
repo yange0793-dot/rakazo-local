@@ -72,7 +72,9 @@ export async function meDto(deps: RouterDeps, actor: Actor): Promise<Me> {
     // The deployment's provider: an account's own choice covers only its Team Computers.
     sandboxProvider,
     computerSettingsEnabled: Boolean(deps.env.computerSettingsEnabled),
-    mcpStdioEnabled: setup.settings?.ownerUserId === actor.userId && mcpStdioAvailable({
+    mcpStdioEnabled:
+      setup.settings?.ownerUserId === actor.userId &&
+      mcpStdioAvailable({
         stdioEnabled: deps.env.mcpStdioEnabled,
         allowedCommands: deps.env.mcpStdioAllowedCommands,
       }),
@@ -137,7 +139,7 @@ export async function modelSetup(deps: RouterDeps, actor: Actor) {
 export async function botsRunOwnModels(deps: RouterDeps, actor: Actor, botIds: string[]) {
   const bots = await deps.prisma.bot.findMany({
     where: { id: { in: botIds }, spaceId: actor.spaceId },
-    select: { modelProvider: true, modelId: true, thinkingLevel: true },
+    select: { modelProvider: true, modelId: true, modelCredentialId: true, thinkingLevel: true },
   });
   const credentials = await Promise.all(
     bots.map(async (bot) => {
@@ -148,6 +150,7 @@ export async function botsRunOwnModels(deps: RouterDeps, actor: Actor, botIds: s
             actor,
             bot.modelProvider,
             bot.modelId,
+            { credentialId: bot.modelCredentialId },
           )
         : null;
       return selectConfiguredModel({ override: bot, overrideCredential, main: null, defaults: {} })
@@ -169,6 +172,9 @@ export const HEARTBEAT = Symbol("heartbeat");
 
 const ENDED = Symbol("ended");
 
+type ReadOutcome<T> = { result: IteratorResult<T> } | { error: unknown };
+type PendingRead<T> = { outcome?: ReadOutcome<T>; wake?: (outcome: ReadOutcome<T>) => void };
+
 /**
  * Yields each event from `follow`, or HEARTBEAT after HEARTBEAT_MS of silence: a half-open stream
  * looks identical to an idle one, and clients treat any frame as liveness. Auth ran once when the
@@ -183,30 +189,41 @@ export async function* withHeartbeats<T>(
   const source = follow(
     context.signal ? AbortSignal.any([context.signal, controller.signal]) : controller.signal,
   );
-  let pending: Promise<IteratorResult<T>> | undefined;
+  let pending: PendingRead<T> | undefined;
   let authorizedAt = Date.now();
   try {
     while (!context.signal?.aborted) {
-      // A heartbeat keeps `pending`, so the in-flight read stays the next event in order.
-      pending ??= source.next();
+      const read: PendingRead<T> = pending ?? {};
+      if (!pending) {
+        pending = read;
+        // Subscribe once per read. Racing the same pending promise at every heartbeat
+        // otherwise retains a reaction per heartbeat until the source yields.
+        const settle = (outcome: ReadOutcome<T>) => {
+          read.outcome = outcome;
+          read.wake?.(outcome);
+        };
+        void source.next().then(
+          (result) => settle({ result }),
+          (error: unknown) => settle({ error }),
+        );
+      }
       let timer: ReturnType<typeof setTimeout> | undefined;
       let onAbort: (() => void) | undefined;
-      const next = await Promise.race([
-        pending,
-        // Racing the abort ends a source that ignores it, so its session re-checks can't run after
-        // shutdown has closed the database pool. The waiter is per read so a settled race, and the
-        // event it carried, isn't retained until disconnect.
-        new Promise<typeof HEARTBEAT | typeof ENDED>((resolve) => {
+      const next =
+        read.outcome ??
+        (await new Promise<ReadOutcome<T> | typeof HEARTBEAT | typeof ENDED>((resolve) => {
+          read.wake = resolve;
           timer = setTimeout(() => resolve(HEARTBEAT), HEARTBEAT_MS);
           if (context.signal?.aborted) return resolve(ENDED);
           onAbort = () => resolve(ENDED);
           context.signal?.addEventListener("abort", onAbort, { once: true });
-        }),
-      ]).finally(() => {
-        clearTimeout(timer);
-        if (onAbort) context.signal?.removeEventListener("abort", onAbort);
-      });
+        }).finally(() => {
+          read.wake = undefined;
+          clearTimeout(timer);
+          if (onAbort) context.signal?.removeEventListener("abort", onAbort);
+        }));
       if (next === ENDED || context.signal?.aborted) return;
+      if (next !== HEARTBEAT && "error" in next) throw next.error;
       if (context.stillAuthorized && Date.now() - authorizedAt >= SESSION_RECHECK_MS) {
         if (!(await context.stillAuthorized())) throw new ORPCError("UNAUTHORIZED");
         authorizedAt = Date.now();
@@ -216,8 +233,8 @@ export async function* withHeartbeats<T>(
         continue;
       }
       pending = undefined;
-      if (next.done) return;
-      yield next.value;
+      if (next.result.done) return;
+      yield next.result.value;
     }
   } finally {
     controller.abort();
@@ -232,28 +249,41 @@ export async function* mergeStreams<T extends unknown[]>(
   ...sources: { [K in keyof T]: AsyncGenerator<T[K]> }
 ): AsyncGenerator<T[number]> {
   const streams: AsyncGenerator<T[number]>[] = sources;
-  const reads = new Map<number, Promise<{ index: number; result: IteratorResult<T[number]> }>>();
-  const read = (index: number, stream: AsyncGenerator<T[number]>) => {
-    const pending = stream.next().then((result) => ({ index, result }));
-    // Raced on the next loop; this only keeps a rejection while the consumer is paused handled.
-    pending.catch(() => {});
-    // Re-adding moves this stream behind the others, so a busy one cannot starve the rest.
-    reads.delete(index);
-    reads.set(index, pending);
+  const ready: Array<{ stream: AsyncGenerator<T[number]>; outcome: ReadOutcome<T[number]> }> = [];
+  let wake: (() => void) | undefined;
+  let active = streams.length;
+  const read = (stream: AsyncGenerator<T[number]>) => {
+    const settle = (outcome: ReadOutcome<T[number]>) => {
+      if (active === 0) return;
+      ready.push({ stream, outcome });
+      wake?.();
+    };
+    void stream.next().then(
+      (result) => settle({ result }),
+      (error: unknown) => settle({ error }),
+    );
   };
-  for (const [index, stream] of streams.entries()) read(index, stream);
   try {
-    while (reads.size > 0) {
-      const { index, result } = await Promise.race(reads.values());
-      if (result.done) {
-        reads.delete(index);
+    for (const stream of streams) read(stream);
+    while (active > 0) {
+      if (!ready.length) {
+        await new Promise<void>((resolve) => {
+          wake = resolve;
+        });
+        wake = undefined;
+      }
+      const { stream, outcome } = ready.shift()!;
+      if ("error" in outcome) throw outcome.error;
+      if (outcome.result.done) {
+        active--;
         continue;
       }
-      read(index, streams[index]!);
-      yield result.value;
+      read(stream);
+      yield outcome.result.value;
     }
   } finally {
-    for (const pending of reads.values()) pending.catch(() => {});
+    active = 0;
+    ready.length = 0;
     for (const stream of streams) void stream.return(undefined).catch(() => {});
   }
 }

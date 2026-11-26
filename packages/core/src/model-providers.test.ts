@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   botsWithOwnModel,
+  canSelectThinkingLevel,
   canUseCompatibleModelAsDefault,
   chatModelChoices,
   clampCatalogThinkingLevel,
@@ -156,6 +157,23 @@ describe("compatibleThinkingLevels", () => {
     expect(compatibleThinkingLevels("responses", { levels })).toEqual(["low", "high", "max"]);
     expect(compatibleThinkingLevels("responses", { levels: [] })).toEqual([]);
     expect(compatibleThinkingLevels("responses", { levels: ["off"] })).toEqual([]);
+  });
+});
+
+describe("canSelectThinkingLevel", () => {
+  it("allows every shared effort when the model supports reasoning", () => {
+    expect(canSelectThinkingLevel("minimal", ["low", "medium", "high"])).toBe(true);
+    expect(canSelectThinkingLevel("max", ["low", "medium", "high"])).toBe(true);
+  });
+
+  it("accepts every shared level regardless of model capability metadata", () => {
+    expect(canSelectThinkingLevel("high", ["off"])).toBe(true);
+    expect(canSelectThinkingLevel("max", [])).toBe(true);
+  });
+
+  it("allows canonical levels when the model has no declared capability list", () => {
+    expect(canSelectThinkingLevel("xhigh", undefined)).toBe(true);
+    expect(canSelectThinkingLevel("off", ["low"])).toBe(false);
   });
 });
 

@@ -41,7 +41,7 @@ export async function runCachePrefixProbe(
       });
     };
     const started = Date.now();
-    let failed = false;
+    let failed: boolean;
     let firstResponseMs: number | null = null;
     const prefix =
       `Synthetic cache probe ${experiment} cohort ${index < 2 ? "A" : "B"}.\n` +
@@ -68,10 +68,11 @@ export async function runCachePrefixProbe(
         },
         context,
       )) {
-        if (event.type === "text" && firstResponseMs === null)
+        if (event.type === "text" && event.text.trim() && firstResponseMs === null)
           firstResponseMs = Date.now() - started;
         if (event.type === "usage") collect(event);
       }
+      failed = context.signal.aborted || firstResponseMs === null || calls.size === 0;
     } catch {
       failed = true;
     } finally {

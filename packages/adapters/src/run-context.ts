@@ -167,6 +167,8 @@ export interface ScreenState {
 
 /** What one attempt changes while it runs. Every piece shares these objects by reference. */
 export interface RunState {
+  /** A managed receipt already owns the result; runtime tail text must not publish it again. */
+  deliveredWorkReceipt?: boolean;
   lease: RunLeaseState;
   computerUse: RunComputerUseState;
   /**
@@ -378,9 +380,9 @@ export function pauseForSecret(ctx: RunContext) {
   return secretPausedToolResult();
 }
 
-/** The owner chose Never ask for this space. */
-export async function neverAsks(ctx: RunContext) {
-  return (await ctx.trust.loadAutoReviewPreference()).skipApprovals;
+/** The owner chose the mode that bypasses ordinary approval prompts. */
+export async function bypassesApprovals(ctx: RunContext) {
+  return (await ctx.trust.loadAutoReviewPreference()).mode === "bypermission";
 }
 
 /**

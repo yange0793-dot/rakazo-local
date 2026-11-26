@@ -7,7 +7,7 @@ import {
 } from "@rakazo/core";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
-const provider = vi.hoisted(() => ({ errorMessage: "" }));
+const provider = vi.hoisted(() => ({ errorMessage: "", modelAvailable: true }));
 
 vi.mock("@earendil-works/pi-agent-core", () => ({
   Agent: class {
@@ -22,7 +22,8 @@ vi.mock("@earendil-works/pi-agent-core", () => ({
 
 vi.mock("@earendil-works/pi-ai/providers/all", () => ({
   builtinModels: () => ({
-    getModel: () => ({ provider: "openai-codex", id: "gpt-test" }),
+    getModel: () =>
+      provider.modelAvailable ? { provider: "openai-codex", id: "gpt-test" } : undefined,
     streamSimple: vi.fn(),
   }),
 }));
@@ -69,6 +70,14 @@ function consume(model = { provider: "openai-codex", id: "gpt-test" }) {
 describe("Pi runtime errors", () => {
   beforeEach(() => {
     provider.errorMessage = "Request was aborted by policy";
+    provider.modelAvailable = true;
+  });
+
+  it("reports an unavailable model as a run failure", async () => {
+    provider.modelAvailable = false;
+    const failure = consume({ provider: "openai-codex", id: "unavailable-model" });
+    await expect(failure).rejects.toBeInstanceOf(ModelAccountError);
+    await expect(failure).rejects.toThrow("Unknown model");
   });
 
   it("propagates provider failures instead of completing with error text", async () => {

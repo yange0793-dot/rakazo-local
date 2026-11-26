@@ -1,5 +1,6 @@
 import * as z from "zod";
 import { Id, IsoDate } from "./ids.js";
+import { ManagedWorkContextSchema, ManagedWorkDependencySchema } from "./managed-work.js";
 
 export const TICKET_STATUSES = ["todo", "doing", "review", "blocked", "done", "closed"] as const;
 export const TicketStatusSchema = z.enum(TICKET_STATUSES);
@@ -179,6 +180,7 @@ export const TicketSchema = z.object({
   updatedAt: z.string(),
   completedAt: z.string().nullable(),
   fileDeliveryRequirements: TicketFileDeliveryRequirementsSchema.optional(),
+  managedWork: ManagedWorkContextSchema.optional(),
 });
 export type Ticket = z.infer<typeof TicketSchema>;
 
@@ -213,6 +215,7 @@ export const UpdateTicketInput = z
     assigneeBotId: Id.optional(),
     expectedRequirementsVersion: z.number().int().positive().max(2_147_483_646).optional(),
     fileDeliveryRequirements: TicketFileDeliveryRequirementsUpdateSchema.optional(),
+    dependencies: z.array(ManagedWorkDependencySchema).optional(),
   })
   .superRefine((value, context) => {
     if (
@@ -413,6 +416,14 @@ export const TicketWorkResult = z.object({
   summary: z.string().trim().min(1).max(1600),
   findings: z.array(TicketWorkFindingSchema).min(1).max(20),
   artifactIds: z.array(z.string().min(1).max(200)).max(8).optional(),
+  finalArtifactId: z
+    .string()
+    .min(1)
+    .max(200)
+    .describe(
+      "The finished deliverable from artifactIds. Forward this same artifact after review. Markdown and plain text are displayed directly from its bytes; do not rewrite them in a separate reply.",
+    )
+    .optional(),
   /** References the requirements fixed on the ticket before delivery. */
   fileDelivery: TicketFileDeliverySchema.optional(),
 });

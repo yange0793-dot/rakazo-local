@@ -129,6 +129,8 @@ export function createJobReconciler(
     reconcileIdleComputers?: () => Promise<void>;
     reconcileDeadJobs?: () => Promise<void>;
     reconcileSemanticMemory?: () => Promise<void>;
+    reconcileManagedWork?: () => Promise<void>;
+    reconcileExternalExecutions?: () => Promise<void>;
   },
   options: { intervalMs?: number; batchSize?: number; maxPagesPerPass?: number } = {},
 ) {
@@ -164,6 +166,8 @@ export function createJobReconciler(
     deps.reconcileIdleComputers,
     deps.reconcileDeadJobs,
     deps.reconcileSemanticMemory,
+    deps.reconcileManagedWork,
+    deps.reconcileExternalExecutions,
   ].filter((reconcile) => reconcile !== undefined);
   const housekeepingRunning = new Map<() => Promise<void>, Promise<void>>();
   const startHousekeeping = () => {

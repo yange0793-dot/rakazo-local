@@ -15,12 +15,17 @@ export async function cancelRunsInTransaction<
   >,
   runs: ReadonlyArray<Run>,
   cancelledAt: Date,
+  condition?: Prisma.RunWhereInput,
 ): Promise<Run[]> {
   if (runs.length === 0) return [];
   const cancelledIds = new Set(
     (
       await tx.run.updateManyAndReturn({
-        where: { id: { in: runs.map((run) => run.id) }, status: { in: [...ACTIVE_RUN_STATUSES] } },
+        where: {
+          id: { in: runs.map((run) => run.id) },
+          status: { in: [...ACTIVE_RUN_STATUSES] },
+          ...(condition ? { AND: [condition] } : {}),
+        },
         data: {
           status: "cancelled",
           completedAt: cancelledAt,

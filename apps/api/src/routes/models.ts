@@ -2,6 +2,8 @@ import { ORPCError } from "@orpc/server";
 import { isTransientModelError, SecretStoreUnavailableError } from "@rakazo/adapter-kit";
 import {
   compatibleEndpointPreset,
+  connectedModelSeesImages,
+  findConnectedModelCredential,
   listPiCatalog,
   ModelSignInError,
   modelCredentialDto,
@@ -17,14 +19,21 @@ import {
   storedOpenAiCompatibleProbeKey,
   UNAVAILABLE_MODEL_FOR_AUTH_MESSAGE,
 } from "@rakazo/adapters";
-import type { ThinkingLevel } from "@rakazo/contracts";
+import type {
+  Actor,
+  ModelRole,
+  ModelRoleChoice,
+  ModelRoleSettings,
+  SettingsScope,
+  ThinkingLevel,
+} from "@rakazo/contracts";
 import {
   backupChoiceKey,
   canonicalPiProviderId,
   OPENAI_COMPATIBLE_PROVIDER_ID,
   usableModelId,
 } from "@rakazo/contracts";
-import { clampCatalogThinkingLevel } from "@rakazo/core";
+import { canSelectThinkingLevel } from "@rakazo/core";
 import type { PrismaClient } from "@rakazo/db";
 import {
   appliedModelRole,
@@ -33,6 +42,8 @@ import {
   deleteUnreferencedCredentialSecret,
   findModelCredential,
   getModelRole,
+  lockAccountModels,
+  lockSpaceSettings,
   modelCredentialProviderFilter,
   modelRoleTarget,
   newestModelCredentialOrder,
@@ -53,7 +64,7 @@ import {
   prepareAllowedThinkingLevels,
   throwIfAborted,
 } from "../model-credentials.js";
-import { assertCompatibleDefaultChange } from "../model-pins.js";
+import { assertCompatibleDefaultChange, assertCompatibleModelPin } from "../model-pins.js";
 import type { RouterContext } from "./context.js";
 
 export function modelsRoutes(ctx: RouterContext) {
@@ -69,6 +80,54 @@ export function modelsRoutes(ctx: RouterContext) {
     validateRoleChoices,
     authed,
   } = ctx;
+  const saveRole = async (
+    actor: Actor,
+    role: ModelRole,
+    patch: Partial<ModelRoleSettings>,
+    scope?: SettingsScope,
+  ) => {
+    const compatible = (choice: ModelRoleChoice) =>
+      canonicalPiProviderId(choice.provider) === OPENAI_COMPATIBLE_PROVIDER_ID;
+    await validateRoleChoices(
+      actor,
+      role,
+      [...(patch.primary ? [patch.primary] : []), ...(patch.backups ?? [])].filter(
+        (choice) => !compatible(choice),
+      ),
+    );
+    return updateModelRole(deps.prisma, { ...actor, scope }, role, patch, async (tx, choices) => {
+      for (const choice of choices.filter(compatible)) {
+        await assertCompatibleModelPin(
+          tx,
+          deps.secrets,
+          actor,
+          choice.modelId,
+          choice.credentialId,
+        );
+        if (role === "computer") {
+          const credential = await findConnectedModelCredential(
+            tx,
+            deps.secrets,
+            actor,
+            choice.provider,
+            choice.modelId,
+            { credentialId: choice.credentialId },
+          );
+          if (
+            !(await connectedModelSeesImages(
+              { prisma: tx, secretStore: deps.secrets },
+              actor.userId,
+              choice.provider,
+              choice.modelId,
+              credential,
+            ))
+          ) {
+            throw new ORPCError("BAD_REQUEST", { message: "Choose a model that can see images" });
+          }
+        }
+      }
+    });
+  };
   return {
     models: {
       sources: authed.models.sources.handler(
@@ -131,6 +190,7 @@ export function modelsRoutes(ctx: RouterContext) {
                 : listed;
               return {
                 ...shown,
+                savedModelId: preference?.modelId ?? null,
                 ...(shown.enabledModelIds
                   ? {
                       enabledModelIds: [
@@ -178,21 +238,12 @@ export function modelsRoutes(ctx: RouterContext) {
         if (input.expectedUserId && input.expectedUserId !== context.actor.userId)
           throw new ORPCError("FORBIDDEN");
         const { role, primary, backups, scope } = input;
-        await validateRoleChoices(context.actor, role, [
-          ...(primary ? [primary] : []),
-          ...(backups ?? []),
-        ]);
         return withImageInput(
           context.actor,
           role,
           await withDeploymentDefault(
             role,
-            await updateModelRole(
-              deps.prisma,
-              { userId: context.actor.userId, spaceId: context.actor.spaceId, scope },
-              role,
-              { primary, backups },
-            ),
+            await saveRole(context.actor, role, { primary, backups }, scope),
           ),
         );
       }),
@@ -202,13 +253,7 @@ export function modelsRoutes(ctx: RouterContext) {
         ),
       ),
       setBackups: authed.models.setBackups.handler(async ({ context, input }) => {
-        await validateRoleChoices(context.actor, "main", input);
-        await updateModelRole(
-          deps.prisma,
-          { userId: context.actor.userId, spaceId: context.actor.spaceId },
-          "main",
-          { backups: input },
-        );
+        await saveRole(context.actor, "main", { backups: input });
         return { ok: true as const };
       }),
       connect: authed.models.connect.handler(async ({ context, input }) => {
@@ -497,9 +542,9 @@ export function modelsRoutes(ctx: RouterContext) {
               ? (await savedChoices(deps.prisma)).some((choice) => Boolean(choice.thinkingLevel))
               : Boolean(input.thinkingLevel);
           const compatible = input.provider === OPENAI_COMPATIBLE_PROVIDER_ID;
-          // Compatible defaults always load the secret so the transaction rechecks it.
-          const thinking =
-            needsThinking || compatible
+          // Live auth is prepared above. Compatible list and preference checks happen under lock.
+          const preparedThinking: Awaited<ReturnType<typeof prepareAllowedThinkingLevels>> =
+            needsThinking && !compatible
               ? await prepareAllowedThinkingLevels(
                   deps,
                   context.actor,
@@ -507,11 +552,23 @@ export function modelsRoutes(ctx: RouterContext) {
                   input.modelId,
                 )
               : { allowed: undefined, secret: undefined };
-          if (compatible) {
-            await assertCompatibleDefaultChange(deps, context.actor, modelId, thinking);
-          }
           return deps.prisma.$transaction(
             async (tx) => {
+              if (compatible) {
+                await lockSpaceSettings(tx, context.actor);
+                await lockAccountModels(tx, context.actor.userId);
+              }
+              const thinking = compatible
+                ? await prepareAllowedThinkingLevels(
+                    { secrets: deps.secrets, prisma: tx },
+                    context.actor,
+                    input.provider,
+                    modelId,
+                  )
+                : preparedThinking;
+              if (compatible) {
+                await assertCompatibleDefaultChange(tx, context.actor, modelId, thinking);
+              }
               const { preferences, candidates } = await loadModelState(tx);
               if (candidates.length === 0) {
                 throw new ORPCError("NOT_FOUND", {
@@ -578,7 +635,16 @@ export function modelsRoutes(ctx: RouterContext) {
                 if (!needsThinking) {
                   throw new ORPCError("CONFLICT", { message: "Model preferences changed; retry." });
                 }
-                thinkingLevel = clampCatalogThinkingLevel(thinkingLevel, thinking.allowed);
+                if (thinkingLevel === "off") {
+                  thinkingLevel = null;
+                } else if (!canSelectThinkingLevel(thinkingLevel, thinking.allowed)) {
+                  if (input.thinkingLevel !== undefined) {
+                    throw new ORPCError("BAD_REQUEST", {
+                      message: "Unsupported thinking level",
+                    });
+                  }
+                  thinkingLevel = null;
+                }
               }
               await writeModelRole(tx, await modelRoleTarget(tx, context.actor), "main", {
                 primary: {
@@ -591,7 +657,11 @@ export function modelsRoutes(ctx: RouterContext) {
               // Older apps edit one model per connection here, so it becomes the connection's own.
               await saveModelPreference(tx, context.actor, credentialId, modelId, thinkingLevel);
             },
-            { isolationLevel: Prisma.TransactionIsolationLevel.Serializable },
+            {
+              isolationLevel: compatible
+                ? Prisma.TransactionIsolationLevel.ReadCommitted
+                : Prisma.TransactionIsolationLevel.Serializable,
+            },
           );
         }).catch((error: unknown) => {
           if (error instanceof SecretStoreUnavailableError)
@@ -622,6 +692,7 @@ export function modelsRoutes(ctx: RouterContext) {
         await withTransactionRetry(() =>
           deps.prisma.$transaction(
             async (tx) => {
+              await lockAccountModels(tx, context.actor.userId);
               const provider = modelCredentialProviderFilter(input.provider);
               const connections = await tx.userModelCredential.findMany({
                 where: { userId: context.actor.userId, provider },
@@ -666,7 +737,9 @@ export function modelsRoutes(ctx: RouterContext) {
                 });
               }
             },
-            { isolationLevel: Prisma.TransactionIsolationLevel.Serializable },
+            {
+              isolationLevel: Prisma.TransactionIsolationLevel.ReadCommitted,
+            },
           ),
         );
         (deps.providerCatalog ?? providerCatalogCache).invalidate(

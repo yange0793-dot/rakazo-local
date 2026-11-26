@@ -70,7 +70,18 @@ describe("gateway catalog adapter", () => {
           ? {
               providers: {
                 claude: [
-                  { id: "messages-id", name: "Channel", models: ["model-a"], api_key: "secret" },
+                  {
+                    id: "messages-id",
+                    name: "Channel",
+                    models: ["model-a"],
+                    api_key: "secret",
+                    keys: [
+                      { id: "first", label: "Primary", key_masked: "***", enabled: true },
+                      { id: "second", label: "Reserve", key_masked: "***", enabled: true },
+                    ],
+                    active_key: "second",
+                    key_fallback: true,
+                  },
                 ],
                 codex: [{ id: "responses-id", name: "Channel", model: "model-b" }],
               },
@@ -80,15 +91,17 @@ describe("gateway catalog adapter", () => {
     );
     const source = createMixRouterCatalogSource(config, transport);
     const rows = await source.read();
-    expect(rows).toEqual([
-      {
-        id: "messages-id",
-        label: "Channel",
-        enabled: true,
-        models: [
-          { id: "messages-id/model-a", label: "model-a", capabilities: { source: "unknown" } },
-        ],
-      },
+    expect(rows[0]).toEqual({
+      id: "messages-id",
+      label: "Channel",
+      enabled: true,
+      models: [
+        { id: "messages-id/model-a", label: "model-a", capabilities: { source: "unknown" } },
+      ],
+    });
+    expect(rows.slice(1).map((row) => [row.label, row.models[0]?.id])).toEqual([
+      ["Channel · Primary", "key:messages-id/first/model-a"],
+      ["Channel · Reserve", "key:messages-id/second/model-a"],
     ]);
     expect(JSON.stringify(rows)).not.toContain("secret");
     expect(transport.mock.calls.map(([url]) => new URL(String(url)).pathname)).toEqual([

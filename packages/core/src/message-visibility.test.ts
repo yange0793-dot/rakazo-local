@@ -517,4 +517,22 @@ describe("user-visible messages", () => {
       }).map((entry) => entry.id),
     ).toEqual(["receipt"]);
   });
+
+  it("keeps a text-only final delivery and hides internal child receipts", () => {
+    const final: ThreadMessage = {
+      ...message("final-delivery", "run-ticket", [{ kind: "text", text: "Verified answer." }]),
+      clientNonce: "work-receipt:ticket:1:digest",
+      replyToMessageId: "request",
+    };
+    const internal: ThreadMessage = {
+      ...final,
+      id: "internal-receipt",
+      blocks: [{ kind: "delivery" }, ...final.blocks],
+    };
+    expect(
+      userVisibleMessages([final, internal], {
+        backgroundRunIds: ["run-ticket"],
+      }).map((entry) => entry.id),
+    ).toEqual(["final-delivery"]);
+  });
 });

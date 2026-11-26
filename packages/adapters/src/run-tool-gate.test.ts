@@ -85,7 +85,7 @@ function context(options: {
   ownerStartedRun?: boolean;
   messagingChannelRun?: boolean;
   tainted?: boolean;
-  mode?: "auto" | "ask" | "never";
+  mode?: "auto" | "ask" | "bypermission";
   effects?: EffectRow[];
 }) {
   const effects = options.effects ?? [];
@@ -146,10 +146,7 @@ function context(options: {
       loadTrustedSites: async () => new Set<string>(),
       loadTrustedConnectors: async () => new Set<string>(),
       loadApprovalModel: async () => ({ primary: null, backups: [], primarySource: "none" }),
-      loadAutoReviewPreference: async () => ({
-        enabled: (options.mode ?? "auto") !== "ask",
-        skipApprovals: options.mode === "never",
-      }),
+      loadAutoReviewPreference: async () => ({ mode: options.mode ?? "auto" }),
       loadOwnerWords: async () => "",
       routineNamesNewSite: async () => false,
       receivedOutsideMessage: async () => false,

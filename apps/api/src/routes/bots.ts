@@ -29,7 +29,11 @@ import type {
   SettingsScope,
   VaultPutInput,
 } from "@rakazo/contracts";
-import { BotSecretAuth, resolveBotAvatarSet } from "@rakazo/contracts";
+import {
+  BotSecretAuth,
+  OPENAI_COMPATIBLE_PROVIDER_ID,
+  resolveBotAvatarSet,
+} from "@rakazo/contracts";
 import { ACTIVE_RUN_STATUSES, COMPUTER_USING_RUNS, displayName } from "@rakazo/core";
 import type { Prisma } from "@rakazo/db";
 import {
@@ -41,6 +45,7 @@ import {
   InstructionConflictError,
   IsolationError,
   isRecordNotFound,
+  lockAccountModels,
   recordComputerRunEnd,
   recordSecurityEvent,
   restoreBotUnderComputerQuota,
@@ -56,6 +61,7 @@ import { botEmailAddress, botEmailAddresses, claimBotEmailAddress } from "../bot
 import { loadBotForRemoval } from "../bot-removal.js";
 import { changedBotSettings } from "../bot-setting-analytics.js";
 import { createBotFromTemplate, listBotTemplates } from "../bot-templates.js";
+import { assertBotModelPin, assertRestoredBotPins } from "../model-pins.js";
 import { managedAppCatalog } from "../onboarding.js";
 import type { RouterDeps } from "../router.js";
 import { loadMessagePage } from "../thread-message-pages.js";
@@ -370,6 +376,9 @@ export function botsRoutes(ctx: RouterContext) {
             computerMode: source.computer?.scope === "dedicated" ? "dedicated" : "team",
             modelProvider: source.modelProvider,
             modelId: source.modelId,
+            modelCredentialId: source.modelCredentialId,
+            validateModelPin: (tx, provider, modelId, credentialId) =>
+              assertBotModelPin(tx, deps.secrets, context.actor, provider, modelId, credentialId),
             thinkingLevel: source.thinkingLevel,
             disabledBuiltinTools: source.disabledBuiltinTools,
             replyMode: source.replyMode,
@@ -414,14 +423,38 @@ export function botsRoutes(ctx: RouterContext) {
           });
           if (!section) throw new IsolationError();
         }
+        const provider =
+          input.modelProvider === undefined ? existing.modelProvider : input.modelProvider;
+        const model = input.modelId === undefined ? existing.modelId : input.modelId;
+        const sameModel = provider === existing.modelProvider && model === existing.modelId;
+        const credentialId =
+          input.modelCredentialId === undefined
+            ? sameModel
+              ? (existing.modelCredentialId ?? null)
+              : null
+            : input.modelCredentialId;
+        const samePin = sameModel && credentialId === (existing.modelCredentialId ?? null);
+        if (
+          (!samePin || input.modelCredentialId !== undefined) &&
+          (credentialId || existing.modelCredentialId) &&
+          existing.userId !== context.actor.userId
+        )
+          throw new ORPCError("FORBIDDEN");
         const modelChange = await validateBotModelChange(botModelValidation(context.actor), {
           userId: context.actor.userId,
           spaceId: context.actor.spaceId,
-          provider:
-            input.modelProvider !== undefined ? input.modelProvider : existing.modelProvider,
-          model: input.modelId !== undefined ? input.modelId : existing.modelId,
+          provider,
+          model,
+          credentialId,
           thinkingLevel: input.thinkingLevel,
-          current: { provider: existing.modelProvider, model: existing.modelId },
+          current:
+            provider === OPENAI_COMPATIBLE_PROVIDER_ID
+              ? { provider, model, credentialId }
+              : {
+                  provider: existing.modelProvider,
+                  model: existing.modelId,
+                  credentialId: existing.modelCredentialId,
+                },
         });
         if (!modelChange.ok) throw new ORPCError("BAD_REQUEST", { message: modelChange.error });
         const thinkingLevel = input.thinkingLevel;
@@ -442,6 +475,23 @@ export function botsRoutes(ctx: RouterContext) {
           spaceId: context.actor.spaceId,
           threadId: existing.thread.id,
           botId: input.botId,
+          validateModelPin:
+            !samePin &&
+            provider &&
+            model &&
+            (credentialId || provider === OPENAI_COMPATIBLE_PROVIDER_ID)
+              ? async (tx) => {
+                  await lockAccountModels(tx, context.actor.userId);
+                  await assertBotModelPin(
+                    tx,
+                    deps.secrets,
+                    context.actor,
+                    provider,
+                    model,
+                    credentialId,
+                  );
+                }
+              : undefined,
           emitBotUpdated:
             botProfileLabelsChanged(input) ||
             input.modelProvider !== undefined ||
@@ -451,7 +501,15 @@ export function botsRoutes(ctx: RouterContext) {
             input.dailyCheckIns !== undefined ||
             input.replyMode !== undefined,
           expectedInstructions: input.expectedInstructions,
-          expectedSettings: input.expectedSettings,
+          expectedSettings:
+            input.modelProvider !== undefined
+              ? {
+                  modelProvider: existing.modelProvider,
+                  modelId: existing.modelId,
+                  modelCredentialId: existing.modelCredentialId ?? null,
+                  ...input.expectedSettings,
+                }
+              : input.expectedSettings,
           data: {
             name: input.name,
             description: input.description,
@@ -466,7 +524,11 @@ export function botsRoutes(ctx: RouterContext) {
             voiceId: input.voiceId,
             autoSpeak: input.autoSpeak,
             ...(input.modelProvider !== undefined
-              ? { modelProvider: input.modelProvider, modelId: input.modelId ?? null }
+              ? {
+                  modelProvider: input.modelProvider,
+                  modelId: input.modelId ?? null,
+                  modelCredentialId: credentialId,
+                }
               : {}),
             ...(input.thinkingLevel !== undefined ? { thinkingLevel } : {}),
             ...(input.teamChatAmbientEnabled !== undefined
@@ -486,7 +548,10 @@ export function botsRoutes(ctx: RouterContext) {
               : {}),
           },
         }).catch((error) => {
-          if (input.expectedSettings && isRecordNotFound(error))
+          if (
+            (input.expectedSettings || input.modelProvider !== undefined) &&
+            isRecordNotFound(error)
+          )
             throw new ORPCError("CONFLICT", {
               message: "Settings changed; review the current settings first.",
             });
@@ -630,16 +695,23 @@ export function botsRoutes(ctx: RouterContext) {
         const bot = await repos.getBot(context.actor, input.botId, { includeArchived: true });
         if (!bot.archivedAt) return { ok: true as const };
         try {
-          if (bot.computer) {
-            // The limit is the computer's owner's: a shared Team Computer is the space owner's.
-            await restoreBotUnderComputerQuota(deps.prisma, {
-              userId: bot.computer.userId,
-              botId: bot.id,
-              computerId: bot.computer.id,
+          await deps.prisma.$transaction(async (tx) => {
+            await assertRestoredBotPins(tx, deps.secrets, context.actor, [bot]);
+            const current = await tx.bot.findFirst({
+              where: { id: bot.id, spaceId: context.actor.spaceId },
+              include: { computer: true },
             });
-          } else {
-            await deps.prisma.bot.update({ where: { id: bot.id }, data: { archivedAt: null } });
-          }
+            if (!current?.archivedAt) return;
+            if (current.computer) {
+              await restoreBotUnderComputerQuota(tx, {
+                userId: current.computer.userId,
+                botId: current.id,
+                computerId: current.computer.id,
+              });
+            } else {
+              await tx.bot.update({ where: { id: current.id }, data: { archivedAt: null } });
+            }
+          });
         } catch (error) {
           throw mapSpaceLifecycleError(error);
         }
@@ -805,7 +877,9 @@ export function botsRoutes(ctx: RouterContext) {
       }),
       restore: authed.groups.restore.handler(async ({ context, input }) => {
         try {
-          await groupRepos.restoreGroup(context.actor, input.groupId);
+          await groupRepos.restoreGroup(context.actor, input.groupId, (tx, bots) =>
+            assertRestoredBotPins(tx, deps.secrets, context.actor, bots),
+          );
         } catch (error) {
           throw mapSpaceLifecycleError(error);
         }

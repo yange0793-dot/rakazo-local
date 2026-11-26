@@ -10,7 +10,12 @@ import {
 } from "@rakazo/adapters";
 import type { Actor, MessageBlock, SemanticFact } from "@rakazo/contracts";
 import { isDeletableMemoryDocument } from "@rakazo/contracts";
-import { findSpaceMemoryConfig, IsolationError, SemanticFactStore } from "@rakazo/db";
+import {
+  appendEventInTransaction,
+  findSpaceMemoryConfig,
+  IsolationError,
+  SemanticFactStore,
+} from "@rakazo/db";
 import {
   disconnectMemoryProvider,
   persistMemoryProviderConfig,
@@ -116,8 +121,6 @@ export function memoryRoutes(ctx: RouterContext) {
         let draft:
           | {
               messageId: string;
-              blocks: MessageBlock[];
-              index: number;
               block: Extract<MessageBlock, { kind: "lesson_draft" }>;
             }
           | undefined;
@@ -129,7 +132,7 @@ export function memoryRoutes(ctx: RouterContext) {
           );
           const block = blocks[index];
           if (block?.kind !== "lesson_draft") continue;
-          draft = { messageId: message.id, blocks, index, block };
+          draft = { messageId: message.id, block };
           break;
         }
         if (!draft) throw new ORPCError("NOT_FOUND", { message: "Lesson draft not found" });
@@ -160,21 +163,31 @@ export function memoryRoutes(ctx: RouterContext) {
         if (!fact) throw new ORPCError("CONFLICT", { message: "The lesson could not be saved." });
         // A retry after a lost reply finds the block already saved; the store deduped the write
         // by content, so only the card still has to hear about it.
-        if (draft.block.status !== "saved") {
-          const nextBlocks: MessageBlock[] = [...draft.blocks];
-          nextBlocks[draft.index] = { ...draft.block, status: "saved" };
-          await deps.prisma.message.update({
-            where: { id: draft.messageId },
-            data: { blocks: nextBlocks as never },
-          });
-          await deps.events.append({
+        const { id: threadId } = bot.thread;
+        const messageId = draft.messageId;
+        const seq = await deps.prisma.$transaction(async (tx) => {
+          await tx.$queryRaw`SELECT id FROM threads WHERE id = ${threadId} FOR NO KEY UPDATE`;
+          const message = await tx.message.findFirst({ where: { id: messageId, threadId } });
+          const blocks = message?.blocks as MessageBlock[] | undefined;
+          if (!Array.isArray(blocks)) return null;
+          const index = blocks.findIndex(
+            (block) => block.kind === "lesson_draft" && block.lessonId === input.lessonId,
+          );
+          const block = blocks[index];
+          if (block?.kind !== "lesson_draft" || block.status === "saved") return null;
+          const nextBlocks = [...blocks];
+          nextBlocks[index] = { ...block, status: "saved" };
+          await tx.message.update({ where: { id: messageId }, data: { blocks: nextBlocks as never } });
+          const event = await appendEventInTransaction(tx, {
             spaceId: context.actor.spaceId,
-            threadId: bot.thread.id,
+            threadId,
             botId: input.botId,
             type: "thread.message.updated",
-            payload: { messageId: draft.messageId, role: "bot", blocks: nextBlocks },
+            payload: { messageId, role: "bot", blocks: nextBlocks },
           });
-        }
+          return event.seq;
+        });
+        if (seq != null) await deps.events.notify(threadId, seq);
         return fact;
       }),
       exportFacts: authed.memory.exportFacts.handler(async ({ context, input }) => {

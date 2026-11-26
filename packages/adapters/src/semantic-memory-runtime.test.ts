@@ -335,13 +335,19 @@ describe("source-derived automatic recall", () => {
     });
     expect(recall).not.toHaveBeenCalled();
     const result = await semanticRecallForRun(
-      { ...recallOptions(memory), sourceMessage: null, historyCompactedUpToSeq: 49 },
+      {
+        ...recallOptions(memory),
+        sourceMessage: null,
+        historyCompactedUpToSeq: 49,
+        prompt: "Internal task prompt with a synthetic credential.",
+        secrets: ["synthetic credential"],
+      },
       CONTEXT,
     );
     expect(result.origin).toBe("compacted");
     expect(recall).toHaveBeenCalledExactlyOnceWith(
       {
-        query: "Internal task prompt that is not the user's text.",
+        query: "Internal task prompt with a [redacted].",
         scope: "isolated",
         botId: "bot-1",
         threadId: "thread-1",

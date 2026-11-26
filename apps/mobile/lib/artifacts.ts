@@ -3,10 +3,8 @@ import { rpc } from "./api";
 import type { MobileArtifactTarget } from "./artifact-open";
 
 /**
- * An artifact travels as base64 inside the RPC body: up to the attachment limit (10 MiB) plus
- * a third of encoding overhead. The default RPC timeout is sized for small JSON replies and
- * gives up on a multi-megabyte photo over a relayed cellular link, so downloads get a budget
- * of their own.
+ * An artifact travels as base64 inside the RPC body. A multi-megabyte photo over a
+ * relayed cellular link can take longer than the default RPC timeout.
  */
 export const ARTIFACT_DOWNLOAD_TIMEOUT_MS = 120_000;
 

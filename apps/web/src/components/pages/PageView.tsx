@@ -27,6 +27,7 @@ export function PageView({
   onOpenChange,
   title,
   document,
+  liveFrame,
   onRename,
   renameError = null,
   share,
@@ -40,6 +41,7 @@ export function PageView({
   onOpenChange: (open: boolean) => void;
   title: string;
   document: string | null;
+  liveFrame?: ReactNode;
   /** Absent while a rename is being saved. */
   onRename?: (title: string) => void;
   renameError?: string | null;
@@ -185,7 +187,7 @@ export function PageView({
             aria-label={title || undefined}
             className={`absolute inset-x-0 bottom-0 print:static ${compact ? "top-[50px]" : macChrome ? "top-[70px]" : "top-[34px]"}`}
           >
-            {notice ?? (
+            {notice ?? liveFrame ?? (
               <>
                 {document !== null && !stalled ? (
                   <div

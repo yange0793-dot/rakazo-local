@@ -34,11 +34,15 @@ import { expireComputerExecutionLeases } from "./computers.js";
 import { contentEncryptionOf } from "./content-encryption.js";
 import { notifyCommittedEvent, notifyRealtime } from "./event-stream.js";
 import type { FinalizeRunResult } from "./events.js";
-import { appendEventInTransaction, transientRunEventsWhere } from "./events.js";
+import { appendEventInTransaction, deleteTransientRunEvents } from "./events.js";
 import { createThreadMessageInTransaction, loadMessageAuthor } from "./messages.js";
 import { deleteRunSecretsInTransaction } from "./run-secrets.js";
 import { RUN_TURN_CHECKPOINT_KIND } from "./run-turn-checkpoint.js";
 import { recordSecurityEvent } from "./security-events.js";
+import {
+  answerManagedInputInTransaction,
+  readManagedInputCheckpoint,
+} from "./thread-managed-input.js";
 import { createPendingSteeringRun } from "./thread-steering.js";
 import { THREAD_LOCK_TRANSACTION_OPTIONS } from "./transaction-retry.js";
 
@@ -327,7 +331,31 @@ async function findWaitingRun(tx: Prisma.TransactionClient, input: AnswerRunInpu
       task: { select: { prompt: true } },
     },
   });
-  return helper ? { run: helper, routed: true as const } : null;
+  if (helper) return { run: helper, routed: true as const };
+  const managed = await tx.run.findFirst({
+    where: {
+      id: input.runId,
+      spaceId: input.spaceId,
+      userId: input.answeredByUserId,
+      status: "waiting_input",
+      trigger: "bot_message",
+      clientNonce: { startsWith: "work-event-input:" },
+      ticket: { originThreadId: input.threadId, managedVersion: { gt: 0 } },
+    },
+    select: {
+      botId: true,
+      userId: true,
+      checkpoint: true,
+      trigger: true,
+      clientNonce: true,
+      threadId: true,
+      sourceMessageId: true,
+      task: { select: { prompt: true } },
+    },
+  });
+  return managed && readManagedInputCheckpoint(managed.checkpoint)
+    ? { run: managed, routed: false as const }
+    : null;
 }
 
 async function commitAnswerRunInput(
@@ -362,6 +390,11 @@ async function commitAnswerRunInput(
     (block) => block.kind === "ask" && block.status !== "answered",
   );
   if (pendingAsk?.kind !== "ask") return null;
+  if (pendingAsk.managedInput || readManagedInputCheckpoint(run.checkpoint)) {
+    if (input.dismiss || input.fields || input.username || input.remember !== undefined)
+      return null;
+    return answerManagedInputInTransaction(tx, input, { blocks: parsed.data, ask: pendingAsk });
+  }
   // A helper's card in another chat answers only that helper, only as an approval, and only
   // when the card and its metadata match the source card this chat really wrote.
   let helperCard: { messageId: string; blocks: MessageBlock[] } | null = null;
@@ -744,7 +777,9 @@ export async function retireWaitingQuestionInTransaction(
     // Never implicitly dismiss credentials or authorize an external effect, even on a mixed card.
     if (
       pending.some(
-        (block) => block.kind === "ask" && (block.input === "secret" || block.approvalEffectId),
+        (block) =>
+          block.kind === "ask" &&
+          (block.input === "secret" || block.approvalEffectId || block.managedInput),
       )
     )
       return false;
@@ -949,9 +984,7 @@ export async function pauseRunForInput(
       runId: input.runId,
       payload: run?.userId ? { userId: run.userId } : {},
     });
-    await tx.event.deleteMany({
-      where: { runId: input.runId, ...transientRunEventsWhere() },
-    });
+    await deleteTransientRunEvents(tx, input.runId);
     let cardSeq = response.seq;
     if (routed && cardThreadId) {
       const cardBlocks = helperCardBlocks(routed.cardBlocks, "waiting");

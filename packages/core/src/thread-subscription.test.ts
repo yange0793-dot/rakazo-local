@@ -278,7 +278,10 @@ describe("thread subscription recovery", () => {
     expect(callbacks.onEvent.mock.calls.map(([item]) => item.seq)).toEqual([11, 12, 13, 14, 15]);
     resumed.send(event(11));
     await vi.advanceTimersByTimeAsync(0);
-    expect(callbacks.applyEvent).toHaveBeenLastCalledWith(event(11));
+    expect(callbacks.applyEvent).toHaveBeenCalledTimes(5);
+    expect(state.committed?.cursor).toBe(15);
+    expect(callbacks.beforeEvent).toHaveBeenCalledTimes(6);
+    expect(callbacks.beforeEvent).toHaveBeenLastCalledWith(event(11));
     expect(callbacks.onEvent).toHaveBeenLastCalledWith(event(11), head);
     abort.abort();
     await running;
@@ -906,6 +909,22 @@ describe("thread subscription recovery", () => {
     expect(callbacks.applyEvent).toHaveBeenCalledExactlyOnceWith(event(11));
     abort.abort();
     channel.end();
+    await running;
+  });
+
+  it("delivers effects for events already projected by a live refresh", async () => {
+    vi.useFakeTimers();
+    const { abort, channel, state, callbacks } = setup();
+    const running = runThreadSubscription(callbacks);
+    await vi.advanceTimersByTimeAsync(0);
+    state.committed = { ...head, cursor: 11 };
+    channel.send(event(11));
+    await vi.advanceTimersByTimeAsync(0);
+    channel.send(event(12));
+    await vi.advanceTimersByTimeAsync(0);
+    expect(callbacks.applyEvent).toHaveBeenCalledExactlyOnceWith(event(12));
+    expect(callbacks.onEvent.mock.calls.map(([item]) => item.seq)).toEqual([11, 12]);
+    abort.abort();
     await running;
   });
 

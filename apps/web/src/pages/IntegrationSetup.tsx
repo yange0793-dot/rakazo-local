@@ -4,10 +4,21 @@ import { NativeSelect, NativeSelectOption, Spinner } from "@rakazo/ui-web";
 import { useEffect, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { IntegrationSetup } from "../components/integrations/IntegrationSetup";
-import { rpc } from "../lib/rpc";
+import { selectedSpaceId } from "../lib/rpc";
+import { SpaceRpcProvider, useSpaceRpc } from "../lib/space-rpc";
 
 export function IntegrationSetupPage() {
+  const [spaceId] = useState(selectedSpaceId);
+  return (
+    <SpaceRpcProvider spaceId={spaceId}>
+      <IntegrationSetupContent />
+    </SpaceRpcProvider>
+  );
+}
+
+function IntegrationSetupContent() {
   const navigate = useNavigate();
+  const rpc = useSpaceRpc();
   const { t } = useLingui();
   const [bots, setBots] = useState<Bot[]>([]);
   const [botId, setBotId] = useState("");
@@ -35,7 +46,7 @@ export function IntegrationSetupPage() {
     return () => {
       cancelled = true;
     };
-  }, [navigate]);
+  }, [navigate, rpc]);
   return (
     <div className="min-h-full bg-background px-6 py-12">
       <div className="mx-auto max-w-[560px]">

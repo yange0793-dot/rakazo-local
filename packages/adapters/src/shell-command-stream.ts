@@ -31,10 +31,7 @@ const ONE_TIME_CODE =
 // logs cheap. The link and the code may be on different streams.
 const SIGN_IN_PROMPT_SCAN_CHARS = 4_000;
 
-function showsSignInPrompt(snapshot: ShellCommandSnapshot): boolean {
-  const recent = [snapshot.stdout, snapshot.stderr].map((stream) =>
-    stream.slice(-SIGN_IN_PROMPT_SCAN_CHARS),
-  );
+function showsSignInPrompt(recent: string[]): boolean {
   return (
     recent.some((stream) => SIGN_IN_LINK.test(stream)) &&
     recent.some((stream) => ONE_TIME_CODE.test(stream))
@@ -51,6 +48,24 @@ export interface ShellCommandSnapshot {
 
 export interface FinishedShellCommand extends ShellCommandSnapshot {
   code: number;
+}
+
+class ShellCommandStreamError extends Error {
+  constructor(
+    message: string,
+    readonly output: ShellCommandSnapshot,
+  ) {
+    super(message);
+  }
+}
+
+export function failedShellCommand(error: unknown): FinishedShellCommand {
+  if (error instanceof ShellCommandStreamError) return { ...error.output, code: 1 };
+  return {
+    stdout: "",
+    stderr: error instanceof Error ? error.message : "command failed",
+    code: 1,
+  };
 }
 
 export interface RunningShellCommand extends ShellCommandSnapshot {
@@ -145,14 +160,7 @@ async function finishOrAbort(
   signal?: AbortSignal,
 ): Promise<FinishedShellCommand | undefined> {
   if (signal?.aborted) return undefined;
-  const settled = completion.then(
-    (result) => result,
-    (error: unknown) => ({
-      stdout: "",
-      stderr: error instanceof Error ? error.message : "command failed",
-      code: 1,
-    }),
-  );
+  const settled = completion.catch(failedShellCommand);
   if (!signal) return settled;
   return Promise.race([
     settled,
@@ -177,16 +185,18 @@ export async function observeShellCommand(
     secrets: string[];
     idleMs?: number;
     quietMs?: number;
-    onOutput?: (snapshot: ShellCommandSnapshot) => void;
+    onOutput?: (readSnapshot: () => ShellCommandSnapshot) => void;
   },
-): Promise<{
-  result: ShellCommandResult;
-  completion?: Promise<FinishedShellCommand>;
-}> {
+): Promise<
+  | { result: FinishedShellCommand; completion?: undefined }
+  | { result: RunningShellCommand; completion: Promise<FinishedShellCommand> }
+> {
   const idleMs = options.idleMs ?? SHELL_STREAM_IDLE_MS;
   const quietMs = options.quietMs ?? SHELL_STREAM_QUIET_MS;
-  let stdout = "";
-  let stderr = "";
+  const stdout: string[] = [];
+  const stderr: string[] = [];
+  let recentStdout = "";
+  let recentStderr = "";
   let code: number | undefined;
   let finished = false;
   let timer: ReturnType<typeof setTimeout> | undefined;
@@ -195,8 +205,12 @@ export async function observeShellCommand(
     resolveIdle = resolve;
   });
 
-  const redact = (snapshot: ShellCommandSnapshot, withholdPartial: boolean): ShellCommandSnapshot =>
-    redactShellStreams(snapshot, options.secrets, { withholdPartial });
+  // Live views can coalesce notifications before reading and redacting the accumulated output.
+  const snapshot = (withholdPartial: boolean): ShellCommandSnapshot =>
+    redactShellStreams({ stdout: stdout.join(""), stderr: stderr.join("") }, options.secrets, {
+      withholdPartial,
+    });
+  const liveSnapshot = () => snapshot(true);
 
   const clearIdle = () => {
     if (timer) clearTimeout(timer);
@@ -215,34 +229,45 @@ export async function observeShellCommand(
   const done = (async (): Promise<FinishedShellCommand> => {
     try {
       for await (const event of events) {
-        if (event.type === "stdout") stdout += event.data;
-        else if (event.type === "stderr") stderr += event.data;
-        else if (event.type === "exit") {
+        if (event.type === "stdout") {
+          stdout.push(event.data);
+          recentStdout = (recentStdout + event.data.slice(-SIGN_IN_PROMPT_SCAN_CHARS)).slice(
+            -SIGN_IN_PROMPT_SCAN_CHARS,
+          );
+        } else if (event.type === "stderr") {
+          stderr.push(event.data);
+          recentStderr = (recentStderr + event.data.slice(-SIGN_IN_PROMPT_SCAN_CHARS)).slice(
+            -SIGN_IN_PROMPT_SCAN_CHARS,
+          );
+        } else if (event.type === "exit") {
           code = event.code;
           break;
         } else continue;
-        const published = redact({ stdout, stderr }, true);
         try {
-          options.onOutput?.(published);
+          options.onOutput?.(liveSnapshot);
         } catch {
           // Live output is a view. A failed update must not kill the command.
         }
-        if (stdout.length > 0 || stderr.length > 0) {
-          armIdle(showsSignInPrompt({ stdout, stderr }) ? idleMs : quietMs);
+        if (recentStdout || recentStderr) {
+          armIdle(showsSignInPrompt([recentStdout, recentStderr]) ? idleMs : quietMs);
         }
       }
     } catch (error) {
       // Providers may include command environment values in errors. Never expose the raw
       // error or its cause to runtime tool handling or a background completion observer.
-      throw new Error(
-        redactSecrets(error instanceof Error ? error.message : String(error), options.secrets),
-      );
+      const message = error instanceof Error ? error.message : String(error);
+      stderr.push(recentStderr && !recentStderr.endsWith("\n") ? `\n${message}` : message);
+      throw new ShellCommandStreamError(redactSecrets(message, options.secrets), snapshot(false));
     } finally {
       clearIdle();
       finished = true;
       resolveIdle?.("done");
     }
-    return { ...redact({ stdout, stderr }, false), code: code ?? 0 };
+    if (code === undefined) {
+      if (recentStderr) stderr.push("\n");
+      stderr.push("Command stream ended without an exit code\n");
+    }
+    return { ...snapshot(false), code: code ?? 1 };
   })();
 
   const reason = await Promise.race([
@@ -258,7 +283,7 @@ export async function observeShellCommand(
   return {
     // The process is still running, so an unfinished secret prefix stays out of the
     // tool result. The completion publishes the rest once the command exits.
-    result: { ...redact({ stdout, stderr }, true), code: null, running: true },
+    result: { ...liveSnapshot(), code: null, running: true },
     completion: done,
   };
 }

@@ -5,7 +5,6 @@ import { COMPUTER_COMMAND_OUTPUT_MAX_CHARS } from "@rakazo/contracts";
 import { redactSecrets, sandboxCommandTimeoutMs } from "@rakazo/core";
 import { RunHistoryWriteError, releasePayment } from "@rakazo/db";
 import { getLogger } from "@rakazo/logging";
-import { redactShellStreams } from "./agent-environment.js";
 import {
   resolveCodeFill,
   resolveLoginFill,
@@ -50,7 +49,9 @@ import { builtinOffered } from "./run-instructions.js";
 import { computerScreenToolResult } from "./run-lifecycle.js";
 import type { ToolCall, ToolHandlers } from "./run-tool-gate.js";
 import { auditToolCall } from "./run-tool-gate.js";
+import type { FinishedShellCommand, ShellCommandSnapshot } from "./shell-command-stream.js";
 import {
+  failedShellCommand,
   isRunningShellCommand,
   observeShellCommand,
   SHELL_STILL_RUNNING_NOTICE,
@@ -404,24 +405,35 @@ export const computerTools: ToolHandlers = {
       exitCode: null,
       output: "",
     });
+    let publishTimer: ReturnType<typeof setTimeout> | undefined;
+    const clearPublishTimer = () => {
+      if (publishTimer) clearTimeout(publishTimer);
+      publishTimer = undefined;
+    };
+    const commandOutput = ({ stdout, stderr }: ShellCommandSnapshot) =>
+      `${stdout}${stderr}`.slice(-COMPUTER_COMMAND_OUTPUT_MAX_CHARS);
+    const publishFinal = (final: FinishedShellCommand) => {
+      clearPublishTimer();
+      return appendComputerCommand(ctx, {
+        ...commandEvent,
+        status: "done",
+        exitCode: final.code,
+        output: commandOutput(final),
+      });
+    };
     try {
-      let latestOutput = "";
       let lastPublishedAt = 0;
-      let publishTimer: ReturnType<typeof setTimeout> | undefined;
-      const clearPublishTimer = () => {
-        if (publishTimer) clearTimeout(publishTimer);
-        publishTimer = undefined;
-      };
-      const publishRunning = (output: string, immediate = false) => {
-        latestOutput = output.slice(-COMPUTER_COMMAND_OUTPUT_MAX_CHARS);
+      const publishRunning = (readSnapshot: () => ShellCommandSnapshot, immediate = false) => {
         const send = () => {
           clearPublishTimer();
+          const output = commandOutput(readSnapshot());
+          if (!output) return;
           lastPublishedAt = Date.now();
           void appendComputerCommand(ctx, {
             ...commandEvent,
             status: "running",
             exitCode: null,
-            output: latestOutput,
+            output,
           });
         };
         if (immediate || Date.now() - lastPublishedAt >= 400) {
@@ -429,13 +441,6 @@ export const computerTools: ToolHandlers = {
           return;
         }
         if (!publishTimer) publishTimer = setTimeout(send, 400);
-      };
-      const commandOutput = (
-        snapshot: { stdout: string; stderr: string },
-        withholdPartial: boolean,
-      ) => {
-        const safe = redactShellStreams(snapshot, ctx.secrets, { withholdPartial });
-        return `${safe.stdout}${safe.stderr}`;
       };
       const computer = await ctx.computer.get("tool", name);
       const shellEnvironment =
@@ -471,28 +476,29 @@ export const computerTools: ToolHandlers = {
         ),
         {
           secrets: ctx.secrets,
-          onOutput: (snapshot) => {
-            const output = commandOutput(snapshot, true);
-            if (output) publishRunning(output);
-          },
+          onOutput: publishRunning,
         },
       );
-      if (observed.completion) {
-        const completion = observed.completion.then(async (final) => {
-          clearPublishTimer();
-          await appendComputerCommand(ctx, {
-            ...commandEvent,
-            status: "done",
-            exitCode: final.code,
-            output: commandOutput(final, false).slice(-COMPUTER_COMMAND_OUTPUT_MAX_CHARS),
-          });
-          return final;
-        });
-        void completion.catch(() => undefined);
-        publishRunning(commandOutput(observed.result, true), true);
+      if (observed.completion !== undefined) {
+        const { result } = observed;
+        const completion = observed.completion.then(
+          async (final) => {
+            await publishFinal(final);
+            return final;
+          },
+          async (error: unknown) => {
+            await publishFinal(failedShellCommand(error));
+            throw error;
+          },
+        );
+        // The runtime may finish or cancel before it reads the detached completion.
+        void completion.catch(() =>
+          getLogger().warn("detached shell command failed", { runId, executionId }),
+        );
+        publishRunning(() => result, true);
         const returned = await call.finish({
-          stdout: observed.result.stdout,
-          stderr: observed.result.stderr,
+          stdout: result.stdout,
+          stderr: result.stderr,
           code: null,
           running: true,
           notice: SHELL_STILL_RUNNING_NOTICE,
@@ -500,24 +506,13 @@ export const computerTools: ToolHandlers = {
         if (isRunningShellCommand(returned)) observer?.onShellStillRunning?.(completion);
         return returned;
       }
-      clearPublishTimer();
-      const redacted = observed.result;
-      await appendComputerCommand(ctx, {
-        ...commandEvent,
-        status: "done",
-        exitCode: redacted.code,
-        output: commandOutput(redacted, false).slice(-COMPUTER_COMMAND_OUTPUT_MAX_CHARS),
-      });
-      return call.finish(redacted);
+      await publishFinal(observed.result);
+      return call.finish(observed.result);
     } catch (error) {
-      await appendComputerCommand(ctx, {
-        ...commandEvent,
-        status: "done",
-        exitCode: 1,
-        output: redactSecrets(
-          error instanceof Error ? error.message : "command failed",
-          ctx.secrets,
-        ).slice(-COMPUTER_COMMAND_OUTPUT_MAX_CHARS),
+      const failure = failedShellCommand(error);
+      await publishFinal({
+        ...failure,
+        stderr: redactSecrets(failure.stderr, ctx.secrets),
       });
       throw error;
     }

@@ -38,6 +38,7 @@ x-app-environment: &app-environment # Runtime
   OBJECT_STORAGE_PATH_STYLE:
   WAKEUP_DRIVER: graphile
   AGENT_RUNTIME: pi
+  AGENT_RUNTIME_ROUTES: ${AGENT_RUNTIME_ROUTES:-}
   API_URL: ${API_URL:-http://127.0.0.1:5173}
   WEB_ORIGIN: ${WEB_ORIGIN:-http://127.0.0.1:5173}
   MAX_UPLOAD_SIZE_MB:
@@ -258,6 +259,7 @@ x-app-environment: &app-environment # Runtime
   CURSOR_API_KEY: ${CURSOR_API_KEY:-}
   # Tools and integrations
   WEB_PROVIDER:
+  TINYFISH_API_KEY: ${TINYFISH_API_KEY:-}
   KEENABLE_API_KEY:
   COMPOSIO_API_KEY:
   PIPEDREAM_CLIENT_ID:

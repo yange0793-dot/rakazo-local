@@ -6,6 +6,68 @@ import {
 } from "./http-response.js";
 
 describe("readBoundedJsonResponse", () => {
+  it("checks the actual UTF-8 byte count for a buffered body", async () => {
+    const json = '{"name":"caf\u00e9"}';
+    const bytes = new TextEncoder().encode(json);
+    const response = new Response(null);
+    const read = vi.spyOn(response, "arrayBuffer").mockResolvedValue(bytes.buffer);
+
+    await expect(readBoundedJsonResponse(response, bytes.byteLength)).resolves.toEqual({
+      name: "caf\u00e9",
+    });
+    await expect(readBoundedJsonResponse(response, bytes.byteLength - 1)).rejects.toBeInstanceOf(
+      ResponseBodyTooLargeError,
+    );
+    expect(read).toHaveBeenCalledTimes(2);
+  });
+
+  it("does not read a buffered body with an oversized declared length", async () => {
+    const response = new Response(null, { headers: { "content-length": "65" } });
+    const read = vi.spyOn(response, "arrayBuffer");
+
+    await expect(readBoundedJsonResponse(response, 64)).rejects.toBeInstanceOf(
+      ResponseBodyTooLargeError,
+    );
+    expect(read).not.toHaveBeenCalled();
+  });
+
+  it("does not start a buffered read after the signal has aborted", async () => {
+    const response = new Response(null);
+    const read = vi.spyOn(response, "arrayBuffer");
+    const reason = new Error("request canceled");
+
+    await expect(readBoundedJsonResponse(response, 64, AbortSignal.abort(reason))).rejects.toBe(
+      reason,
+    );
+    expect(read).not.toHaveBeenCalled();
+  });
+
+  it("rejects a pending buffered read on abort and discards its late result", async () => {
+    const response = new Response(null);
+    let finish!: (bytes: ArrayBuffer) => void;
+    vi.spyOn(response, "arrayBuffer").mockImplementation(
+      () =>
+        new Promise((resolve) => {
+          finish = resolve;
+        }),
+    );
+    const controller = new AbortController();
+    const reason = new Error("request timed out");
+    const pending = readBoundedJsonResponse(response, 64, controller.signal);
+    const rejection = expect(pending).rejects.toBe(reason);
+    controller.abort(reason);
+
+    await rejection;
+    finish(new TextEncoder().encode('{"ok":true}').buffer);
+    await expect(pending).rejects.toBe(reason);
+  });
+
+  it("rejects an empty 204 response as missing JSON", async () => {
+    await expect(
+      readBoundedJsonResponse(new Response(null, { status: 204 }), 64),
+    ).rejects.toBeInstanceOf(SyntaxError);
+  });
+
   it("parses a fragmented JSON response", async () => {
     const encoder = new TextEncoder();
     const response = new Response(

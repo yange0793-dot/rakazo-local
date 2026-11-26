@@ -18,14 +18,12 @@ import {
   parseModelMaxTokens,
   savedCompatibleEndpointMatches,
 } from "@rakazo/contracts";
-import {
-  clampCatalogThinkingLevel,
-  compatibleThinkingLevels,
-  connectionMaxTokensField,
-  pickCatalogModelId,
-} from "./model-providers.js";
+import { connectionMaxTokensField, pickCatalogModelId } from "./model-providers.js";
 
-type CatalogModel = Pick<ModelCatalogEntry, "provider" | "id" | "recommended" | "thinkingLevels">;
+type CatalogModel = Pick<
+  ModelCatalogEntry,
+  "provider" | "id" | "recommended" | "reasoning" | "thinkingLevels"
+>;
 type DefaultModel = { defaultProvider: string | null; defaultModel: string | null };
 
 /** What a connection form edits, as the strings and toggles its fields hold. */
@@ -95,22 +93,17 @@ export function connectionFormFields(input: {
   /** Prefills a new OpenAI-compatible connection, such as a hosted preset. */
   presetBaseUrl?: string;
 }): ConnectionFormFields {
-  const { catalog, provider, modelId, credential, presetBaseUrl } = input;
+  const { provider, modelId, credential, presetBaseUrl } = input;
   const compatible = provider === OPENAI_COMPATIBLE_PROVIDER_ID;
-  const supportedThinking = compatible
-    ? credential?.reasoning
-      ? compatibleThinkingLevels(credential?.apiProtocol, credential?.reasoningCapabilities)
-      : []
-    : catalog.find((entry) => entry.provider === provider && entry.id === modelId)?.thinkingLevels;
   return {
     enabledModelIds: credential?.enabledModelIds ?? [],
     baseUrl: compatible ? (credential?.baseUrl ?? presetBaseUrl ?? "") : "",
     apiProtocol: credential?.apiProtocol ?? "chat-completions",
     reasoning: credential?.reasoning ?? false,
-    thinkingLevel: clampCatalogThinkingLevel(
-      credential?.modelId === modelId ? credential.thinkingLevel : null,
-      supportedThinking,
-    ) as ThinkingLevel | null,
+    thinkingLevel:
+      credential?.modelId === modelId && credential.thinkingLevel !== "off"
+        ? (credential?.thinkingLevel ?? null)
+        : null,
     maxTokens: connectionMaxTokensField(credential?.maxTokens),
     contextWindow: String(credential?.contextWindow ?? DEFAULT_MODEL_CONTEXT_WINDOW),
     supportsImages: credential?.supportsImages ?? false,
@@ -218,22 +211,8 @@ export function modelConnectRequest(input: {
   if (compatible && contextWindow === undefined) {
     return { status: "invalid", field: "contextWindow" };
   }
-  // The staged effort belongs to the model on screen. Clamp it before a connect or a limit
-  // save so a previous model's level cannot stick.
-  const reasoningCapabilities =
-    compatible &&
-    savedCompatibleEndpointMatches(baseUrl, credential?.baseUrl) &&
-    form.apiProtocol === (credential?.apiProtocol ?? "chat-completions")
-      ? credential?.reasoningCapabilities
-      : undefined;
-  const thinkingLevel = clampCatalogThinkingLevel(
-    form.thinkingLevel,
-    compatible
-      ? form.reasoning
-        ? compatibleThinkingLevels(form.apiProtocol, reasoningCapabilities)
-        : []
-      : selected.thinkingLevels,
-  ) as ThinkingLevel | null;
+  // Keep the selected shared effort; the runtime maps it to this model's wire capability.
+  const thinkingLevel = form.thinkingLevel !== "off" ? (form.thinkingLevel ?? null) : null;
   const label = selected.providerName ?? selected.provider;
   if (compatible) {
     return {
@@ -276,9 +255,7 @@ export function modelConnectRequest(input: {
         ? { accountId: form.accountId.trim(), gatewayId: form.gatewayId.trim() }
         : {}),
       modelId: selected.id,
-      // A limits-only save leaves the stored effort alone while the model and effort stay
-      // put. Changing either sends the clamped level, including null, so the previous
-      // model's effort is not reused.
+      // A limits-only save leaves the stored effort alone while the model and effort stay put.
       ...(!savingLimitOnly || modelChanged || (form.thinkingLevel ?? null) !== storedThinking
         ? { thinkingLevel }
         : {}),

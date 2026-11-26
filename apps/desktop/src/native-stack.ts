@@ -121,6 +121,10 @@ class Service {
     return this.child !== null;
   }
 
+  get pid(): number | undefined {
+    return this.child?.pid;
+  }
+
   start() {
     this.stopping = false;
     const startedAt = Date.now();
@@ -574,7 +578,7 @@ export class NativeStackController extends StackLifecycle {
       LOCAL_VM_COMPUTER_IMAGE: computerImage,
       RAKAZO_DESKTOP_STACK_TOKEN: stackToken,
     });
-    const entry = (name: keyof ServerManifest["entrypoints"]) =>
+    const entry = (name: Exclude<keyof ServerManifest["entrypoints"], "workerHealth">) =>
       path.join(server.dir, server.manifest.entrypoints[name]);
     const node = (name: string, args: string[], env: Record<string, string>) =>
       this.service({
@@ -591,7 +595,33 @@ export class NativeStackController extends StackLifecycle {
       API_PORT: String(ports.api),
     });
     // Busy runs allocate fast; a larger young generation cuts the worker's garbage collection.
-    const worker = node("worker", ["--max-semi-space-size=64", entry("worker")], appEnv);
+    const workerHealthFile = this.dir("run", "worker-health.json");
+    const worker = node("worker", ["--max-semi-space-size=64", entry("worker")], {
+      ...appEnv,
+      WORKER_HEALTH_FILE: workerHealthFile,
+    });
+    const workerHealthEntry = server.manifest.entrypoints.workerHealth;
+    const workerHealthy = async (timeoutMs: number) => {
+      // Previously published bundles did not include the separate health entry.
+      if (workerHealthEntry === undefined) return worker.alive;
+      const pid = worker.pid;
+      if (pid === undefined || timeoutMs <= 0) return false;
+      const result = await this.deps.run(
+        this.deps.nodeBinary,
+        [path.join(server.dir, workerHealthEntry)],
+        {
+          cwd: server.dir,
+          env: {
+            ...this.nodeEnv(),
+            WORKER_HEALTH_FILE: workerHealthFile,
+            WORKER_HEALTH_PID: String(pid),
+          },
+          timeoutMs,
+          signal,
+        },
+      );
+      return result.code === 0 && worker.pid === pid;
+    };
     const web = node("web", [entry("web")], {
       ...this.nodeEnv(),
       ...Object.fromEntries(
@@ -624,7 +654,8 @@ export class NativeStackController extends StackLifecycle {
         .catch(() => false);
       if (
         apiHealthy &&
-        (await this.deps.probe(this.currentWebUrl, signal, stackToken)) === this.deps.imageTag
+        (await this.deps.probe(this.currentWebUrl, signal, stackToken)) === this.deps.imageTag &&
+        (await workerHealthy(deadline - Date.now()))
       ) {
         this.push({ type: "ready" });
         await pruneRuntimes(this.dir("runtime"), [
@@ -641,7 +672,7 @@ export class NativeStackController extends StackLifecycle {
     if (signal.aborted) throw new Error("aborted");
     throw new StartFailure(
       t("The stack started but the web app did not answer. Retry, and check the output below."),
-      [...api.tail, ...web.tail].slice(-STACK_OUTPUT_LINES),
+      [...api.tail, ...web.tail, ...worker.tail].slice(-STACK_OUTPUT_LINES),
     );
   }
 

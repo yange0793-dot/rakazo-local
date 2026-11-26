@@ -5,9 +5,17 @@ import { createRoot } from "react-dom/client";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import type { ArtifactTarget } from "./artifact-open";
 import { rpc } from "./rpc";
+import { SpaceRpcProvider } from "./space-rpc";
 import { useArtifactImage } from "./use-artifact-image";
 
-vi.mock("./rpc", () => ({ rpc: { artifacts: { get: vi.fn() } } }));
+const clients = vi.hoisted(() => ({
+  "space-a": { artifacts: { get: vi.fn() } },
+  "space-b": { artifacts: { get: vi.fn() } },
+}));
+vi.mock("./rpc", () => ({
+  rpc: { artifacts: { get: vi.fn() } },
+  rpcForSpace: (spaceId: keyof typeof clients) => clients[spaceId],
+}));
 
 let container: HTMLDivElement;
 let root: Root;
@@ -128,4 +136,27 @@ it("retries a failed download while its original consumer stays mounted", async 
   expect(rpc.artifacts.get).toHaveBeenCalledTimes(2);
   expect(container.querySelectorAll("img")).toHaveLength(1);
   expect(container.querySelector("img")?.getAttribute("src")).toBe("blob:photo");
+});
+
+it("keeps image downloads and object URLs scoped to the mounted Space", async () => {
+  clients["space-a"].artifacts.get.mockResolvedValue(artifact);
+  clients["space-b"].artifacts.get.mockResolvedValue(artifact);
+  await act(async () =>
+    root.render(
+      <SpaceRpcProvider spaceId="space-a">
+        <Image target={{ botId: "bot" }} />
+        <SpaceRpcProvider spaceId="space-b">
+          <Image target={{ botId: "bot" }} />
+        </SpaceRpcProvider>
+      </SpaceRpcProvider>,
+    ),
+  );
+  for (const client of Object.values(clients)) {
+    expect(client.artifacts.get).toHaveBeenCalledExactlyOnceWith({
+      artifactId: "photo",
+      botId: "bot",
+    });
+  }
+  expect(rpc.artifacts.get).not.toHaveBeenCalled();
+  expect(createObjectURL).toHaveBeenCalledTimes(2);
 });

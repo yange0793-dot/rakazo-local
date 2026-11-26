@@ -106,6 +106,8 @@ export function selectConfiguredModel(input: {
     Boolean(credential || (provider && provider === input.hostedProvider));
   // The override provider, model and credential must win together.
   const useOverride = hasOverride && runnable(bot?.modelProvider, overrideCredential);
+  if (bot?.modelCredentialId && !overrideCredential)
+    return { provider: undefined, id: null, credential: null, thinkingLevel: null };
   const useMain = !useOverride && main !== null && runnable(main.provider, main.credential);
   const fallback = deploymentModelRole("main", input.defaults).primary;
   const selected = useOverride

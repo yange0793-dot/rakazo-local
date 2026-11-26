@@ -1,6 +1,5 @@
 import { useLingui } from "@lingui/react/macro";
 import type { ModelOAuthBegin, ThinkingLevel } from "@rakazo/contracts";
-import { clampCatalogThinkingLevel } from "@rakazo/core";
 import * as Clipboard from "expo-clipboard";
 import type { RefObject } from "react";
 import { useCallback, useRef, useState } from "react";
@@ -108,10 +107,7 @@ export function useSubscriptionSignIn({
         {
           provider: selected.provider,
           modelId: selected.id,
-          thinkingLevel: clampCatalogThinkingLevel(
-            thinkingLevel,
-            selected.thinkingLevels,
-          ) as ThinkingLevel | null,
+          thinkingLevel: thinkingLevel !== "off" ? thinkingLevel : null,
           makeDefault,
           scope,
           label: selected.providerName ?? selected.provider,

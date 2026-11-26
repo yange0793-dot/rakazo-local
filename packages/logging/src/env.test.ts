@@ -22,4 +22,8 @@ describe("resolveLogEnv", () => {
       format: "pretty",
     });
   });
+
+  it("ignores inherited keys when parsing the log level", () => {
+    expect(resolveLogEnv({ LOG_LEVEL: "constructor" }).level).toBe("info");
+  });
 });

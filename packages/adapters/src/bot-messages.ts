@@ -1,5 +1,6 @@
+import { createHash } from "node:crypto";
 import { runContinueJob } from "@rakazo/adapter-kit";
-import type { BotMessageIntent, MessageBlock } from "@rakazo/contracts";
+import type { BotMessageIntent, ManagedWorkDependency, MessageBlock } from "@rakazo/contracts";
 import {
   BOT_MESSAGE_MAX_LENGTH,
   BOT_MESSAGE_TOO_LONG,
@@ -15,12 +16,20 @@ import {
   appendEventInTransaction,
   createThreadMessageInTransaction,
   isUniqueViolation,
+  ManagedWorkError,
+  recordWorkEventInTransaction,
   spaceTakesWork,
   THREAD_LOCK_TRANSACTION_OPTIONS,
   withTransactionRetry,
 } from "@rakazo/db";
 import { getLogger } from "@rakazo/logging";
 import type { ExecutorDeps } from "./executor-deps.js";
+import { managedWorkEnabled, prepareManagedWorkInTransaction } from "./managed-work.js";
+import {
+  managedWorkInputAttachmentsInTransaction,
+  reconcileManagedWorkEvents,
+  recordManagedChildOutcomeInTransaction,
+} from "./managed-work-events.js";
 import { runLeaseFor } from "./run-messages.js";
 
 /**
@@ -68,7 +77,7 @@ export async function loadBotMessageContext(
 }
 
 export async function messageBot(
-  deps: Pick<ExecutorDeps, "prisma" | "events" | "jobs" | "runLease">,
+  deps: Pick<ExecutorDeps, "prisma" | "events" | "jobs" | "runLease" | "ticketBoardEnabled">,
   run: {
     id: string;
     spaceId: string;
@@ -84,6 +93,9 @@ export async function messageBot(
     message: string;
     intent?: BotMessageIntent;
     deliveryKey?: string;
+    ticket_id?: string;
+    new_task?: boolean;
+    dependencies?: ManagedWorkDependency[];
     /** A message in the recipient's chat this one answers, so it arrives as a reply. */
     replyToId?: string;
     /** Attachments filed under the recipient's chat, shown there and copied to its computer. */
@@ -99,6 +111,21 @@ export async function messageBot(
 
   const sourceContext = await loadBotMessageContext(deps.prisma, run.sourceMessageId);
   const intent = input.intent ?? "request";
+  if (input.new_task !== undefined && typeof input.new_task !== "boolean")
+    return { ok: false as const, error: "new_task must be a boolean" };
+  if (input.new_task && (intent !== "request" || input.ticket_id))
+    return {
+      ok: false as const,
+      error: "new_task requires a request without ticket_id",
+    };
+  const supplemental = intent === "fyi" || intent === "status";
+  const managedIntent = intent === "request" || supplemental;
+  if (input.ticket_id && !managedIntent)
+    return {
+      ok: false as const,
+      error:
+        "ticket_id continues delegated work with request, fyi, or status. Return current work with result without ticket_id.",
+    };
   const hop = nextBotMessageHop(sourceContext?.hop);
 
   const candidates = await deps.prisma.bot.findMany({
@@ -132,9 +159,34 @@ export async function messageBot(
 
   // A tool call can be re-executed after a lease expiry, so a delivery has to be
   // replayable: without this the recipient is messaged twice and woken twice.
-  const deliveryKey = input.deliveryKey ? `bot-message:${input.deliveryKey}` : undefined;
-  const replayed = (messageId: string) =>
-    ({
+  const enableManaged = managedWorkEnabled(deps);
+  const operationKey =
+    input.deliveryKey ??
+    (enableManaged && managedIntent
+      ? `${run.id}:${target.id}:${createHash("sha256").update(message).digest("hex")}`
+      : undefined);
+  const deliveryKey = operationKey ? `bot-message:${operationKey}` : undefined;
+  const replayed = async (messageId: string) => {
+    const dispatch =
+      enableManaged && managedIntent && operationKey
+        ? await deps.prisma.workEvent.findFirst({
+            where: {
+              eventKey: `managed:dispatch:${deliveryKey}`,
+              spaceId: run.spaceId,
+              userId: run.userId,
+              targetBotId: target.id,
+              kind: "dispatch",
+            },
+            select: { ticket: { select: { id: true, managedVersion: true } } },
+          })
+        : null;
+    const ticket = dispatch?.ticket;
+    if (input.ticket_id && ticket?.id !== input.ticket_id)
+      return {
+        ok: false as const,
+        error: "This delivery key is already bound to different work.",
+      };
+    return {
       ok: true as const,
       status: "duplicate" as const,
       botId: target.id,
@@ -142,8 +194,11 @@ export async function messageBot(
       messageId,
       delivered: message,
       replayed: true as const,
+      managed: Boolean(ticket?.managedVersion),
+      ...(ticket?.managedVersion ? { ticketId: ticket.id } : {}),
       note: `Already sent to ${target.name} in this turn; it was not sent again.`,
-    }) as const;
+    } as const;
+  };
 
   const wakePrompt = buildBotMessageWakePrompt({ from: sender, text: message, intent });
   const outboundBlock: MessageBlock = {
@@ -159,7 +214,10 @@ export async function messageBot(
     | {
         ok: true;
         messageId: string;
-        runId: string;
+        runId?: string;
+        ticketId?: string;
+        managed?: boolean;
+        waiting?: boolean;
         targetEventSeq: number;
         senderEventSeq: number;
       }
@@ -171,6 +229,12 @@ export async function messageBot(
         ok: true;
         replayed: true;
         messageId: string;
+      }
+    | {
+        ok: true;
+        recorded: true;
+        eventId: string;
+        ticketId: string;
       };
   try {
     committed = await withTransactionRetry(() =>
@@ -201,7 +265,7 @@ export async function messageBot(
               ? { in: ["completed", "failed", "cancelled"] }
               : "running",
           },
-          select: { id: true },
+          select: { id: true, ticketId: true, workControlEpoch: true },
         });
         if (!senderStillRunning)
           return { ok: false as const, error: "source run is no longer active" };
@@ -233,6 +297,137 @@ export async function messageBot(
             error: `reply_to_message_id does not name a message in ${target.name}'s chat`,
           };
 
+        const existingWork = senderStillRunning.ticketId
+          ? await tx.ticket.findFirst({
+              where: { id: senderStillRunning.ticketId, spaceId: run.spaceId },
+              select: {
+                managedVersion: true,
+                stopRequestedAt: true,
+                controlEpoch: true,
+                parentTicketId: true,
+              },
+            })
+          : null;
+        if (
+          existingWork?.managedVersion &&
+          (existingWork.stopRequestedAt ||
+            (senderStillRunning.workControlEpoch !== null &&
+              senderStillRunning.workControlEpoch !== existingWork.controlEpoch))
+        )
+          return { ok: false as const, error: "This work was stopped or superseded." };
+        if (
+          managedIntent &&
+          !enableManaged &&
+          (existingWork?.managedVersion ||
+            input.ticket_id ||
+            input.new_task ||
+            input.dependencies?.length)
+        )
+          return { ok: false as const, error: "Managed work requires board and work receipts." };
+        let supplementalTicketId: string | undefined;
+        if (enableManaged && supplemental && (input.ticket_id || existingWork?.managedVersion)) {
+          if (!senderStillRunning.ticketId || !existingWork?.managedVersion)
+            return {
+              ok: false as const,
+              error:
+                "Bind this execution to the original parent ticket before continuing its work.",
+            };
+          await tx.$queryRaw`SELECT id FROM tickets WHERE id = ${senderStillRunning.ticketId} AND "spaceId" = ${run.spaceId} FOR UPDATE`;
+          const assignments = await tx.ticket.findMany({
+            where: {
+              spaceId: run.spaceId,
+              parentTicketId: senderStillRunning.ticketId,
+              assigneeBotId: target.id,
+              createdByUserId: run.userId,
+              managedVersion: { gt: 0 },
+            },
+            orderBy: { id: "asc" },
+            take: 2,
+          });
+          const candidateIds = assignments.map((assignment) => assignment.id).join(", ");
+          if (input.ticket_id) {
+            const assignment = await tx.ticket.findFirst({
+              where: {
+                id: input.ticket_id,
+                spaceId: run.spaceId,
+                parentTicketId: senderStillRunning.ticketId,
+                assigneeBotId: target.id,
+                createdByUserId: run.userId,
+                managedVersion: { gt: 0 },
+              },
+              select: { id: true },
+            });
+            if (!assignment)
+              return {
+                ok: false as const,
+                error: `ticket_id must name this recipient's delegated child, not the parent or another assignment. Candidates: ${candidateIds || "none"}.`,
+              };
+            supplementalTicketId = assignment.id;
+          } else if (assignments.length > 1) {
+            return {
+              ok: false as const,
+              error: `Multiple assignments belong to this owner and parent. Pass ticket_id. Candidates: ${candidateIds}.`,
+            };
+          } else {
+            if (assignments[0]?.stopRequestedAt)
+              return {
+                ok: false as const,
+                error:
+                  "The original assignment was stopped. Pass ticket_id to resume it explicitly.",
+              };
+            supplementalTicketId = assignments[0]?.id;
+          }
+        }
+        let replyTicket: { id: string; controlEpoch: number; requirementsVersion: number } | null =
+          null;
+        if (existingWork?.managedVersion && existingWork.parentTicketId) {
+          replyTicket = await tx.ticket.findFirst({
+            where: {
+              id: existingWork.parentTicketId,
+              spaceId: run.spaceId,
+              assigneeBotId: target.id,
+              stopRequestedAt: null,
+            },
+            select: { id: true, controlEpoch: true, requirementsVersion: true },
+          });
+          if (replyTicket && intent === "result") {
+            const event = await recordManagedChildOutcomeInTransaction(tx, {
+              spaceId: run.spaceId,
+              runId: run.id,
+              ticketId: senderStillRunning.ticketId!,
+              payload: { text: message, intent },
+            });
+            if (!event)
+              return {
+                ok: false as const,
+                error: "The original work can no longer receive this result.",
+              };
+            return {
+              ok: true as const,
+              recorded: true as const,
+              eventId: event.id,
+              ticketId: replyTicket.id,
+            };
+          }
+        }
+        const replyToMessageId =
+          explicitReplyTo?.id ??
+          (sourceContext?.fromBotId === target.id && intent !== "fyi"
+            ? sourceContext.returnToMessageId
+            : undefined);
+        const managed =
+          enableManaged && (intent === "request" || supplementalTicketId)
+            ? await prepareManagedWorkInTransaction(tx, {
+                run,
+                ownerBotId: target.id,
+                brief: message,
+                operationKey: operationKey!,
+                existingTicketId: input.ticket_id ?? supplementalTicketId,
+                newTask: input.new_task,
+                replyToId: replyToMessageId,
+                dependencies: input.dependencies,
+              })
+            : undefined;
         // Echo into the sender's chat in the same transaction so a failed notify
         // cannot leave one side delivered and the other blank.
         const outbound = await createThreadMessageInTransaction(tx, {
@@ -254,15 +449,24 @@ export async function messageBot(
           intent,
           returnToMessageId: outbound.id,
         };
+        const dependencyFiles = managed
+          ? await managedWorkInputAttachmentsInTransaction(tx, managed.ticket)
+          : [];
+        const sentFileIds = new Set(
+          files.flatMap((file) =>
+            file.kind === "file" || file.kind === "image" ? [file.artifactId] : [],
+          ),
+        );
+        const inboundBlocks: MessageBlock[] = [
+          inboundBlock,
+          ...files,
+          ...dependencyFiles.filter((file) => !sentFileIds.has(file.artifactId)),
+        ];
         const inbound = await createThreadMessageInTransaction(tx, {
           threadId: targetThreadId,
           role: "user",
-          blocks: [inboundBlock, ...files],
-          replyToMessageId:
-            explicitReplyTo?.id ??
-            (sourceContext?.fromBotId === target.id && intent !== "fyi"
-              ? sourceContext.returnToMessageId
-              : undefined),
+          blocks: inboundBlocks,
+          replyToMessageId,
           clientNonce: deliveryKey,
           markUnread: options?.forceUnread === true,
         });
@@ -274,31 +478,72 @@ export async function messageBot(
             userId: run.userId,
             // The reply tool addresses the original sender's chat, so use the echo there,
             // not the delivery message in the recipient's own chat.
-            prompt: `${wakePrompt}\n\nTo answer this sender directly, pass reply_to_message_id "${outbound.id}".`,
+            prompt: `${wakePrompt}\n\nTo answer this sender directly, pass reply_to_message_id "${outbound.id}".${
+              managed
+                ? `\n\nThis is managed ticket ${managed.ticket.id} (parent ${managed.parentTicket.id}). Read ticket_get. Deliver findings and actual artifacts with ticket_update result using its delivery.previousVersion. A final text alone is not a work receipt.`
+                : ""
+            }`,
             status: "queued",
           },
         });
-        const nextRun = await tx.run.create({
-          data: {
+        const nextRun =
+          managed && !managed.admission.admitted
+            ? null
+            : await tx.run.create({
+                data: {
+                  spaceId: run.spaceId,
+                  botId: target.id,
+                  threadId: targetThreadId,
+                  taskId: task.id,
+                  userId: run.userId,
+                  status: "queued",
+                  trigger: "bot_message",
+                  sourceMessageId: inbound.id,
+                  ...(managed
+                    ? {
+                        ticketId: managed.ticket.id,
+                        workControlEpoch: managed.ticket.controlEpoch,
+                        workRequirementsVersion: managed.ticket.requirementsVersion,
+                      }
+                    : replyTicket && intent !== "request"
+                      ? {
+                          ticketId: replyTicket.id,
+                          workControlEpoch: replyTicket.controlEpoch,
+                          workRequirementsVersion: replyTicket.requirementsVersion,
+                        }
+                      : {}),
+                },
+                select: { id: true },
+              });
+        if (nextRun)
+          await tx.message.update({ where: { id: inbound.id }, data: { runId: nextRun.id } });
+        if (managed) {
+          const obligation = await recordWorkEventInTransaction(tx, {
             spaceId: run.spaceId,
-            botId: target.id,
-            threadId: targetThreadId,
-            taskId: task.id,
             userId: run.userId,
-            status: "queued",
-            trigger: "bot_message",
-            sourceMessageId: inbound.id,
-          },
-          select: { id: true },
-        });
-        await tx.message.update({ where: { id: inbound.id }, data: { runId: nextRun.id } });
+            ticketId: managed.ticket.id,
+            eventKey: `managed:dispatch:${deliveryKey}`,
+            kind: "dispatch",
+            controlEpoch: managed.ticket.controlEpoch,
+            targetBotId: target.id,
+            targetThreadId,
+            sourceTicketId: managed.parentTicket.id,
+            sourceRunId: run.id,
+            payload: { taskId: task.id, messageId: inbound.id },
+          });
+          if (nextRun)
+            await tx.workEvent.update({
+              where: { id: obligation.id },
+              data: { status: "handled", wakeRunId: nextRun.id, handledAt: new Date() },
+            });
+        }
         const inboundEvent = await appendEventInTransaction(tx, {
           spaceId: run.spaceId,
           threadId: targetThreadId,
           botId: target.id,
           type: "thread.message.created",
-          runId: nextRun.id,
-          payload: { messageId: inbound.id, role: "user", blocks: [inboundBlock, ...files] },
+          runId: nextRun?.id,
+          payload: { messageId: inbound.id, role: "user", blocks: inboundBlocks },
         });
         const outboundEvent = await appendEventInTransaction(tx, {
           spaceId: run.spaceId,
@@ -313,13 +558,21 @@ export async function messageBot(
         return {
           ok: true as const,
           messageId: inbound.id,
-          runId: nextRun.id,
+          runId: nextRun?.id,
+          ...(managed
+            ? {
+                managed: true,
+                ticketId: managed.ticket.id,
+                waiting: !nextRun,
+              }
+            : { managed: false }),
           targetEventSeq: inboundEvent.seq,
           senderEventSeq: outboundEvent.seq,
         };
       }, THREAD_LOCK_TRANSACTION_OPTIONS),
     );
   } catch (error) {
+    if (error instanceof ManagedWorkError) return { ok: false as const, error: error.message };
     // Two concurrent retries can both miss the in-transaction lookup; the
     // loser hits the unique key. Treat that as a successful replay.
     if (deliveryKey && isUniqueViolation(error)) {
@@ -333,6 +586,21 @@ export async function messageBot(
   }
   if ("replayed" in committed) return replayed(committed.messageId);
   if (!committed.ok) return committed;
+  if ("recorded" in committed) {
+    await reconcileManagedWorkEvents(deps, { spaceId: run.spaceId });
+    return {
+      ok: true as const,
+      status: "recorded" as const,
+      botId: target.id,
+      name: target.name,
+      messageId: run.sourceMessageId ?? "",
+      eventId: committed.eventId,
+      ticketId: committed.ticketId,
+      managed: true,
+      delivered: message,
+      note: "Result recorded against the original work; its owner will continue after this execution finishes.",
+    };
+  }
 
   await deps.events.notify(targetThreadId, committed.targetEventSeq).catch((error) => {
     getLogger().error("bot message realtime notification", error);
@@ -340,17 +608,20 @@ export async function messageBot(
   await deps.events.notify(run.threadId, committed.senderEventSeq).catch((error) => {
     getLogger().error("bot message sender echo notification", error);
   });
-  await deps.jobs.enqueue(runContinueJob(committed.runId)).catch((error) => {
-    // The queued run is durable; the job reconciler repairs a missed wake.
-    getLogger().error("bot message enqueue", error);
-  });
+  if (committed.runId)
+    await deps.jobs.enqueue(runContinueJob(committed.runId)).catch((error) => {
+      // The queued run is durable; the job reconciler repairs a missed wake.
+      getLogger().error("bot message enqueue", error);
+    });
   return {
     ok: true as const,
-    status: "delivered" as const,
+    status: committed.waiting ? ("waiting" as const) : ("delivered" as const),
     botId: target.id,
     name: target.name,
     messageId: committed.messageId,
     runId: committed.runId,
+    managed: committed.managed ?? false,
+    ...(committed.ticketId ? { ticketId: committed.ticketId } : {}),
     delivered: message,
     note: `Sent to ${target.name}. Delivery is async; a reply wakes you later as a new message. Continue independent work; send another update later only if it adds something new.`,
   };
@@ -372,6 +643,24 @@ export async function returnBotMessageOutcome(
   intent: "result" | "status" = "result",
   options?: { forceUnread?: boolean },
 ) {
+  const linked = await deps.prisma.run.findFirst({
+    where: { id: run.id, spaceId: run.spaceId, userId: run.userId },
+    select: { ticketId: true, ticket: { select: { managedVersion: true, parentTicketId: true } } },
+  });
+  if (linked?.ticket?.managedVersion && linked.ticketId) {
+    if (linked.ticket.parentTicketId)
+      await deps.prisma.$transaction((tx) =>
+        recordManagedChildOutcomeInTransaction(tx, {
+          spaceId: run.spaceId,
+          runId: run.id,
+          ticketId: linked.ticketId!,
+          payload: { text: clampBotMessage(text), intent },
+        }),
+      );
+    await markBotOutcomeReturned(deps.prisma, run.id);
+    await reconcileManagedWorkEvents(deps, { spaceId: run.spaceId });
+    return true;
+  }
   const source = await loadBotMessageContext(deps.prisma, run.sourceMessageId);
   if (!source) {
     await markBotOutcomeReturned(deps.prisma, run.id);

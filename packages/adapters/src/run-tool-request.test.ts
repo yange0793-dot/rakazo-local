@@ -21,7 +21,7 @@ function ownBotUpdateCall() {
     source: { ownerStartedRun: true },
     state: { tainted: true, earlierAttempt: Promise.resolve(false) },
     trust: {
-      loadAutoReviewPreference: async () => ({ enabled: true, skipApprovals: false }),
+      loadAutoReviewPreference: async () => ({ mode: "auto" }),
       receivedOutsideMessage: async () => false,
     },
     secrets: [],

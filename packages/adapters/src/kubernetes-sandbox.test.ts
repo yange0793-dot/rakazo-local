@@ -878,7 +878,7 @@ describe("KubernetesSandboxProvider", () => {
       { path: "bin/tool", content: Buffer.from("x"), executable: true },
       context,
     );
-    expect(String(exec.mock.calls[0]?.[3])).toContain('mv -f -- "$temporary" "$target"');
+    expect(String(exec.mock.calls[0]?.[3])).toContain('mv -fT -- "$temporary" "$target"');
     expect(String(exec.mock.calls[0]?.[3])).toContain("700");
     await provider.writeFile(computer, { path: "data", content: Buffer.from("x") }, context);
     expect(String(exec.mock.calls[1]?.[3])).toContain("600");

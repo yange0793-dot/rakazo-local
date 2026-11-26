@@ -25,21 +25,32 @@ class Child:
             bufsize=1,
         )
         self.requests = []
+        self._stderr = ""
+        self.stderr_reader = threading.Thread(target=self._drain_stderr)
+        self.stderr_reader.start()
         self.timer = threading.Timer(60, self.proc.kill)
         self.timer.start()
 
+    def _drain_stderr(self):
+        assert self.proc.stderr is not None
+        with self.proc.stderr:
+            self._stderr = self.proc.stderr.read()
+
     def run(self, request, allow_removals=False):
         assert self.proc.stdin is not None
+        assert self.proc.stdout is not None
         frame = {"type": "extract", "request": request}
         if allow_removals:
             frame["allowRemovals"] = True
-        self.proc.stdin.write(json.dumps(frame, ensure_ascii=False) + "\n")
-        self.proc.stdin.flush()
         try:
+            self.proc.stdin.write(json.dumps(frame, ensure_ascii=False) + "\n")
+            self.proc.stdin.flush()
             while True:
                 line = self.proc.stdout.readline()
                 if not line:
-                    return None
+                    raise AssertionError(
+                        f"Extractor exited without a protocol event ({self.proc.wait()})"
+                    )
                 event = json.loads(line)
                 if event.get("type") == "completion":
                     self.requests.append(event["request"])
@@ -55,14 +66,16 @@ class Child:
                     continue
                 return event
         finally:
-            self.timer.cancel()
-            self.proc.stdin.close()
-            self.proc.wait(timeout=20)
-            assert self.proc.stderr is not None
-            self._stderr = self.proc.stderr.read()
-            self.proc.stderr.close()
-            if self.proc.stdout is not None:
+            try:
+                self.proc.stdin.close()
+                self.proc.wait(timeout=20)
+            finally:
+                if self.proc.poll() is None:
+                    self.proc.kill()
+                    self.proc.wait()
+                self.timer.cancel()
                 self.proc.stdout.close()
+                self.stderr_reader.join()
 
     def stderr(self):
         return self._stderr
@@ -295,6 +308,8 @@ class LangMemExtractorTest(unittest.TestCase):
         self.assertEqual(event["type"], "error")
         self.assertEqual(child.proc.returncode, 1)
         self.assertIn("TransportFailure", child.stderr())
+        self.assertEqual(event["message"], "TransportFailure")
+        self.assertEqual(len(child.requests), 1)
 
     def test_forgotten_evidence_is_context_only_and_kept_out_of_existing(self):
         child = Child(lambda event, round_number: nothing_reply())

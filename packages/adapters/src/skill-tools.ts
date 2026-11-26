@@ -152,9 +152,9 @@ export async function skillReadFromTool(
   const wanted = input.file?.trim().replace(/^\.\//, "");
   if (wanted) {
     // Only exact stored paths resolve, so no path can reach outside the skill.
-    const text = files[wanted];
-    if (text === undefined) return { error: `No file "${wanted}" in this skill.`, files: paths };
-    return { name: skill.name, file: wanted, content: text };
+    if (!Object.hasOwn(files, wanted))
+      return { error: `No file "${wanted}" in this skill.`, files: paths };
+    return { name: skill.name, file: wanted, content: files[wanted] };
   }
   return {
     name: skill.name,

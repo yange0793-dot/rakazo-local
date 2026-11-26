@@ -152,6 +152,15 @@ describe("client monitoring contract", () => {
     );
   });
 
+  it("redacts alphabetic shared page tokens in HTTP breadcrumbs", () => {
+    const token = "a".repeat(43);
+    const breadcrumb = sanitizeMonitoringBreadcrumb({
+      category: "fetch",
+      data: { url: `https://app.example.com/api/v1/pages/shared/${token}` },
+    });
+    expect(breadcrumb?.data).toEqual({ url: "/api/v1/pages/shared/:id" });
+  });
+
   it("keeps a shared page's link out of reported error text", () => {
     const token = "Zm9vYmFyZm9vYmFyZm9vYmFyZm9vYmFyZm9vYmFyZm9";
     const error = new Error(`Could not load https://app.example.com/p/plan-${token}`);

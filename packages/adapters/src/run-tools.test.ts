@@ -52,7 +52,7 @@ function dispatchContext(tainted: boolean) {
     runId: "run-1",
     state: { tainted, handedOff: false, ownerSettingsRefused: false },
     trust: {
-      loadAutoReviewPreference: async () => ({ enabled: true, skipApprovals: false }),
+      loadAutoReviewPreference: async () => ({ mode: "auto" }),
       receivedOutsideMessage: async () => false,
     },
     tools: {

@@ -681,16 +681,31 @@ function clearTransaction(options: {
       updateMany: vi.fn(async () => ({ count: 0 })),
     },
     externalEffect: { deleteMany: vi.fn(async () => ({ count: 0 })) },
+    ticket: {
+      findMany: vi.fn(async () => []),
+      updateMany: vi.fn(async () => ({ count: 0 })),
+    },
+    workEvent: { updateMany: vi.fn(async () => ({ count: 0 })) },
+    externalAgentExecution: {
+      findMany: vi.fn(async () => []),
+      updateMany: vi.fn(async () => ({ count: 0 })),
+    },
     thread: {
       updateMany: vi.fn(async () => ({ count: 0 })),
       findMany: vi.fn(async () => options.helperThreads),
       update: vi
         .fn()
-        .mockResolvedValueOnce({ nextMessageSeq: 5, historyCompactionGeneration: 0 })
+        .mockResolvedValueOnce({
+          nextMessageSeq: 5,
+          historyCompactionGeneration: 0,
+          userId: "user-1",
+        })
         .mockResolvedValue({ nextEventSeq: 1 }),
     },
     run: {
-      findMany: vi.fn(async () => options.activeRuns),
+      findMany: vi.fn(async ({ where }: { where: { ticketId?: unknown } }) =>
+        where.ticketId ? [] : options.activeRuns,
+      ),
       updateManyAndReturn: vi.fn(async ({ where }: { where: { id: { in: string[] } } }) =>
         where.id.in.map((id) => ({ id })),
       ),
@@ -739,13 +754,14 @@ describe("clearThread with background helpers", () => {
 
     // The chat's own runs and the helpers it started are ended together.
     expect(tx.run.findMany).toHaveBeenNthCalledWith(
-      1,
+      2,
       expect.objectContaining({
         where: {
           spaceId: "space-1",
           OR: [
             { threadId: "thread-parent", botId: "bot-1" },
             { trigger: "helper", sourceMessage: { threadId: "thread-parent" } },
+            { id: { in: [] } },
           ],
           status: { in: ["queued", "leased", "running", "waiting_input", "waiting_takeover"] },
         },
@@ -795,12 +811,13 @@ describe("clearThread with background helpers", () => {
     ).resolves.toMatchObject({ cancelledRunIds: ["group-run", "group-helper-run"] });
 
     expect(tx.run.findMany).toHaveBeenNthCalledWith(
-      1,
+      2,
       expect.objectContaining({
         where: expect.objectContaining({
           OR: [
             { threadId: "thread-group" },
             { trigger: "helper", sourceMessage: { threadId: "thread-group" } },
+            { id: { in: [] } },
           ],
         }),
       }),

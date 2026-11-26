@@ -1,5 +1,10 @@
 import { createHash } from "node:crypto";
-import type { AgentRunRequest, ComputerRef, SemanticMemoryProvider } from "@rakazo/adapter-kit";
+import type {
+  AgentRunRequest,
+  AgentRuntimeEvent,
+  ComputerRef,
+  SemanticMemoryProvider,
+} from "@rakazo/adapter-kit";
 import { DEFAULT_CONTEXT_STRATEGY, runContinueJob } from "@rakazo/adapter-kit";
 import type { MessageBlock, RunStatus } from "@rakazo/contracts";
 import { disabledBuiltinToolSet } from "@rakazo/contracts";
@@ -37,6 +42,7 @@ import {
   loadRunTurnCheckpoint,
   parseComputerMode,
   RunHistoryWriteError,
+  readManagedInputCheckpoint,
   readRunTimingFields,
   recordLessonUse,
   recordUsage,
@@ -111,8 +117,12 @@ import {
   personSpeaker,
 } from "./history-speakers.js";
 import { buildLessonNotes } from "./lesson-notes.js";
+import { getManagedCoordinationWait } from "./managed-work.js";
+import { admitManagedRun } from "./managed-work-admission.js";
+import { settleManagedWorkEventsForRun } from "./managed-work-events.js";
+import { resumeManagedExternalInput } from "./managed-work-input.js";
 import { createMediaGenerationProvider } from "./media-generation-factory.js";
-import { loadAgentMemoryContext } from "./memory-context.js";
+import { buildAgentMemoryPrompt, readAgentMemory } from "./memory-context.js";
 import { resolveMemberMainModel, selectConfiguredModel } from "./model-roles.js";
 import {
   findConnectedModelCredential,
@@ -259,6 +269,7 @@ import {
 import { loadAgentTicketContext } from "./ticket-context.js";
 import {
   createTicketFinalizationEvidence,
+  managedTicketEvidenceReader,
   ticketFinalizationEvents,
   ticketFinalizationRequest,
 } from "./ticket-finalization.js";
@@ -365,6 +376,7 @@ export function createRunExecutor(executorDeps: ExecutorDeps) {
         endRunConnectorState(runId);
         return;
       }
+      if (!(await admitManagedRun(deps, run))) return;
       // Every way work reaches a bot ends here, so a deactivated account's run stops before it starts.
       if (await accountDeactivated(deps.prisma, run.userId)) {
         // Nothing cancelled: the owner is back (or the run already ended), so carry on.
@@ -563,6 +575,21 @@ export function createRunExecutor(executorDeps: ExecutorDeps) {
         // integration and computer setup must not occupy a queue dispatch slot.
         onRunStarted?.();
         dispatchHandedOff = Boolean(onRunStarted);
+        if (readManagedInputCheckpoint(run.checkpoint)) {
+          const externalInput = await resumeManagedExternalInput(deps, {
+            spaceId: run.spaceId,
+            runId,
+            attemptId: attempt.id,
+            leaseOwner: workerId,
+            leaseFence: fence,
+            signal: deps.shutdownSignal,
+          });
+          if (externalInput.handled) {
+            stopHeartbeatAfterCompletion();
+            return;
+          }
+          throw new Error("The external input checkpoint is unavailable. The answer was not sent.");
+        }
         // A saved computer turn owns both identities. Resolve them before consulting
         // today's main selection, whose connection may have changed while paused.
         let turnCheckpoint: string | undefined;
@@ -747,6 +774,7 @@ export function createRunExecutor(executorDeps: ExecutorDeps) {
                 run,
                 modelChoice.modelProvider,
                 modelChoice.modelId,
+                { credentialId: modelChoice.modelCredentialId },
               )
             : null;
         runAbortController = new AbortController();
@@ -963,7 +991,7 @@ export function createRunExecutor(executorDeps: ExecutorDeps) {
         const [
           discovered,
           currentTurnImages,
-          memoryContext,
+          memoryDocuments,
           scratchpadContext,
           ticketContext,
           automaticRecall,
@@ -971,9 +999,7 @@ export function createRunExecutor(executorDeps: ExecutorDeps) {
         ] = await Promise.all([
           discoveredPromise,
           loadCurrentTurnImages(deps, turnBlocks, context),
-          nonOwnerChatRun
-            ? Promise.resolve("")
-            : loadAgentMemoryContext(deps.memory, bot.id, context),
+          nonOwnerChatRun ? [] : readAgentMemory(deps.memory, bot.id, context),
           nonOwnerChatRun
             ? Promise.resolve("")
             : loadAgentScratchpadContext(deps, {
@@ -1049,7 +1075,8 @@ export function createRunExecutor(executorDeps: ExecutorDeps) {
           modelChoice.modelProvider === runDeployment?.provider ||
           modelChoice.modelProvider === runtimeFallback?.provider;
         const pinError =
-          !pinnedComputerModels && run.modelPinned && !deploymentServesModel
+          !pinnedComputerModels &&
+          (modelChoice.modelCredentialId || (run.modelPinned && !deploymentServesModel))
             ? pinnedModelCredentialError(modelChoice, overrideCredential)
             : undefined;
         const selected = pinnedComputerModels
@@ -1111,6 +1138,7 @@ export function createRunExecutor(executorDeps: ExecutorDeps) {
           { settings, deployment: runDeployment },
           scripted,
           registerRunSecrets,
+          Boolean(modelChoice.modelCredentialId),
         );
         const started = await startRunModel(
           deps,
@@ -1119,6 +1147,12 @@ export function createRunExecutor(executorDeps: ExecutorDeps) {
             provider: selectedProvider,
             id: selectedModelId,
             credential: selected.credential,
+            pinnedConnection: Boolean(
+              modelChoice.modelCredentialId ||
+                (!hasModelOverride &&
+                  main?.credentialId &&
+                  selected.credential?.id === main.credentialId),
+            ),
             thinkingLevel: selected.thinkingLevel,
           },
           pinnedComputerModels?.main,
@@ -1142,7 +1176,11 @@ export function createRunExecutor(executorDeps: ExecutorDeps) {
         if (!run.modelPinned) {
           await deps.prisma.run.updateMany({
             where: { id: runId, status: "running", leaseOwner: workerId, leaseFence: fence },
-            data: { modelProvider: runModelProvider, modelId: runModelId },
+            data: {
+              modelProvider: runModelProvider,
+              modelId: runModelId,
+              modelCredentialId: modelChoice.modelCredentialId ? (credential?.id ?? null) : null,
+            },
           });
         }
 
@@ -1448,6 +1486,7 @@ export function createRunExecutor(executorDeps: ExecutorDeps) {
         let userComputerShell = false;
         let userComputerScreen = false;
         if (
+          deps.sandbox.describe().id !== "desktop" &&
           userComputerOwnerId &&
           deps.userDevices &&
           !disabledBuiltinTools.has(USER_COMPUTER_SHELL_TOOL)
@@ -1600,6 +1639,10 @@ export function createRunExecutor(executorDeps: ExecutorDeps) {
           pageBrowserAllowed && browserCapabilities.requiresActionApproval
             ? "Page actions follow the user's Ask/Auto/Never approval policy. Purchases keep their explicit confirmation requirement. A rejected action stays rejected; do not switch to the shell or another tool to bypass it."
             : undefined;
+        const livePageInstruction =
+          pageBrowserAllowed && browser.readFrame && !disabledBuiltinTools.has("save_page")
+            ? 'To open Gemini inside Rakazo Pages, navigate to https://gemini.google.com/app with browser_navigate, confirm the tab with browser_snapshot, then use save_page to create a private page titled exactly "Gemini" (or update your existing Gemini page). Minimal source is `export default function App(){return <Page title="Gemini" />}`. The app displays the live browser tab in that page. The view is read-only; browser actions run through the browser tools. A browser navigation alone does not create a Rakazo page. Do not navigate to Rakazo itself for this task. Link the saved page in your reply.'
+            : undefined;
         const computerInstruction = [
           "Use the computer only when the task needs files, commands, a browser, or an installed application. Answer directly from the conversation when sufficient; use connected tools for app data. A website with no connected app is still yours to use in the computer's browser, now and in scheduled routines, so a missing connection alone is never a reason to decline. Do not inspect the computer just to prepare for an unrelated task. If what you are about to buy, send or submit differs from what the user confirmed, such as a changed item or total, show the difference and confirm again first.",
           hostInstruction
@@ -1609,6 +1652,7 @@ export function createRunExecutor(executorDeps: ExecutorDeps) {
               : baseComputerInstruction,
           hostBrowserInstruction,
           browserApprovalInstruction,
+          livePageInstruction,
           diskNoteInstruction(storedComputer),
         ]
           .filter(Boolean)
@@ -1901,19 +1945,14 @@ export function createRunExecutor(executorDeps: ExecutorDeps) {
           getLogger().info("lesson context selected", {
             "run.id": runId,
             "memory.matched": lessonRecall.value.length,
-            "memory.shown": lessonNotes.shown.length,
+            "memory.selected": lessonNotes.shown.length,
             "memory.omitted": lessonNotes.omitted.map((note) => note.reason),
             "memory.bytes": lessonNotes.bytes,
           });
         }
-        if (lessonNotes.shown.length > 0) {
-          await recordLessonUse(deps.prisma, {
-            spaceId: run.spaceId,
-            botId: bot.id,
-            runId,
-            lessons: lessonNotes.shown,
-          });
-        }
+        // Pi resumes from the saved messages. The opening call already accounts
+        // for their exposure and the newly selected lessons are absent from them.
+        const initialLessons = turnCheckpoint || scripted ? [] : lessonNotes.shown;
         const recallStage = createRunStageRecall(
           {
             provider: semanticMemory,
@@ -1956,7 +1995,7 @@ export function createRunExecutor(executorDeps: ExecutorDeps) {
           lateRoutineNote,
           sharedSpaceNote,
           recalledMemory || undefined,
-          lessonNotes.text,
+          turnCheckpoint ? undefined : lessonNotes.text,
           recoveryLessons,
         ]
           .filter(Boolean)
@@ -2108,6 +2147,7 @@ export function createRunExecutor(executorDeps: ExecutorDeps) {
           let usageOperationId = runId;
           let configurationRecorded = false;
           let configurationPublication: Promise<void> | undefined;
+          let initialLessonDelivery: Promise<void> | undefined;
           let modelChangeSequence = 0;
           let progressBoundary: string | undefined;
           const appliedComponentRevisions = new Set<string>();
@@ -2119,6 +2159,7 @@ export function createRunExecutor(executorDeps: ExecutorDeps) {
             routineId: run.routineId,
             sourceMessageId: run.sourceMessageId,
             onUsage: async (event) => {
+              await observeInitialLessonDelivery(event);
               await recordUsage(deps.prisma, event, {
                 spaceId: run.spaceId,
                 botId: bot.id,
@@ -2158,9 +2199,8 @@ export function createRunExecutor(executorDeps: ExecutorDeps) {
                 ? [groupContext, GROUP_UNADDRESSED_REPLY_GUIDANCE].filter(Boolean).join("\n")
                 : groupContext,
               messagingContext,
-              redactedMemoryContext: memoryContext
-                ? redactSecrets(memoryContext, runSecrets)
-                : undefined,
+              redactedMemoryContext: buildAgentMemoryPrompt(memoryDocuments, undefined, runSecrets)
+                .text,
               redactedScratchpadContext: scratchpadContext
                 ? redactSecrets(scratchpadContext, runSecrets)
                 : undefined,
@@ -2173,6 +2213,7 @@ export function createRunExecutor(executorDeps: ExecutorDeps) {
                 contextStrategy !== "current" &&
                 tools.some((tool) => tool.name === "search_history"),
               semanticMemoryEnabled: tools.some((tool) => tool.name === "save_memory"),
+              webProviderId: web.describe().id,
               computerInstruction,
               pageBrowserAllowed,
               taskCatalogInstruction,
@@ -2299,7 +2340,21 @@ export function createRunExecutor(executorDeps: ExecutorDeps) {
             executeTool: scripted
               ? undefined
               : async (name, args, executionId, route, observer) => {
-                  let result = await applyTool(ctx, name, args, executionId, route, observer);
+                  // Automatic managed delivery uses assignment authority through commit.
+                  const deliveryContext =
+                    usageOperationId !== runId &&
+                    run.workControlEpoch != null &&
+                    name === "ticket_update"
+                      ? { ...ctx, source: { ...ctx.source, ownerAuthoredRun: false } }
+                      : ctx;
+                  let result = await applyTool(
+                    deliveryContext,
+                    name,
+                    args,
+                    executionId,
+                    route,
+                    observer,
+                  );
                   if (
                     name === "skill_read" &&
                     args.taughtSkillId &&
@@ -2402,7 +2457,7 @@ export function createRunExecutor(executorDeps: ExecutorDeps) {
                     runSecrets.push(...values),
                   ),
             onToolCompleted: (completion) => {
-              finalizationEvidence?.observe(completion);
+              if (usageOperationId === runId) finalizationEvidence?.observe(completion);
               if (!completion.paused)
                 progressBoundary = createHash("sha256")
                   .update(completion.executionId)
@@ -2637,10 +2692,7 @@ export function createRunExecutor(executorDeps: ExecutorDeps) {
                         revisionId: revision.id,
                       }))
                     : null,
-                  shownLessons: lessonNotes.shown.map(({ id, revision }) => ({
-                    lessonId: id,
-                    revision,
-                  })),
+                  shownLessons: turnCheckpoint || initialLessons.length > 0 ? null : [],
                 }
               : undefined;
           const publishConfiguration = (): Promise<void> => {
@@ -2657,10 +2709,48 @@ export function createRunExecutor(executorDeps: ExecutorDeps) {
             });
             return configurationPublication;
           };
+          const observeInitialLessonDelivery = (
+            event: Extract<AgentRuntimeEvent, { type: "usage" }>,
+          ): Promise<void> | undefined => {
+            if (
+              initialLessons.length === 0 ||
+              usageOperationId !== runId ||
+              event.agentId ||
+              (event.operationKind &&
+                event.operationKind !== "answer" &&
+                event.operationKind !== "retrieval") ||
+              event.costSource === "provider-rejection" ||
+              // A failed setup or an undispatched request may emit unknown usage.
+              !(
+                event.providerRequestId ||
+                (event.inputTokens ?? 0) > 0 ||
+                (event.cacheReadTokens ?? 0) > 0 ||
+                (event.cacheWriteTokens ?? 0) > 0 ||
+                (event.outputTokens ?? 0) > 0
+              )
+            ) {
+              return;
+            }
+            initialLessonDelivery ??= (async () => {
+              await recordLessonUse(deps.prisma, {
+                spaceId: run.spaceId,
+                botId: bot.id,
+                runId,
+                lessons: initialLessons,
+              });
+              if (configurationInput && !configurationPublication) {
+                configurationInput.shownLessons = initialLessons.map(({ id, revision }) => ({
+                  lessonId: id,
+                  revision,
+                }));
+                await publishConfiguration();
+              }
+            })();
+            return initialLessonDelivery;
+          };
           if (
             (ticketReceiptsEnabled() && deps.ticketBoardEnabled && run.ticketId) ||
-            pinned.length > 0 ||
-            lessonNotes.shown.length > 0
+            pinned.length > 0
           ) {
             await publishConfiguration();
           }
@@ -2676,7 +2766,19 @@ export function createRunExecutor(executorDeps: ExecutorDeps) {
             runtimeRequest.tools = prepared.tools;
           }
           const runtimeEvents = deps.runtime.run(runtimeRequest, runtimeContext);
-          if (await consumeRunEvents(ctx, runtimeEvents)) return;
+          async function* withLessonDelivery() {
+            for await (const event of runtimeEvents) {
+              if (event.type === "usage") await observeInitialLessonDelivery(event);
+              yield event;
+            }
+          }
+          if (
+            await consumeRunEvents(
+              ctx,
+              initialLessons.length ? withLessonDelivery() : runtimeEvents,
+            )
+          )
+            return;
           await configurationPublication;
           if (yieldedToWaitingUser) {
             // Queued again with no retry timer; releasing the computer starts the person's run.
@@ -2686,11 +2788,27 @@ export function createRunExecutor(executorDeps: ExecutorDeps) {
             return;
           }
           if (await interruptedByShutdown()) return;
+          const managedRun = await deps.prisma.run.findUnique({
+            where: { id: run.id },
+            select: { ticketId: true, workControlEpoch: true, workRequirementsVersion: true },
+          });
+          if (managedRun?.workControlEpoch !== null && managedRun?.ticketId) {
+            run.ticketId = managedRun.ticketId;
+            run.workControlEpoch = managedRun.workControlEpoch;
+            run.workRequirementsVersion = managedRun.workRequirementsVersion;
+          }
+          const coordinationWait =
+            run.ticketId && ticketReceiptsEnabled()
+              ? await getManagedCoordinationWait(deps.prisma, {
+                  spaceId: run.spaceId,
+                  runId: run.id,
+                })
+              : undefined;
           if (run.ticketId && deps.ticketBoardEnabled) {
             await saveRunTicketPendingCall(ctx, null);
-            await runTicketProgressCheck(ctx);
+            if (!coordinationWait?.waiting) await runTicketProgressCheck(ctx);
           }
-          if (ticketReceiptsEnabled() && run.ticketId) {
+          if (ticketReceiptsEnabled() && run.ticketId && !coordinationWait?.waiting) {
             const work = await deps.prisma.ticket.findFirst({
               where: {
                 id: run.ticketId,
@@ -2698,12 +2816,19 @@ export function createRunExecutor(executorDeps: ExecutorDeps) {
                 createdByUserId: run.userId,
                 originKey: { not: null },
               },
-              select: { id: true, originThreadId: true, originRunId: true, assigneeBotId: true },
+              select: {
+                id: true,
+                originThreadId: true,
+                originRunId: true,
+                assigneeBotId: true,
+                managedVersion: true,
+                fileDeliveryRequirements: true,
+              },
             });
             if (
               work?.originThreadId &&
               work.assigneeBotId === bot.id &&
-              (run.trigger === "tickets" || work.originRunId === run.id)
+              (run.trigger === "tickets" || work.originRunId === run.id || work.managedVersion > 0)
             ) {
               const delivered = () =>
                 deps.prisma.message.findFirst({
@@ -2717,10 +2842,30 @@ export function createRunExecutor(executorDeps: ExecutorDeps) {
                 });
               if (!(await delivered())) {
                 const draft = state.reply.assembled || state.reply.lastDiscardedMidTurnNarration;
+                const managedEvidence =
+                  work.managedVersion > 0 && !nonOwnerChatRun
+                    ? managedTicketEvidenceReader(
+                        deps.prisma,
+                        run,
+                        {
+                          ticketId: work.id,
+                          workerId,
+                          fence,
+                          secrets: runSecrets,
+                          context: runtimeContext,
+                          controller: ctx.runtimeAbortController,
+                        },
+                        finalizationEvidence,
+                        deps.connector,
+                      )
+                    : undefined;
+                if (managedEvidence) await managedEvidence.requireActive();
                 const deliveryRequest = ticketFinalizationRequest(runtimeRequest, {
                   ticketId: work.id,
                   evidence: finalizationEvidence?.text() ?? "No observations were retained.",
+                  managedEvidence,
                   draft,
+                  hasFileRequirements: work.fileDeliveryRequirements != null,
                 });
                 usageOperationId = `${runId}:ticket-finalize`;
                 getLogger().info("run.phase.started", {
@@ -2742,6 +2887,12 @@ export function createRunExecutor(executorDeps: ExecutorDeps) {
             }
           }
           await completeRun(ctx);
+          if (run.workControlEpoch !== null && run.ticketId) {
+            await settleManagedWorkEventsForRun(deps.prisma, {
+              spaceId: run.spaceId,
+              runId: run.id,
+            }).catch((error) => getLogger().error("managed work settlement", error));
+          }
         } catch (turnError) {
           if (await interruptedByShutdown()) return;
           let caughtError = turnError;

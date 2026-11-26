@@ -98,6 +98,7 @@ describe("spawned bot creation", () => {
       {
         prisma,
         jobs: { enqueue } as unknown as JobPublisher,
+        secretStore: { load: vi.fn() },
       },
       {
         spawnedBy: {
@@ -147,6 +148,7 @@ describe("spawned bot creation", () => {
       {
         prisma: {} as PrismaClient,
         jobs: { enqueue: vi.fn() } as unknown as JobPublisher,
+        secretStore: { load: vi.fn() },
       },
       {
         spawnedBy: {
@@ -284,6 +286,7 @@ describe("destroyBot", () => {
   it("retires the bot's memory scope inside the deleting transaction", async () => {
     const retireScope = vi.fn().mockResolvedValue(undefined);
     const deleteBot = vi.fn().mockResolvedValue({});
+    const detachTicketOrigins = vi.fn().mockResolvedValue({ count: 2 });
     let txClient: Record<string, unknown> | undefined;
     const transaction = vi.fn(async (callback: (tx: unknown) => Promise<unknown>) => {
       txClient = {
@@ -306,6 +309,7 @@ describe("destroyBot", () => {
         },
         computerExecutionLease: { deleteMany: vi.fn().mockResolvedValue({ count: 0 }) },
         computer: { updateMany: vi.fn().mockResolvedValue({ count: 0 }) },
+        ticket: { updateMany: detachTicketOrigins },
         botDeletion: { create: vi.fn().mockResolvedValue({}) },
         bot: { delete: deleteBot },
       };
@@ -343,6 +347,16 @@ describe("destroyBot", () => {
     expect(retireScope.mock.invocationCallOrder[0]!).toBeLessThan(
       deleteBot.mock.invocationCallOrder[0]!,
     );
+    expect(detachTicketOrigins).toHaveBeenCalledWith({
+      where: {
+        spaceId: "workspace-1",
+        originMessage: { thread: { botId: "bot-1" } },
+      },
+      data: { originMessageId: null },
+    });
+    expect(detachTicketOrigins.mock.invocationCallOrder[0]!).toBeLessThan(
+      deleteBot.mock.invocationCallOrder[0]!,
+    );
   });
 
   it("aborts the deletion from a failed semantic retirement before removing the bot", async () => {
@@ -369,6 +383,7 @@ describe("destroyBot", () => {
         },
         computerExecutionLease: { deleteMany: vi.fn().mockResolvedValue({ count: 0 }) },
         computer: { updateMany: vi.fn().mockResolvedValue({ count: 0 }) },
+        ticket: { updateMany: vi.fn().mockResolvedValue({ count: 0 }) },
         botDeletion: { create: vi.fn().mockResolvedValue({}) },
         bot: { delete: deleteBot },
       }),
@@ -427,6 +442,7 @@ describe("destroyBot", () => {
         computerExecutionLease: { deleteMany: vi.fn().mockResolvedValue({ count: 0 }) },
         computer: { updateMany: vi.fn().mockResolvedValue({ count: 0 }) },
         $executeRaw: vi.fn().mockResolvedValue(0),
+        ticket: { updateMany: vi.fn().mockResolvedValue({ count: 0 }) },
         botDeletion: { create: vi.fn().mockResolvedValue({}) },
         bot: { delete: vi.fn().mockResolvedValue({}) },
       });
@@ -470,6 +486,7 @@ describe("destroyBot", () => {
     const retireScope = vi.fn().mockResolvedValue(undefined);
     const createDeletion = vi.fn().mockResolvedValue({});
     const deleteBot = vi.fn().mockResolvedValue({});
+    const detachTicketOrigins = vi.fn().mockResolvedValue({ count: 2 });
     const executeRaw = vi.fn().mockResolvedValue(1);
     const releaseComputers = vi.fn().mockResolvedValue({ count: 1 });
     const removeArtifact = vi.fn().mockResolvedValue(undefined);
@@ -494,6 +511,7 @@ describe("destroyBot", () => {
         computerExecutionLease: { deleteMany: vi.fn().mockResolvedValue({ count: 0 }) },
         computer: { updateMany: releaseComputers },
         $executeRaw: executeRaw,
+        ticket: { updateMany: detachTicketOrigins },
         botDeletion: { create: createDeletion },
         bot: { delete: deleteBot },
       }),
@@ -534,6 +552,16 @@ describe("destroyBot", () => {
     // Keeping memories must keep the semantic scope too, not only the Markdown documents.
     expect(retireScope).not.toHaveBeenCalled();
     expect(transaction).toHaveBeenCalledOnce();
+    expect(detachTicketOrigins).toHaveBeenCalledWith({
+      where: {
+        spaceId: "workspace-1",
+        originMessage: { thread: { botId: "bot-1" } },
+      },
+      data: { originMessageId: null },
+    });
+    expect(detachTicketOrigins.mock.invocationCallOrder[0]!).toBeLessThan(
+      deleteBot.mock.invocationCallOrder[0]!,
+    );
     expect(releaseComputers).toHaveBeenCalledWith({
       where: {
         OR: [{ controlBotId: "bot-1" }, { executionBotId: "bot-1" }],
@@ -651,6 +679,7 @@ describe("destroyBot", () => {
         computerExecutionLease: { deleteMany: vi.fn().mockResolvedValue({ count: 0 }) },
         computer: { updateMany: vi.fn().mockResolvedValue({ count: 0 }) },
         $executeRaw: vi.fn().mockResolvedValue(1),
+        ticket: { updateMany: vi.fn().mockResolvedValue({ count: 0 }) },
         botDeletion: { create: vi.fn().mockResolvedValue({}) },
         bot: { delete: vi.fn().mockResolvedValue({}) },
       }),
@@ -791,6 +820,7 @@ describe("destroyBot", () => {
         },
         computer: { updateMany: clearExecution },
         $executeRaw: vi.fn(),
+        ticket: { updateMany: vi.fn().mockResolvedValue({ count: 0 }) },
         botDeletion: { create: vi.fn() },
         bot: { delete: vi.fn() },
       }),
@@ -949,6 +979,7 @@ describe("destroyBot", () => {
           run: { findMany: vi.fn().mockResolvedValue([]) },
           computerExecutionLease: { deleteMany: vi.fn().mockResolvedValue({ count: 0 }) },
           computer: { updateMany: vi.fn().mockResolvedValue({ count: 0 }) },
+          ticket: { updateMany: vi.fn().mockResolvedValue({ count: 0 }) },
           botDeletion: { create: vi.fn().mockResolvedValue({}) },
           bot: { delete: vi.fn().mockResolvedValue({}) },
         }),
@@ -2688,6 +2719,7 @@ function deletionPrisma(team: { id: string }) {
       },
       computerExecutionLease: { deleteMany: vi.fn().mockResolvedValue({ count: 0 }) },
       computer: { updateMany: vi.fn().mockResolvedValue({ count: 0 }) },
+      ticket: { updateMany: vi.fn().mockResolvedValue({ count: 0 }) },
       botDeletion: { create: vi.fn().mockResolvedValue({}) },
       bot: { delete: vi.fn().mockResolvedValue({}) },
     }),

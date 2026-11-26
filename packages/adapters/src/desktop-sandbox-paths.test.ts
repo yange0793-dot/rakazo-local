@@ -44,4 +44,13 @@ describe("desktop sandbox path rules", () => {
     expect(normalizeDesktopWorkspacePath("/notes/result.txt", "win32")).toBe("notes/result.txt");
     expect(normalizeDesktopWorkspacePath("notes/result.txt", "linux")).toBe("notes/result.txt");
   });
+
+  it.each([
+    ["documents/report.txt", "documents/report.txt"],
+    ["documents\\report.txt", "documents/report.txt"],
+    ["documents//report.txt", "documents/report.txt"],
+    ["/documents/report.txt", "documents/report.txt"],
+  ])("normalizes %s to the spelling required by Windows archives", (requested, canonical) => {
+    expect(normalizeDesktopWorkspacePath(requested, "win32")).toBe(canonical);
+  });
 });

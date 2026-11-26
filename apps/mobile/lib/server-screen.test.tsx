@@ -14,6 +14,7 @@ import { hasUnsentSends } from "./thread-feedback";
 const server = vi.hoisted(() => ({
   base: "https://one.example.test",
   custom: false,
+  headers: {} as Record<string, string>,
   options: {} as Record<string, unknown>,
 }));
 const api = vi.hoisted(() => ({
@@ -89,7 +90,7 @@ vi.mock("./endpoint", async () => {
   };
 });
 vi.mock("./native", () => ({ useMobileTokens: () => ({}) }));
-vi.mock("./server-headers", () => ({ serverHeaders: () => ({}) }));
+vi.mock("./server-headers", () => ({ serverHeaders: () => server.headers }));
 vi.mock("./side-insets", () => ({ useSideInsets: () => ({}) }));
 vi.mock("./user-error", () => ({ errorText: (_: unknown, fallback: string) => fallback }));
 vi.mock("./unsent-sends", () => ({ unsentSendsRestored: vi.fn(async () => true) }));
@@ -104,6 +105,7 @@ let container: HTMLDivElement | undefined;
 beforeEach(() => {
   vi.clearAllMocks();
   server.custom = false;
+  server.headers = {};
   api.probe.mockImplementation(async (draft: string) => ({ ok: true, url: draft }));
   api.save.mockResolvedValue({ ok: true, url: "" });
   api.reset.mockResolvedValue({ ok: true, url: "" });
@@ -196,6 +198,14 @@ it("saves the same server without asking about unsent messages", async () => {
   await pressSave();
   expect(Alert.alert).not.toHaveBeenCalled();
   expect(api.save).toHaveBeenCalled();
+});
+
+it("keeps the previous server's headers out of the new server probe and save", async () => {
+  server.headers = { "x-proxy-access": "fixture" };
+  await renderServer("https://two.example.test");
+  await pressSave();
+  expect(api.probe).toHaveBeenCalledWith("https://two.example.test", expect.any(Function), {});
+  expect(api.save).toHaveBeenCalledWith("https://two.example.test", {});
 });
 
 it("asks before returning to the default server deletes unsent messages", async () => {

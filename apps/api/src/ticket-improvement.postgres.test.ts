@@ -2,6 +2,7 @@ import { createHash, randomUUID } from "node:crypto";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { createRouterClient } from "@orpc/server";
 import type { AgentRunRequest, BackgroundJob, JobPublisher } from "@rakazo/adapter-kit";
 import {
   createBackgroundJobHandlers,
@@ -26,6 +27,7 @@ import {
 } from "@rakazo/db";
 import { MarkdownMemoryStore } from "@rakazo/memory";
 import { describe, expect, it, vi } from "vitest";
+import * as taughtSkillRevisions from "../../../packages/adapters/src/taught-skill-revisions.js";
 import {
   getCurrentTaughtSkillRevision,
   listPinnedTaughtSkillRevisions,
@@ -40,6 +42,9 @@ import {
 } from "../../../packages/adapters/src/ticket-improvement.test-fixtures.js";
 import type { WorkImprovementComposition } from "../../../packages/adapters/src/work-improvement-compose.js";
 import { getOwnedArtifact } from "./artifacts.js";
+import type { RouterDeps } from "./router.js";
+import { createRouterContext } from "./routes/context.js";
+import { threadsRoutes } from "./routes/threads.js";
 import { resolveThreadTarget, sendThreadMessage } from "./thread-target.js";
 
 const pg =
@@ -48,7 +53,15 @@ const CORRECTION =
   "You checked installation but did not inspect the complete directory or confirm upload completion.";
 
 pg("ticket improvement through chat and background jobs (PostgreSQL)", () => {
-  it.each(["good", "bad", "recover"] as const)(
+  it.each([
+    "good",
+    "bad",
+    "recover",
+    "clear-proposal",
+    "clear-activation",
+    "clear-blob-retry",
+    "clear-new-blob",
+  ] as const)(
     "runs the complete offline pilot and retains the chosen revision (%s)",
     async (scenario) => {
       vi.stubEnv("TICKET_WORK_RECEIPTS", "true");
@@ -66,12 +79,7 @@ pg("ticket improvement through chat and background jobs (PostgreSQL)", () => {
         const actor = { spaceId, userId, email: address, isDeploymentOwner: false };
         await runAsTenant(actor, async () => {
           await prisma.$transaction((tx) =>
-            saveAutoReviewPreference(
-              tx,
-              actor,
-              { enabled: false },
-              { enabled: false, skipApprovals: false },
-            ),
+            saveAutoReviewPreference(tx, actor, { mode: "ask" }),
           );
           const workerBot = await createRepos(prisma).createBot(actor, {
             name: "Delivery checker",
@@ -131,6 +139,10 @@ pg("ticket improvement through chat and background jobs (PostgreSQL)", () => {
           let handledWhileRunning = false;
           let composerCalls = 0;
           let composerRequest: AgentRunRequest | undefined;
+          let atBarrier!: () => void;
+          let resume!: () => void;
+          const entered = new Promise<void>((resolve) => { atBarrier = resolve; });
+          const released = new Promise<void>((resolve) => { resume = resolve; });
           const proposedPlaybook = scenario === "bad" ? badDeliveryPlaybook : goodDeliveryPlaybook;
           const composedPlaybook =
             scenario === "bad"
@@ -257,13 +269,20 @@ pg("ticket improvement through chat and background jobs (PostgreSQL)", () => {
             }
             throw new Error("Unexpected offline task");
           });
-          runtime.proposal = {
-            kind: "candidate",
-            quote: CORRECTION,
-            playbook: proposedPlaybook,
-          };
+          runtime.proposal =
+            scenario === "clear-new-blob"
+              ? { kind: "skip", reason: "Synthetic review yields no change." }
+              : { kind: "candidate", quote: CORRECTION, playbook: proposedPlaybook };
           const run = runtime.run.bind(runtime);
           runtime.run = async function* (request, context) {
+            if (
+              (scenario === "clear-proposal" || scenario === "clear-new-blob") &&
+              request.runId.endsWith(":proposal")
+            ) {
+              expect(request.prompt).toContain(CORRECTION);
+              atBarrier();
+              await released;
+            }
             if (
               request.usageOperationKind !== "learning" ||
               request.runId.endsWith(":proposal") ||
@@ -370,6 +389,172 @@ pg("ticket improvement through chat and background jobs (PostgreSQL)", () => {
           correctionRunId = feedback.runId;
           const correction = await prisma.run.findUniqueOrThrow({ where: { id: correctionRunId } });
           expect(correction).toMatchObject({ ticketId, sourceMessageId: expect.any(String) });
+          if (
+            scenario === "clear-proposal" ||
+            scenario === "clear-activation" ||
+            scenario === "clear-blob-retry" ||
+            scenario === "clear-new-blob"
+          ) {
+            const activate = taughtSkillRevisions.activateTaughtSkillRevision;
+            const activation =
+              scenario === "clear-activation" || scenario === "clear-blob-retry"
+                ? vi.spyOn(taughtSkillRevisions, "activateTaughtSkillRevision").mockImplementation(
+                    async (...args) => {
+                      atBarrier();
+                      await released;
+                      return activate(...args);
+                    },
+                  )
+                : undefined;
+            const reviewRows = () => prisma.artifact.findMany({
+              where: { spaceId, runId: assignedRunId, clientNonce: { startsWith: "ticket-improvement:" } },
+              orderBy: { id: "asc" },
+            });
+            const receiptFile = await prisma.artifact.findFirstOrThrow({
+              where: { spaceId, runId: assignedRunId, name: `work-${ticketId}.json` },
+            });
+            const artifactContext = {
+              spaceId, userId, botId, traceId: "clear-fixture", operationId: "clear-fixture",
+              signal: new AbortController().signal,
+            };
+            const receiptBytes = await artifacts.get(receiptFile.storageKey, artifactContext);
+            const client = createRouterClient(
+              threadsRoutes(createRouterContext({
+                ...base, memoryProviders: { resolve: async () => null }, env: { agentRuntime: "scripted" },
+              } as unknown as RouterDeps)),
+              { context: { actor } },
+            );
+            const reviewing = handlers["harness.reflect"]({ runId: assignedRunId, auto: true })
+              .then(() => ({ error: null }), (error: unknown) => ({ error }));
+            let before: Awaited<ReturnType<typeof reviewRows>> = [];
+            try {
+              await Promise.race([
+                entered,
+                reviewing.then(({ error }) => { throw error ?? new Error("Review passed the barrier"); }),
+              ]);
+              before = await reviewRows();
+              const checkpoint = before.find((row) => row.clientNonce?.endsWith(":source"))!;
+              expect(checkpoint).toBeDefined();
+              expect(new TextDecoder().decode(
+                await artifacts.get(checkpoint.storageKey, artifactContext),
+              )).toContain(CORRECTION);
+              if (activation) {
+                expect(before.some((row) => row.clientNonce?.endsWith(":comparison"))).toBe(true);
+                expect(activation).toHaveBeenCalledOnce();
+              }
+              // Simulate an unrelated version on a legacy checkpoint's artifact family.
+              const unrelated = await prisma.artifact.create({
+                data: {
+                  spaceId, userId, botId: checkpoint.botId, name: checkpoint.name,
+                  mimeType: receiptFile.mimeType, hash: receiptFile.hash, size: receiptFile.size,
+                  storageKey: receiptFile.storageKey, rootArtifactId: checkpoint.id, version: 2,
+                },
+              });
+              if (scenario === "clear-blob-retry") {
+                const [removed, stillPresent] = before;
+                expect(removed).toBeDefined();
+                expect(stillPresent).toBeDefined();
+                const threadBefore = await prisma.thread.findUniqueOrThrow({
+                  where: { id: originTarget.threadId },
+                  select: { historyCompactionGeneration: true, nextMessageSeq: true },
+                });
+                const messagesBefore = await prisma.message.count({
+                  where: { threadId: originTarget.threadId },
+                });
+                const remove = artifacts.remove.bind(artifacts);
+                const fault = vi.spyOn(artifacts, "remove").mockImplementation(async (key, context) => {
+                  if (key === stillPresent!.storageKey)
+                    throw new Error("Synthetic review blob removal failure");
+                  await remove(key, context);
+                });
+                try {
+                  await expect(client.threads.clear({ botId })).rejects.toMatchObject({
+                    code: "SERVICE_UNAVAILABLE",
+                  });
+                  expect(await reviewRows()).toEqual(before);
+                  expect(await prisma.message.count({ where: { threadId: originTarget.threadId } }))
+                    .toBe(messagesBefore);
+                  expect(await prisma.thread.findUniqueOrThrow({
+                    where: { id: originTarget.threadId },
+                  })).toMatchObject(threadBefore);
+                  expect(await prisma.message.findUnique({
+                    where: { id: correction.sourceMessageId! }, select: { id: true },
+                  })).toEqual({ id: correction.sourceMessageId });
+                  expect(await prisma.event.count({
+                    where: { threadId: originTarget.threadId, type: "thread.cleared" },
+                  })).toBe(0);
+                  await expect(artifacts.get(removed!.storageKey, artifactContext))
+                    .rejects.toMatchObject({ code: "ENOENT" });
+                  expect(new TextDecoder().decode(
+                    await artifacts.get(stillPresent!.storageKey, artifactContext),
+                  )).toContain(CORRECTION);
+                } finally {
+                  fault.mockRestore();
+                }
+                const replayRemoval = vi.spyOn(artifacts, "remove").mockImplementation(async (key, context) => {
+                  if (key === removed!.storageKey) {
+                    // Some stores report an already-missing blob as an error on replay.
+                    throw Object.assign(new Error("Synthetic missing object"), { name: "NoSuchKey" });
+                  }
+                  await remove(key, context);
+                });
+                try {
+                  await expect(client.threads.clear({ botId })).resolves.toEqual({ ok: true });
+                  expect(replayRemoval).toHaveBeenCalledWith(removed!.storageKey, expect.anything());
+                } finally {
+                  replayRemoval.mockRestore();
+                }
+              } else if (scenario === "clear-new-blob") {
+                const remove = artifacts.remove.bind(artifacts);
+                const overlappingReview = vi.spyOn(artifacts, "remove").mockImplementationOnce(
+                  async (key, context) => {
+                    resume();
+                    expect(await reviewing).toEqual({ error: null });
+                    await remove(key, context);
+                  },
+                );
+                try {
+                  await expect(client.threads.clear({ botId })).rejects.toMatchObject({
+                    code: "CONFLICT",
+                  });
+                  expect(await prisma.message.findUnique({
+                    where: { id: correction.sourceMessageId! }, select: { id: true },
+                  })).toEqual({ id: correction.sourceMessageId });
+                  const afterOverlap = await reviewRows();
+                  expect(afterOverlap.length).toBeGreaterThan(before.length);
+                  const proposalFile = afterOverlap.find((row) => row.clientNonce?.endsWith(":proposal"))!;
+                  expect(new TextDecoder().decode(
+                    await artifacts.get(proposalFile.storageKey, artifactContext),
+                  )).toContain(CORRECTION);
+                  before = afterOverlap;
+                } finally {
+                  overlappingReview.mockRestore();
+                }
+                await expect(client.threads.clear({ botId })).resolves.toEqual({ ok: true });
+              } else {
+                await expect(client.threads.clear({ botId })).resolves.toEqual({ ok: true });
+              }
+              expect(await reviewRows()).toEqual([]);
+              expect(await prisma.artifact.findUnique({ where: { id: unrelated.id } }))
+                .toMatchObject({ rootArtifactId: null, version: 2 });
+            } finally {
+              resume();
+              await reviewing;
+              activation?.mockRestore();
+            }
+            expect(await reviewing).toEqual({ error: null });
+            await handlers["harness.reflect"]({ runId: assignedRunId, auto: true });
+            expect(runtime.proposalCalls).toBe(1);
+            expect(await reviewRows()).toEqual([]);
+            expect(await prisma.message.count({ where: { threadId: originTarget.threadId } })).toBe(0);
+            for (const row of before)
+              await expect(artifacts.get(row.storageKey, artifactContext)).rejects.toMatchObject({
+                code: "ENOENT",
+              });
+            expect(await artifacts.get(receiptFile.storageKey, artifactContext)).toEqual(receiptBytes);
+            expect((await getCurrentTaughtSkillRevision(prisma, actor, skill.id)).id).toBe(baseline.id);
+            return;
+          }
           await handlers["run.continue"]({ runId: correctionRunId });
           expect(
             await prisma.run.findUniqueOrThrow({ where: { id: correctionRunId } }),

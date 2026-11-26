@@ -1,7 +1,26 @@
 import { describe, expect, it, vi } from "vitest";
 import { loadPageRuntime } from "./page-runtime";
+import { saveServerHeaders } from "./server-headers";
+
+vi.mock("expo-secure-store", () => ({
+  setItemAsync: vi.fn(async () => {}),
+  deleteItemAsync: vi.fn(async () => {}),
+}));
 
 describe("loadPageRuntime", () => {
+  it("fetches the runtime with the headers configured for that server", async () => {
+    const base = "https://protected.example.test";
+    await saveServerHeaders(base, { "x-proxy-access": "fixture" });
+    const fetcher = vi.fn<typeof fetch>().mockResolvedValue(new Response("kit"));
+    try {
+      await expect(loadPageRuntime(base, fetcher)).resolves.toBe("kit");
+      expect(fetcher.mock.calls[0]?.[1]?.redirect).toBe("error");
+      expect(new Headers(fetcher.mock.calls[0]?.[1]?.headers).get("x-proxy-access")).toBe("fixture");
+    } finally {
+      await saveServerHeaders(base, {});
+    }
+  });
+
   it("shares one fetch per server at a time and retries after a failed fetch", async () => {
     const fetcher = vi
       .fn<typeof fetch>()

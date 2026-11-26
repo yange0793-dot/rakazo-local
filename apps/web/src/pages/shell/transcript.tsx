@@ -38,6 +38,7 @@ import {
 } from "react";
 import { ActiveBotGlyph } from "../../components/ai/CollaborationMarker";
 import { VoiceChatCard } from "../../components/call/VoiceChatCard";
+import { ErrorNotice } from "../../components/ErrorNotice";
 import type { ArtifactTarget } from "../../lib/artifact-open";
 import { projectPageCards } from "../../lib/page-cards";
 import {
@@ -49,6 +50,8 @@ import type { createSpaceRpc } from "../../lib/rpc";
 import { messageHasVisibleBlocks } from "../../lib/tool-activity-view";
 import { TRANSCRIPT_CONTENT_PADDING } from "../../lib/transcript-layout";
 import { transcriptIsNearEnd, transcriptMovedDown } from "../../lib/transcript-scroll";
+import type { ErrorDetails } from "../../lib/user-error";
+import { errorDetails } from "../../lib/user-error";
 import { TimeSeparator, UnreadDivider } from "./chat-context";
 import type { ImportSetupTarget } from "./import-setup-card";
 import { MessageView } from "./message-view";
@@ -456,22 +459,25 @@ export const Transcript = memo(function Transcript({
     }
   }, [atEnd]);
 
-  const loadOlder = useCallback(() => {
+  const [olderError, setOlderError] = useState<ErrorDetails | null>(null);
+  const loadOlder = useCallback(async () => {
     const wasFollowing = following.current;
+    const scroller = scrollRef.current;
     // Prepend must not race the messages-driven snap-to-end follow path.
     following.current = false;
     autoScrolling.current = false;
-    const pending = onLoadOlder();
-    if (!pending) return;
-    return Promise.resolve(pending).catch((error) => {
-      const element = scrollRef.current;
-      if (wasFollowing && element && transcriptIsNearEnd(element)) {
+    setOlderError(null);
+    try {
+      await onLoadOlder();
+    } catch (error) {
+      if (!scroller || scrollRef.current !== scroller) return;
+      if (wasFollowing && transcriptIsNearEnd(scroller)) {
         following.current = true;
         setAtEnd(true);
       }
-      throw error;
-    });
-  }, [onLoadOlder, scrollRef]);
+      setOlderError(errorDetails(error, t`Could not load earlier messages`));
+    }
+  }, [onLoadOlder, scrollRef, t]);
 
   useEffect(
     () => () => {
@@ -547,6 +553,11 @@ export const Transcript = memo(function Transcript({
             {loadingOlder ? <Spinner aria-label={t`Loading…`} /> : null}
             {t`Load earlier messages`}
           </Button>
+        ) : null}
+        {olderCursor != null && olderError ? (
+          <div className="self-center">
+            <ErrorNotice error={olderError} />
+          </div>
         ) : null}
         {groupVoiceChats(reactionView.visibleMessages).map((item) => {
           if (item.kind === "voiceChat") {

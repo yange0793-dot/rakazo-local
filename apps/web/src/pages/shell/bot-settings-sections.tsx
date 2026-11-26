@@ -1,12 +1,19 @@
 import { Trans, useLingui } from "@lingui/react/macro";
-import type { ComputerMode, ReplyMode, ThinkingLevel } from "@rakazo/contracts";
+import type {
+  ApprovalMode,
+  ComputerMode,
+  ReplyMode,
+  SettingsScope,
+  ThinkingLevel,
+} from "@rakazo/contracts";
 import {
+  ApprovalModeSchema,
   BOT_COMPUTER_MODES,
   BOT_DESCRIPTION_MAX_LENGTH,
   BUILTIN_TOOL_NAMES,
 } from "@rakazo/contracts";
 import type { ChatModelChoice } from "@rakazo/core";
-import { clampCatalogThinkingLevel } from "@rakazo/core";
+import { clampCatalogThinkingLevel, THINKING_LEVEL_OPTIONS } from "@rakazo/core";
 import {
   Button,
   NativeSelect,
@@ -18,7 +25,7 @@ import {
 } from "@rakazo/ui-web";
 import { Bell, Download, Loader2, Settings, X } from "lucide-react";
 import type { CSSProperties, ReactNode, RefObject } from "react";
-import { useEffect, useId, useRef, useState } from "react";
+import { useEffect, useId, useState } from "react";
 import { requestBrowserNotificationPermission } from "../../lib/browser-notifications";
 import { thinkingLevelLabel } from "../../lib/model-catalog";
 import { ChatModelPicker } from "./chat-model-picker";
@@ -148,82 +155,75 @@ export function NotificationsSection({
   );
 }
 
-/** Preview while adjusting; persist only the released or keyboard-confirmed value. */
-export function EffortBar({
-  level,
-  levels,
+/** The draft is only a preview. After a commit the caller owns the pending or saved value. */
+function StopSlider<T extends string>({
+  label,
+  description,
+  axis,
+  options,
+  value,
+  optionLabel,
   onChange,
   onPreview,
   disabled = false,
 }: {
-  level: ThinkingLevel;
-  levels: readonly ThinkingLevel[];
-  onChange: (level: ThinkingLevel) => void;
-  onPreview?: (level: ThinkingLevel | null) => void;
+  label: string;
+  description?: string;
+  axis?: readonly [string, string];
+  options: readonly T[];
+  value: T;
+  optionLabel: (option: T) => string;
+  onChange: (option: T) => void;
+  onPreview?: (option: T | null) => void;
   disabled?: boolean;
 }) {
-  const { t } = useLingui();
   const id = useId();
-  const available: readonly ThinkingLevel[] = levels.filter((option) => option !== "off");
-  const effectiveLevel = clampCatalogThinkingLevel(level, available) as ThinkingLevel | null;
-  const [draft, setDraft] = useState(effectiveLevel);
+  const [draft, setDraft] = useState<T | null>(null);
   const [dragging, setDragging] = useState(false);
-  const committed = useRef(level);
-  useEffect(() => {
-    setDraft(effectiveLevel);
-    committed.current = level;
-  }, [level, effectiveLevel]);
-  const shownLevel = draft && available.includes(draft) ? draft : effectiveLevel;
-  const activeIndex = shownLevel ? available.indexOf(shownLevel) : 0;
+  const shown = draft ?? value;
+  const activeIndex = options.indexOf(shown);
 
   function preview(index: number) {
-    setDraft(available[index]!);
-    onPreview?.(available[index]!);
-  }
-
-  function commit(index: number) {
-    const next = available[index]!;
+    const next = options[index]!;
     setDraft(next);
-    if (committed.current !== next) {
-      committed.current = next;
-      onChange(next);
-    }
+    onPreview?.(next);
   }
 
-  if (!shownLevel) {
-    return (
-      <p className="text-body-sm text-muted-foreground">
-        <Trans>Effort unavailable for this model</Trans>
-      </p>
-    );
+  function commit(next: T) {
+    setDraft(null);
+    if (!disabled && next !== value) onChange(next);
   }
-  const adjusted = effectiveLevel !== level;
-  const requestedLabel = thinkingLevelLabel(level);
-  const effectiveLabel = effectiveLevel ? thinkingLevelLabel(effectiveLevel) : "";
+
   return (
-    <div
-      className="effort-bar pt-1"
+    <fieldset
+      aria-labelledby={`${id}-label`}
+      className="effort-bar min-w-0 border-0 p-0 pt-1"
       data-dragging={dragging}
       data-disabled={disabled}
       style={
         {
-          "--effort-count": available.length,
-          "--effort-step": `${100 / available.length}%`,
-          "--effort-inset": `${50 / available.length}%`,
+          "--effort-count": options.length,
+          "--effort-step": `${100 / options.length}%`,
+          "--effort-inset": `${50 / options.length}%`,
         } as CSSProperties
       }
     >
-      <label htmlFor={id} className="text-label font-medium text-muted-foreground">
-        <Trans>Effort</Trans>
-      </label>
-      <div className="effort-axis text-caption text-muted-foreground" aria-hidden="true">
-        <span>
-          <Trans>Faster</Trans>
-        </span>
-        <span>
-          <Trans>Smarter</Trans>
-        </span>
+      <div className="flex items-baseline justify-between gap-2 text-muted-foreground">
+        <label id={`${id}-label`} htmlFor={id} className="text-label font-medium">
+          {label}
+        </label>
+        {description ? (
+          <span id={`${id}-scope`} className="text-caption">
+            {description}
+          </span>
+        ) : null}
       </div>
+      {axis ? (
+        <div className="effort-axis text-caption text-muted-foreground" aria-hidden="true">
+          <span>{axis[0]}</span>
+          <span>{axis[1]}</span>
+        </div>
+      ) : null}
       <div className="effort-control">
         <div className="effort-track" aria-hidden="true" />
         <div
@@ -237,80 +237,110 @@ export function EffortBar({
           id={id}
           type="range"
           min={0}
-          max={available.length - 1}
+          max={options.length - 1}
           step={1}
           value={activeIndex}
-          disabled={disabled || available.length === 1}
-          aria-label={t`Effort`}
-          aria-valuetext={thinkingLevelLabel(shownLevel)}
-          aria-describedby={adjusted ? `${id}-effective` : undefined}
+          disabled={disabled}
+          aria-label={label}
+          aria-valuetext={optionLabel(shown)}
+          aria-describedby={description ? `${id}-scope` : undefined}
           onChange={(event) => preview(event.currentTarget.valueAsNumber)}
-          onFocus={() => onPreview?.(available[activeIndex]!)}
+          onFocus={() => onPreview?.(shown)}
           onPointerDown={() => {
             setDragging(true);
-            onPreview?.(available[activeIndex]!);
+            onPreview?.(shown);
           }}
           onPointerUp={(event) => {
-            commit(event.currentTarget.valueAsNumber);
+            commit(options[event.currentTarget.valueAsNumber]!);
             setDragging(false);
             onPreview?.(null);
           }}
           onPointerCancel={() => {
-            setDraft(effectiveLevel);
+            setDraft(null);
             setDragging(false);
             onPreview?.(null);
           }}
           onKeyDown={(event) => {
             if (event.key === "Escape") {
               event.preventDefault();
-              setDraft(effectiveLevel);
+              setDraft(null);
               onPreview?.(null);
             }
           }}
           onKeyUp={(event) => {
-            if (event.key === "Enter") commit(event.currentTarget.valueAsNumber);
+            if (event.key === "Enter") commit(options[event.currentTarget.valueAsNumber]!);
           }}
-          onBlur={(event) => {
-            if (draft !== effectiveLevel) commit(event.currentTarget.valueAsNumber);
+          onBlur={() => {
+            if (draft !== null) commit(draft);
             setDragging(false);
             onPreview?.(null);
           }}
         />
       </div>
       <div className="effort-stops">
-        {available.map((option, index) => (
+        {options.map((option) => (
           <button
             key={option}
             type="button"
-            tabIndex={available.length === 1 ? 0 : -1}
             disabled={disabled}
-            aria-label={thinkingLevelLabel(option)}
-            aria-pressed={option === shownLevel}
+            aria-label={optionLabel(option)}
+            aria-pressed={option === shown}
             onPointerEnter={() => {
               if (!disabled) onPreview?.(option);
             }}
             onPointerLeave={() => onPreview?.(null)}
             onPointerDown={(event) => event.preventDefault()}
             onClick={() => {
-              preview(index);
-              commit(index);
+              onPreview?.(option);
+              commit(option);
             }}
           >
             <span className="effort-stop-hit" aria-hidden="true">
               <span className="effort-stop-dot" />
             </span>
-            <span className="text-caption">{thinkingLevelLabel(option)}</span>
+            <span className="text-caption">{optionLabel(option)}</span>
           </button>
         ))}
       </div>
-      {adjusted ? (
-        <p id={`${id}-effective`} className="mt-2 text-body-sm text-warning" role="status">
-          <Trans>
-            Saved {requestedLabel}; using {effectiveLabel}.
-          </Trans>
-        </p>
-      ) : null}
-    </div>
+    </fieldset>
+  );
+}
+
+export function EffortBar({
+  level,
+  supportedLevels,
+  onChange,
+  onPreview,
+  disabled,
+}: {
+  level: ThinkingLevel;
+  supportedLevels?: readonly ThinkingLevel[];
+  onChange: (level: ThinkingLevel) => void;
+  onPreview?: (level: ThinkingLevel | null) => void;
+  disabled?: boolean;
+}) {
+  const { t } = useLingui();
+  const effective = clampCatalogThinkingLevel(level, supportedLevels) as ThinkingLevel | null;
+  return level === "off" ? (
+    <p className="text-body-sm text-muted-foreground">
+      <Trans>Effort unavailable for this model</Trans>
+    </p>
+  ) : (
+    <StopSlider
+      label={t`Effort`}
+      description={
+        effective && effective !== level
+          ? t`Saved ${thinkingLevelLabel(level)}; using ${thinkingLevelLabel(effective)}.`
+          : undefined
+      }
+      axis={[t`Faster`, t`Smarter`]}
+      options={THINKING_LEVEL_OPTIONS}
+      value={level}
+      optionLabel={thinkingLevelLabel}
+      onChange={onChange}
+      onPreview={onPreview}
+      disabled={disabled}
+    />
   );
 }
 
@@ -326,7 +356,12 @@ export function ModelSection({
   modelSaving = false,
   modelLoading = false,
   effortLevel,
-  effortLevels = [],
+  supportedEffortLevels,
+  approvalMode,
+  approvalScope,
+  approvalError,
+  onApprovalModeChange,
+  approvalDisabled = false,
   onEffortChange,
   onEffortPreview,
   effortDisabled = false,
@@ -344,7 +379,12 @@ export function ModelSection({
   modelSaving?: boolean;
   modelLoading?: boolean;
   effortLevel: ThinkingLevel;
-  effortLevels?: readonly ThinkingLevel[];
+  supportedEffortLevels?: readonly ThinkingLevel[];
+  approvalMode: ApprovalMode | undefined;
+  approvalScope: SettingsScope | undefined;
+  approvalError?: string;
+  onApprovalModeChange: (mode: ApprovalMode) => void;
+  approvalDisabled?: boolean;
   onEffortChange: (level: ThinkingLevel) => void;
   onEffortPreview?: (level: ThinkingLevel | null) => void;
   effortDisabled?: boolean;
@@ -353,16 +393,11 @@ export function ModelSection({
   onSetDefaultModel?: (choice: ChatModelChoice) => void;
 }) {
   const { t } = useLingui();
-  const thinking = (
-    <EffortBar
-      key={`${value}:${effortLevels.join(":")}`}
-      level={effortLevel}
-      levels={effortLevels}
-      onChange={onEffortChange}
-      onPreview={onEffortPreview}
-      disabled={effortDisabled}
-    />
-  );
+  const approvalLabels: Record<ApprovalMode, string> = {
+    auto: t`Auto`,
+    ask: t`Ask`,
+    bypermission: t`Bypass permissions`,
+  };
   return (
     <div ref={containerRef}>
       <div className="mb-2 flex items-center justify-between text-label font-medium text-muted-foreground pe-1">
@@ -405,8 +440,37 @@ export function ModelSection({
             </span>
           </div>
         ) : modelUnavailable ? null : (
-          thinking
+          <EffortBar
+            key={value}
+            level={effortLevel}
+            supportedLevels={supportedEffortLevels}
+            onChange={onEffortChange}
+            onPreview={onEffortPreview}
+            disabled={effortDisabled}
+          />
         )}
+        <div className="border-t border-border/60 pt-3">
+          {approvalError ? (
+            <p role="alert" className="text-body-sm text-destructive">
+              {approvalError}
+            </p>
+          ) : approvalMode && approvalScope ? (
+            <StopSlider
+              key={approvalScope}
+              label={t`Permissions`}
+              description={approvalScope === "account" ? t`Account default` : t`This space only`}
+              options={ApprovalModeSchema.options}
+              value={approvalMode}
+              optionLabel={(mode) => approvalLabels[mode]}
+              onChange={onApprovalModeChange}
+              disabled={approvalDisabled}
+            />
+          ) : (
+            <p role="status" className="text-body-sm text-muted-foreground">
+              <Trans>Loading</Trans>
+            </p>
+          )}
+        </div>
       </div>
     </div>
   );

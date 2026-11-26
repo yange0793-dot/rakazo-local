@@ -23,10 +23,11 @@ import { sanitizeUtf16ForJson, withAbort } from "@rakazo/core";
 import { getLogger } from "@rakazo/logging";
 import type { ContentEncryption } from "./content-encryption.js";
 import { contentEncryptionOf } from "./content-encryption.js";
+import { managedWorkOriginAvailable } from "./coordination.js";
+import { Prisma } from "./generated/prisma/client.js";
 import type {
   SemanticFact as FactRecord,
   SemanticMemoryIndexOutbox as IndexRecord,
-  Prisma,
   PrismaClient,
 } from "./generated/prisma/client.js";
 import { runAsSystem, runAsTenant } from "./row-security.js";
@@ -70,6 +71,87 @@ export interface LessonWriteInput {
   provenance: Provenance & { runId: string; harness: NonNullable<Provenance["harness"]> };
   /** An existing lesson this one refines, with the revision the reviewer observed. */
   replaces?: { id: string; expectedRevision: number };
+  reflectionSource?: ReflectionSource;
+}
+
+export const reflectionSourceWhere: Prisma.RunWhereInput = {
+  OR: [{ sourceMessageId: { not: null } }, { trigger: { in: ["routine", "tickets"] } }],
+};
+
+const reflectionRunSelect = {
+  threadId: true,
+  sourceMessageId: true,
+  sourceMessage: { select: { threadId: true } },
+  thread: { select: { historyCompactionGeneration: true } },
+  ticket: {
+    select: {
+      spaceId: true,
+      createdByUserId: true,
+      originThreadId: true,
+      originMessageId: true,
+      originRoutineId: true,
+      originGeneration: true,
+    },
+  },
+} satisfies Prisma.RunSelect;
+
+export type ReflectionSource = {
+  threadId: string;
+  generation: number;
+  messageId: string | null;
+};
+
+type ReflectionRun = { id: string; spaceId: string; botId: string };
+
+export async function readReflectionSource(
+  db: Pick<Tx, "run" | "thread" | "message" | "routine">,
+  run: ReflectionRun,
+  expected?: ReflectionSource,
+): Promise<ReflectionSource | null> {
+  const current = await db.run.findFirst({
+    where: { id: run.id, spaceId: run.spaceId, botId: run.botId, ...reflectionSourceWhere },
+    select: reflectionRunSelect,
+  });
+  if (!current) return null;
+  if (current.ticket?.originThreadId && !(await managedWorkOriginAvailable(db, current.ticket)))
+    return null;
+  const source = {
+    threadId: current.threadId,
+    generation: current.thread.historyCompactionGeneration,
+    messageId: current.sourceMessageId,
+  };
+  if (
+    expected &&
+    (source.threadId !== expected.threadId ||
+      source.generation !== expected.generation ||
+      source.messageId !== expected.messageId)
+  )
+    return null;
+  return source;
+}
+
+/** Thread locks order reflection writes against chat clear, including writes to another chat. */
+export async function lockReflectionSource(
+  tx: Tx,
+  run: ReflectionRun,
+  expected?: ReflectionSource,
+  destinationThreadId?: string,
+): Promise<boolean> {
+  const initial = await tx.run.findFirst({
+    where: { id: run.id, spaceId: run.spaceId, botId: run.botId, ...reflectionSourceWhere },
+    select: reflectionRunSelect,
+  });
+  if (!initial) return false;
+  const origin = initial.ticket?.originThreadId;
+  // A managed origin is locked before the execution thread, like managed-work clear.
+  if (origin && origin !== initial.threadId)
+    await tx.$queryRaw`SELECT id FROM threads WHERE id = ${origin} AND "spaceId" = ${run.spaceId} FOR NO KEY UPDATE`;
+  const messageThread = initial.sourceMessage?.threadId;
+  if (messageThread && messageThread !== initial.threadId && messageThread !== origin)
+    await tx.$queryRaw`SELECT id FROM threads WHERE id = ${messageThread} AND "spaceId" = ${run.spaceId} FOR NO KEY UPDATE`;
+  const ids = [initial.threadId, ...(destinationThreadId ? [destinationThreadId] : [])];
+  await tx.$queryRaw`SELECT id FROM threads WHERE id IN (${Prisma.join(ids)}) AND "spaceId" = ${run.spaceId} ORDER BY id FOR NO KEY UPDATE`;
+  return (await readReflectionSource(tx, run, expected)) !== null;
 }
 
 /**
@@ -117,6 +199,12 @@ type ReadDb = Pick<
   "space" | "spaceMember" | "bot" | "thread" | "run" | "message" | "chatGroupMember"
 >;
 type Provenance = SemanticFact["provenance"];
+// Internal attribution stays in the encrypted provenance envelope. Public reads expose
+// the surviving primary source through the existing provenance schema.
+type StoredProvenance = Provenance & {
+  alternateSources?: Provenance[];
+  retiredDerivation?: true;
+};
 type Source = {
   provenance: Provenance;
   identity: unknown[];
@@ -398,7 +486,7 @@ export class SemanticFactStore {
 
   private async sourceFor(
     tx: Tx,
-    request: SemanticMemorySaveRequest,
+    request: Pick<SemanticMemorySaveRequest, "botId" | "source">,
     ctx: AdapterContext,
   ): Promise<Source> {
     const source = request.source;
@@ -592,6 +680,8 @@ export class SemanticFactStore {
         !activeAt(row, now)
       )
         return null;
+      const provenance: StoredProvenance = JSON.parse(row.provenance);
+      if (provenance.retiredDerivation) return null;
       const retired = await db.semanticMemoryRetirement.findFirst({
         where: {
           namespace,
@@ -652,16 +742,45 @@ export class SemanticFactStore {
   }
 
   private async derivationCurrent(db: Tx | PrismaClient, row: FactRecord): Promise<boolean> {
-    const sources = factValue(row).provenance.derivedFrom;
+    const provenance: StoredProvenance = JSON.parse(row.provenance);
     return (
-      !sources ||
-      (await this.currentDerivationSources(db, sources, row.spaceId, row.botId)) !== null
+      !provenance.retiredDerivation &&
+      (!provenance.derivedFrom ||
+        (await this.currentDerivationSources(db, provenance.derivedFrom, row.spaceId, row.botId)) !==
+          null)
     );
   }
 
   private async rememberSource(tx: Tx, row: FactRecord, sourceKey: string): Promise<void> {
     await tx.semanticFactSource.create({
       data: { spaceId: row.spaceId, namespace: row.namespace, sourceKey, factId: row.id },
+    });
+  }
+
+  private async addAttribution(tx: Tx, row: FactRecord, provenance: Provenance): Promise<void> {
+    const stored: StoredProvenance = JSON.parse(row.provenance);
+    const attributed = JSON.stringify(
+      stored.kind === "run" && !stored.runId && !stored.threadId && !stored.messageId
+        ? { ...stored, ...provenance }
+        : { ...stored, alternateSources: [...(stored.alternateSources ?? []), provenance] },
+    );
+    const ring = contentEncryptionOf(tx)?.ring;
+    ring?.remember("semantic_facts", row.id, { spaceId: row.spaceId, owner: row.userId });
+    await tx.semanticFact.update({
+      where: { id: row.id },
+      data: { provenance: attributed, updatedAt: row.updatedAt },
+    });
+    const snapshot = await tx.semanticFactRevision.findUniqueOrThrow({
+      where: { factId_revision: { factId: row.id, revision: row.revision } },
+      select: { id: true },
+    });
+    ring?.remember("semantic_fact_revisions", snapshot.id, {
+      spaceId: row.spaceId,
+      owner: row.id,
+    });
+    await tx.semanticFactRevision.update({
+      where: { id: snapshot.id },
+      data: { provenance: attributed },
     });
   }
 
@@ -701,7 +820,6 @@ export class SemanticFactStore {
   }
 
   private async snapshot(tx: Tx, row: FactRecord): Promise<void> {
-    this.encryption();
     await tx.semanticFactRevision.create({
       data: {
         spaceId: row.spaceId,
@@ -890,6 +1008,29 @@ export class SemanticFactStore {
         select: { id: true },
       });
       if (!run) throw new IsolationError();
+      if (
+        !(await lockReflectionSource(
+          tx,
+          { id: run.id, spaceId: ctx.spaceId, botId: input.botId },
+          input.reflectionSource,
+          provenance.messageId ? provenance.threadId : undefined,
+        ))
+      )
+        return null;
+      if (
+        provenance.messageId &&
+        !(await tx.message.findFirst({
+          where: { id: provenance.messageId, threadId: provenance.threadId },
+          select: { id: true },
+        }))
+      )
+        return null;
+      const evidence = provenance.harness?.evidence;
+      if (evidence?.messageId && !(await tx.message.findFirst({
+        where: { id: evidence.messageId },
+        select: { id: true },
+      })))
+        return null;
       if (input.replaces) {
         const previous = await tx.semanticFact.findFirst({
           where: { id: input.replaces.id, spaceId: ctx.spaceId, namespace },
@@ -900,6 +1041,8 @@ export class SemanticFactStore {
             (previous.revision === input.replaces.expectedRevision + 1 &&
               previous.content === content))
         ) {
+          const stored: StoredProvenance = JSON.parse(previous.provenance);
+          if (stored.retiredDerivation) return null;
           const inherited = factValue(previous).provenance.derivedFrom;
           if (inherited?.length) {
             const fresh = new Set((provenance.derivedFrom ?? []).map((source) => source.id));
@@ -951,7 +1094,13 @@ export class SemanticFactStore {
           : null;
       }
       const sameContent = input.replaces ? null : await this.boundSource(tx, namespace, contentKey);
-      if (sameContent) return factValue(sameContent);
+      if (sameContent) {
+        const row = await this.lockFact(tx, sameContent.id, namespace);
+        await this.rememberSource(tx, row, sourceKey);
+        if (row.status === "active" && row.content === content)
+          await this.addAttribution(tx, row, provenance);
+        return factValue(row);
+      }
       const source: Source = {
         provenance,
         identity: ["lesson", input.provenance.runId, content],
@@ -1165,7 +1314,7 @@ export class SemanticFactStore {
       result.skipped += prepared.length;
       return result;
     }
-    // Stable lock order across transactions: every source key, then every corrected fact.
+    // Stable lock order across transactions: every source key, then every affected fact.
     for (const key of [
       ...new Set(
         prepared.flatMap((item) =>
@@ -1176,12 +1325,21 @@ export class SemanticFactStore {
       ),
     ].sort())
       await this.lockSource(tx, namespace, key);
+    const findContentMatch = async (item: (typeof prepared)[number]) =>
+      (await this.boundSource(tx, namespace, item.contentKey!)) ??
+      (item.normalizedKey !== item.contentKey
+        ? await this.boundSource(tx, namespace, item.normalizedKey!)
+        : null);
+    const affected = new Set<string>();
+    for (const item of prepared) {
+      if (item.replacesId) affected.add(item.replacesId);
+      else {
+        const match = await findContentMatch(item);
+        if (match) affected.add(match.id);
+      }
+    }
     const replacements = new Map<string, FactRecord>();
-    for (const id of [
-      ...new Set(
-        prepared.flatMap((item) => (item.replacesId === undefined ? [] : [item.replacesId])),
-      ),
-    ].sort()) {
+    for (const id of [...affected].sort()) {
       try {
         replacements.set(id, await this.lockFact(tx, id, namespace));
       } catch (error) {
@@ -1226,17 +1384,6 @@ export class SemanticFactStore {
         result.removed += 1;
         continue;
       }
-      // Content identity only guards a new fact: a correction may legitimately restore wording
-      // that an earlier revision or an already-forgotten fact once used.
-      if (
-        item.replacesId === undefined &&
-        ((await this.boundSource(tx, namespace, item.contentKey!)) ||
-          (item.normalizedKey !== item.contentKey &&
-            (await this.boundSource(tx, namespace, item.normalizedKey!))))
-      ) {
-        result.skipped += 1;
-        continue;
-      }
       const provenance: Provenance = {
         kind: "run",
         ...(item.source.runId ? { runId: item.source.runId } : {}),
@@ -1246,6 +1393,17 @@ export class SemanticFactStore {
         category: item.category,
         observedAt: item.source.observedAt.toISOString(),
       };
+      // A correction may restore wording that an earlier revision already bound.
+      if (item.replacesId === undefined) {
+        const row = await findContentMatch(item);
+        if (row) {
+          await this.rememberSource(tx, row, item.sourceKey);
+          if (row.status === "active" && dedupeContent(row.content) === dedupeContent(item.content))
+            await this.addAttribution(tx, row, provenance);
+          result.skipped += 1;
+          continue;
+        }
+      }
       const source: Source = {
         provenance,
         identity: ["auto", input.threadId, item.source.messageId, item.quote],
@@ -1457,13 +1615,18 @@ export class SemanticFactStore {
     await tx.semanticFactRevision.deleteMany({ where: { factId: row.id } });
     if (row.status === "forgotten") {
       const updated =
-        row.content === FORGOTTEN_CONTENT && row.provenance === forgottenProvenance
+        row.content === FORGOTTEN_CONTENT &&
+        row.provenance === forgottenProvenance &&
+        row.sourceThreadId === null &&
+        row.sourceGeneration === null
           ? row
           : await tx.semanticFact.update({
               where: { id: row.id },
               data: {
                 content: FORGOTTEN_CONTENT,
                 provenance: forgottenProvenance,
+                sourceThreadId: null,
+                sourceGeneration: null,
               },
             });
       await this.snapshot(tx, updated);
@@ -1476,6 +1639,8 @@ export class SemanticFactStore {
         revision: { increment: 1 },
         content: FORGOTTEN_CONTENT,
         provenance: forgottenProvenance,
+        sourceThreadId: null,
+        sourceGeneration: null,
       },
     });
     await this.snapshot(tx, updated);
@@ -1497,6 +1662,8 @@ export class SemanticFactStore {
       await this.lockSpace(tx, ctx.spaceId);
       await this.requireScope(tx, request.botId, ctx);
       await this.lockNamespace(tx, namespace);
+      if (ctx.runId)
+        await this.sourceFor(tx, { botId: request.botId, source: { kind: "durable" } }, ctx);
       const row = await this.lockFact(tx, request.id, namespace);
       if (request.expectedRevision !== undefined && row.revision !== request.expectedRevision) {
         // A retry after a committed forget sees exactly one revision past its expectation.
@@ -1506,17 +1673,6 @@ export class SemanticFactStore {
         }
         throw new Error(MEMORY_REVISION_CONFLICT_ERROR);
       }
-      if (ctx.runId)
-        await this.sourceFor(
-          tx,
-          {
-            botId: request.botId,
-            scope: request.scope,
-            content: row.content,
-            source: { kind: "durable" },
-          },
-          ctx,
-        );
       await this.tombstone(tx, row);
       return { id: row.id, expired: true, reason: null };
     });
@@ -1599,10 +1755,145 @@ export class SemanticFactStore {
           },
           orderBy: { id: "asc" },
         });
-        for (const row of rows) await this.tombstone(tx, row);
+        for (const { id, namespace } of rows) {
+          const row = await this.lockFact(tx, id, namespace);
+          if (row.status !== "forgotten") await this.tombstone(tx, row);
+        }
       },
       BULK_RETIRE_TRANSACTION_OPTIONS,
     );
+  }
+
+  /** The clear transaction already holds the thread lock used by history writers. */
+  async clearThreadSourcesInTransaction(
+    tx: Tx,
+    input: { spaceId: string; threadIds: string[] },
+  ): Promise<void> {
+    const { spaceId, threadIds } = input;
+    const threads = new Set(threadIds);
+    // Legacy encrypted revisions have no independent source column. Inspect their opened
+    // provenance even when the current fact has moved to a different source.
+    const keys = await tx.$queryRaw<Array<{ id: string }>>`
+      SELECT id FROM semantic_facts WHERE "spaceId" = ${spaceId} ORDER BY id`;
+    if (!keys.length) return;
+    const [messages, runs, facts, revisions] = await Promise.all([
+      tx.message.findMany({ where: { threadId: { in: threadIds } }, select: { id: true } }),
+      tx.run.findMany({
+        where: {
+          spaceId,
+          OR: [
+            { threadId: { in: threadIds } },
+            { sourceMessage: { threadId: { in: threadIds } } },
+            { ticket: { originThreadId: { in: threadIds } } },
+          ],
+        },
+        select: { id: true },
+      }),
+      tx.semanticFact.findMany({
+        where: { spaceId },
+        select: { id: true, namespace: true, sourceThreadId: true, provenance: true },
+      }),
+      tx.semanticFactRevision.findMany({
+        where: { spaceId },
+        select: { factId: true, provenance: true },
+      }),
+    ]);
+    const messageIds = new Set(messages.map(({ id }) => id));
+    const runIds = new Set(runs.map(({ id }) => id));
+    const matches = (source: Provenance) =>
+      (source.threadId !== undefined && threads.has(source.threadId)) ||
+      (source.messageId !== undefined && messageIds.has(source.messageId)) ||
+      (source.runId !== undefined && runIds.has(source.runId));
+    const scrub = (value: string): StoredProvenance | undefined => {
+      const stored: StoredProvenance = JSON.parse(value);
+      const { alternateSources, ...primary } = stored;
+      const scrubEvidence = (source: Provenance, retired = false): boolean => {
+        const harness = source.harness;
+        if (
+          !harness ||
+          (!retired && !(harness.evidence.messageId && messageIds.has(harness.evidence.messageId)))
+        )
+          return false;
+        source.harness = { ...harness, evidence: { kind: harness.evidence.kind, quote: "" } };
+        return true;
+      };
+      const remaining = alternateSources?.filter((source) => !matches(source)) ?? [];
+      let evidenceChanged = false;
+      for (const source of remaining) evidenceChanged = scrubEvidence(source) || evidenceChanged;
+      const changed = matches(primary);
+      const replacement = changed ? remaining.shift() : undefined;
+      const result: StoredProvenance = { ...primary };
+      if (changed) {
+        delete result.threadId;
+        delete result.messageId;
+        delete result.runId;
+        delete result.quote;
+        Object.assign(result, replacement);
+      }
+      if (remaining.length) result.alternateSources = remaining;
+      evidenceChanged = scrubEvidence(result, changed && !replacement) || evidenceChanged;
+      const derived = primary.derivedFrom?.filter(
+        (source) => source.threadId === undefined || !threads.has(source.threadId),
+      );
+      const retired = derived?.length !== primary.derivedFrom?.length;
+      if (retired) {
+        if (derived?.length) result.derivedFrom = derived;
+        else delete result.derivedFrom;
+        result.retiredDerivation = true;
+      }
+      if (changed || evidenceChanged || retired || remaining.length !== (alternateSources?.length ?? 0))
+        return result;
+    };
+    const candidates = new Set(
+      revisions.filter((row) => scrub(row.provenance)).map((row) => row.factId),
+    );
+    for (const fact of facts) {
+      if (threads.has(fact.sourceThreadId ?? "") || scrub(fact.provenance)) candidates.add(fact.id);
+    }
+    const namespaces = new Map(facts.map((row) => [row.id, row.namespace]));
+    // Clear holds every source thread lock. Take fact locks in the same order as archive
+    // corrections and re-read provenance after locking to preserve concurrent corrections.
+    for (const id of [...candidates].sort()) {
+      const namespace = namespaces.get(id);
+      if (!namespace) continue;
+      const fact = await this.lockFact(tx, id, namespace);
+      const fromClearedThread = threads.has(fact.sourceThreadId ?? "");
+      const attributedToClearedThread = matches(JSON.parse(fact.provenance));
+      const current = scrub(fact.provenance);
+      if (
+        fact.kind === "history" &&
+        fact.status !== "forgotten" &&
+        (fromClearedThread || attributedToClearedThread)
+      ) {
+        await this.tombstone(tx, fact);
+        continue;
+      }
+      if (current || fromClearedThread) {
+        const changed = await tx.semanticFact.update({
+          where: { id },
+          data: {
+            ...(current ? { provenance: JSON.stringify(current) } : {}),
+            ...((fromClearedThread || attributedToClearedThread)
+              ? { sourceThreadId: current?.threadId ?? null, sourceGeneration: null }
+              : {}),
+            updatedAt: fact.updatedAt,
+          },
+        });
+        if (current?.retiredDerivation) await this.enqueueIndex(tx, changed, fact.revision, "delete");
+      }
+      const snapshots = await tx.semanticFactRevision.findMany({
+        where: { factId: id },
+        select: { id: true, provenance: true },
+      });
+      for (const snapshot of snapshots) {
+        const provenance = scrub(snapshot.provenance);
+        if (provenance)
+          await tx.semanticFactRevision.update({
+            where: { id: snapshot.id },
+            data: { provenance: JSON.stringify(provenance) },
+          });
+      }
+    }
   }
 
   /** Resolve an exact citation through the same authority checks, without an index lookup. */
@@ -1764,7 +2055,10 @@ export class SemanticFactStore {
       },
       orderBy: { id: "asc" },
     });
-    for (const row of rows) await this.tombstone(tx, row);
+    for (const { id, namespace } of rows) {
+      const row = await this.lockFact(tx, id, namespace);
+      if (row.status !== "forgotten") await this.tombstone(tx, row);
+    }
     if (!request.botId) return;
     // The deleted bot's history facts in the shared scope are unreachable once it is gone:
     // recall requires the requesting bot to own them, so nothing would ever clear them.
@@ -1780,7 +2074,10 @@ export class SemanticFactStore {
       },
       orderBy: { id: "asc" },
     });
-    for (const row of sharedHistory) await this.tombstone(tx, row);
+    for (const { id, namespace } of sharedHistory) {
+      const row = await this.lockFact(tx, id, namespace);
+      if (row.status !== "forgotten") await this.tombstone(tx, row);
+    }
   }
 
   private async indexWork(db: Tx | PrismaClient, record: IndexRecord): Promise<SemanticIndexWork> {

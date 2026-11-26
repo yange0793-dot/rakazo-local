@@ -139,7 +139,7 @@ Verification:
 - If a model is connected, send a harmless test message and confirm the bot replies. If model setup was deferred, explicitly report that the stack is healthy but a first message will fail until a provider is configured; do not call the setup fully usable without that caveat.
 - Open the Agent computer pane and confirm the Docker computer reaches `running` and renders its desktop.
 - Open Integrations. If neither managed catalog was configured, confirm the view still offers HTTPS MCP and OpenAPI sources. If one was configured, verify its app catalog loads without exposing any key or client secret.
-- Run `pnpm test` and `pnpm check`. Report failures with the relevant output; do not claim success if either fails.
+- Do not run the full test suite or monorepo typecheck as installation verification. Use the health and UI checks above; code changes should use focused checks for the affected behavior.
 - If I requested Electron, leave the web stack running and then launch `pnpm --filter @rakazo/desktop dev`. Verify the shell loads the same app. Let me make the Docker-versus-This-Mac choice because This Mac grants bots access under my OS account.
 
 When finished, report:

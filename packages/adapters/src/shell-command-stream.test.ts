@@ -37,8 +37,8 @@ describe("observeShellCommand", () => {
       {
         secrets: [],
         idleMs: 30,
-        onOutput: (snapshot) => {
-          seen.push(snapshot.stdout);
+        onOutput: (readSnapshot) => {
+          seen.push(readSnapshot().stdout);
         },
       },
     );
@@ -46,6 +46,20 @@ describe("observeShellCommand", () => {
     expect(seen).toEqual(["hello\n"]);
     expect(observed.completion).toBeUndefined();
     expect(observed.result).toEqual({ stdout: "hello\n", stderr: "", code: 0 });
+  });
+
+  it("reports failure when the stream closes without an exit event", async () => {
+    const observed = await observeShellCommand(
+      (async function* () {
+        yield { type: "stdout" as const, data: "hello\n" };
+      })(),
+      { secrets: [] },
+    );
+    expect(observed.result).toEqual({
+      stdout: "hello\n",
+      stderr: "Command stream ended without an exit code\n",
+      code: 1,
+    });
   });
 
   it.each([
@@ -224,8 +238,8 @@ describe("observeShellCommand", () => {
       {
         secrets: ["super-secret-token"],
         idleMs: 20,
-        onOutput: (snapshot) => {
-          seen.push(snapshot.stdout);
+        onOutput: (readSnapshot) => {
+          seen.push(readSnapshot().stdout);
         },
       },
     );
@@ -254,8 +268,8 @@ describe("observeShellCommand", () => {
       {
         secrets: ["super-secret-token"],
         idleMs: 20,
-        onOutput: (snapshot) => {
-          seen.push({ stdout: snapshot.stdout, stderr: snapshot.stderr });
+        onOutput: (readSnapshot) => {
+          seen.push(readSnapshot());
         },
       },
     );
@@ -311,8 +325,9 @@ describe("observeShellCommand", () => {
       {
         secrets: ["ABCDEFGHIJ"],
         idleMs: 20,
-        onOutput: (snapshot) => {
-          seen.push(`${snapshot.stdout}${snapshot.stderr}`);
+        onOutput: (readSnapshot) => {
+          const { stdout, stderr } = readSnapshot();
+          seen.push(`${stdout}${stderr}`);
         },
       },
     );
@@ -337,8 +352,9 @@ describe("observeShellCommand", () => {
       {
         secrets: ["SECRET123"],
         idleMs: 30,
-        onOutput: (snapshot) => {
-          seen.push(`${snapshot.stdout}${snapshot.stderr}`);
+        onOutput: (readSnapshot) => {
+          const { stdout, stderr } = readSnapshot();
+          seen.push(`${stdout}${stderr}`);
         },
       },
     );

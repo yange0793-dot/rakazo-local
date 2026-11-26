@@ -65,7 +65,8 @@ describeJourneys("required product journeys", () => {
 
   /** Runs every action without a card, for journeys about something other than approvals. */
   async function runWithoutAsking(scope: string) {
-    await rpc(app, scope, "autoReview/set", { mode: "never" });
+    await rpc(app, scope, "spaceSettings/setOverride", { setting: "confirmations", enabled: true });
+    await rpc(app, scope, "autoReview/set", { mode: "bypermission" });
   }
 
   async function sendAndWait(app: App, scope: string, botId: string, text: string) {
@@ -436,6 +437,7 @@ describeJourneys("required product journeys", () => {
   it("1+2: users are isolated and workspace bots share the Team Computer", async () => {
     const ada = await testSpace(app, "Ada Journey");
     const bob = await testSpace(app, "Bob Journey");
+    await runWithoutAsking(ada);
 
     const adaMe = await rpc<Me>(app, ada, "me");
     const bobMe = await rpc<Me>(app, bob, "me");
@@ -657,6 +659,7 @@ describeJourneys("required product journeys", () => {
 
   it("clears a conversation without removing the bot, computer, memory, or routines", async () => {
     const scope = await testSpace(app, "Clear Journey");
+    await runWithoutAsking(scope);
     const bot = await rpc<Bot>(app, scope, "bots/create", {
       name: "Keeper",
       title: "Keeps its setup",
@@ -849,6 +852,7 @@ describeJourneys("required product journeys", () => {
 
   it("3: disconnect and reconnect from a cursor reconstructs the thread", async () => {
     const scope = await testSpace(app, "Cursor");
+    await runWithoutAsking(scope);
     const bot = await rpc<Bot>(app, scope, "bots/create", {
       name: "Chief",
       title: "",
@@ -1676,6 +1680,7 @@ describeJourneys("required product journeys", () => {
 
   it("9: export includes memory and the bot's own files but not secrets or browser sessions", async () => {
     const scope = await testSpace(app, "Export");
+    await runWithoutAsking(scope);
     const bot = await rpc<Bot>(app, scope, "bots/create", {
       name: "Chief",
       title: "",
@@ -1724,6 +1729,7 @@ describeJourneys("required product journeys", () => {
   it("10: bots can be archived safely and deleted with or without their memories", async () => {
     const ada = await testSpace(app, "Delete Ada");
     const bob = await testSpace(app, "Delete Bob");
+    await runWithoutAsking(ada);
     const keep = await rpc<Bot>(app, ada, "bots/create", {
       name: "Keep",
       title: "",
@@ -2381,7 +2387,7 @@ describeJourneys("required product journeys", () => {
       ),
     );
 
-    // Never ask is the owner's own policy, so a helper's write runs exactly as the owner's would:
+    // Bypass mode is the owner's own policy, so a helper's write runs exactly as the owner's would:
     // never more authority than the owner gave, and no card of its own.
     await runWithoutAsking(scope);
     const before = connector.records.length;
@@ -2589,13 +2595,14 @@ describeJourneys("required product journeys", () => {
     expect(started?.payload).not.toMatchObject({ outcome: "error" });
   });
 
-  it("14: this-mac is refused unless the sandbox is docker", async () => {
+  it("14: a fake-sandbox account cannot enable this-mac even with the legacy owner marker", async () => {
     const scope = await testSpace(app, "Host");
     const me = await rpc<Me>(app, scope, "me");
     expect(me.canChooseHostComputer).toBe(false);
-    await prisma.deploymentSettings.update({
+    await prisma.deploymentSettings.upsert({
       where: { id: "default" },
-      data: { ownerUserId: me.userId },
+      create: { id: "default", ownerUserId: me.userId },
+      update: { ownerUserId: me.userId },
     });
     const res = await raw(app, scope, "deployment/update", { computerHost: "this-mac" });
     const text = await res.text();
@@ -2664,6 +2671,7 @@ describeJourneys("required product journeys", () => {
       "cancelled",
     );
 
+    await runWithoutAsking(scope);
     await rpc(app, scope, "threads/followUp", {
       botId: bot.id,
       text: "write a file in your home called notes/result.txt that says followup-ok",
@@ -2850,6 +2858,7 @@ describeJourneys("required product journeys", () => {
   it("16: routine test-run and plugin connect/revoke", async () => {
     const ada = await testSpace(app, "Plug Ada");
     const bob = await testSpace(app, "Plug Bob");
+    await runWithoutAsking(ada);
     const bot = await rpc<Bot>(app, ada, "bots/create", {
       name: "Chief",
       title: "",
@@ -3165,6 +3174,8 @@ describeJourneys("required product journeys", () => {
     });
     expect(crossThread.runId).not.toBe(firstSend.runId);
 
+    // The scripted runtime sees "Writer" and the attached-file note and writes a file.
+    await runWithoutAsking(ada);
     const attachmentText = "group attachment content";
     const artifact = await rpc<{ id: string }>(app, ada, "artifacts/create", {
       groupId: group.id,
@@ -3177,10 +3188,16 @@ describeJourneys("required product journeys", () => {
       text: "@Research Writer inspect the attachment",
       artifactIds: [artifact.id],
     });
-    await waitForDatabase(async () => {
-      const run = await prisma.run.findUnique({ where: { id: attached.runId } });
-      return Boolean(run && ["completed", "failed", "cancelled"].includes(run.status));
-    });
+    await expect
+      .poll(
+        () =>
+          prisma.run.findUnique({
+            where: { id: attached.runId },
+            select: { id: true, botId: true, status: true, error: true },
+          }),
+        { timeout: 10_000 },
+      )
+      .toMatchObject({ botId: botD.id, status: "completed", error: null });
     expect(await prisma.run.findUniqueOrThrow({ where: { id: attached.runId } })).toMatchObject({
       botId: botD.id,
       status: "completed",
@@ -3590,7 +3607,7 @@ describeJourneys("required product journeys", () => {
       matchKind: "tool",
       matchValue: "destination.write",
     });
-    for (const mode of ["ask", "never"]) {
+    for (const mode of ["auto", "ask", "bypermission"] as const) {
       await rpc(app, scope, "autoReview/set", { mode });
       const blocked = await sendAndWait(
         app,

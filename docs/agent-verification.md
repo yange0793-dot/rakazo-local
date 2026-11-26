@@ -5,10 +5,12 @@ Generated JSON reports are preserved locally under ignored `test-report/evals/ar
 Rakazo separates deterministic execution regressions from real-model task quality.
 A scripted response can prove that a tool call executes correctly; only a real
 model can demonstrate that it chooses a useful action for a natural request.
+This is a map of validation tiers, not a checklist for every change; use focused
+tests for the affected behavior, and reserve the full unit suite for broad changes.
 
 | Layer                   | Real components                                                           | Stand-ins                             | Command                      |
 | ----------------------- | ------------------------------------------------------------------------- | ------------------------------------- | ---------------------------- |
-| Existing fast tests     | Product functions and contracts                                           | Scripted agent, services, sandbox     | `pnpm test`                  |
+| Full unit suite         | Product functions and contracts                                           | Scripted agent, services, sandbox     | `pnpm test`                  |
 | Pi protocol regressions | Pi agent loop, HTTP/SSE parsing, tool dispatch                            | Loopback model endpoint, tool effects | `pnpm test:pi`               |
 | Pi product journey      | API, saved model connection, Postgres, executor, Pi                       | Model endpoint, sandbox, connectors   | `pnpm test:integration`      |
 | Computer replay         | Pi, browser tool handlers, page state                                     | Model endpoint, browser and sandbox   | `pnpm test`                  |

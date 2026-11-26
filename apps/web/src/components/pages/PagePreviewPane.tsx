@@ -8,6 +8,7 @@ import { useOpenPage, usePageDocument } from "../../lib/pages";
 import { useSpaceQueries } from "../../lib/query";
 import { PageFrame } from "./PageFrame";
 import { PageLoading, PageNotice } from "./PageNotice";
+import { hasPrivateBrowserPage, PrivateBrowserPage } from "./PrivateBrowserPage";
 
 /** How tall the page draws before it reports its own height. */
 const FIRST_HEIGHT = 480;
@@ -61,29 +62,33 @@ export function PagePreviewPane({
           <Maximize2 size={15} strokeWidth={1.8} />
         </Button>
       </div>
-      <div className="relative" style={{ height: height > 0 ? height : FIRST_HEIGHT }}>
-        {viewer.document !== null ? (
-          <div
-            className={`h-full transition-opacity duration-200 motion-reduce:transition-none ${drawn ? "opacity-100" : "opacity-0"}`}
-          >
-            <PageFrame document={viewer.document} title={title} interactive onHeight={onHeight} />
-          </div>
-        ) : null}
-        {!drawn && !failed ? <PageLoading /> : null}
-        {failed ? (
-          <PageNotice
-            title={t`This page couldn't load`}
-            detail={t`Check your connection and try again.`}
-            onRetry={() => {
-              if (detail.isError) void detail.refetch();
-              else {
-                setDrawn(false);
-                viewer.retry();
-              }
-            }}
-          />
-        ) : null}
-      </div>
+      {hasPrivateBrowserPage(detail.data) ? (
+        <PrivateBrowserPage key={page.id} pageId={page.id} />
+      ) : (
+        <div className="relative" style={{ height: height > 0 ? height : FIRST_HEIGHT }}>
+          {viewer.document !== null ? (
+            <div
+              className={`h-full transition-opacity duration-200 motion-reduce:transition-none ${drawn ? "opacity-100" : "opacity-0"}`}
+            >
+              <PageFrame document={viewer.document} title={title} interactive onHeight={onHeight} />
+            </div>
+          ) : null}
+          {!drawn && !failed ? <PageLoading /> : null}
+          {failed ? (
+            <PageNotice
+              title={t`This page couldn't load`}
+              detail={t`Check your connection and try again.`}
+              onRetry={() => {
+                if (detail.isError) void detail.refetch();
+                else {
+                  setDrawn(false);
+                  viewer.retry();
+                }
+              }}
+            />
+          ) : null}
+        </div>
+      )}
     </div>
   );
 }

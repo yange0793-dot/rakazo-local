@@ -6,16 +6,21 @@ import {
   stableStringify,
   validateRoutineWatch,
 } from "@rakazo/adapters";
-import { canonicalPiProviderId, ROUTINE_TRIGGER_REQUIRED } from "@rakazo/contracts";
+import type { Actor } from "@rakazo/contracts";
+import {
+  canonicalPiProviderId,
+  OPENAI_COMPATIBLE_PROVIDER_ID,
+  ROUTINE_TRIGGER_REQUIRED,
+} from "@rakazo/contracts";
 import {
   expandSkillReferencesInPrompt,
   hasMixedOneShotSchedule,
   isOneShotRoutineCrons,
 } from "@rakazo/core";
-import { IsolationError, isRecordNotFound, Prisma } from "@rakazo/db";
+import { IsolationError, isRecordNotFound, lockAccountModels, Prisma } from "@rakazo/db";
 import { getLogger } from "@rakazo/logging";
 import { assertEmailTrigger } from "../bot-email-address.js";
-import { assertRoutineModel } from "../model-pins.js";
+import { assertCompatibleModelPin, assertRoutineModel } from "../model-pins.js";
 import { listRoutineRuns } from "../routine-runs.js";
 import {
   assertRoutineSchedule,
@@ -33,6 +38,25 @@ import type { RouterContext } from "./context.js";
 
 export function routinesRoutes(ctx: RouterContext) {
   const { deps, repos, announceRoutine, codexCatalog, agentSkills, authed } = ctx;
+  const writeRoutineModel = async <T>(
+    actor: Actor,
+    model: { modelProvider?: string | null; modelId?: string | null },
+    write: (client: Prisma.TransactionClient) => Promise<T>,
+  ) => {
+    if (model.modelProvider !== OPENAI_COMPATIBLE_PROVIDER_ID || !model.modelId) {
+      await assertRoutineModel(deps, actor, model, codexCatalog);
+      return write(deps.prisma);
+    }
+    const modelId = model.modelId;
+    return deps.prisma.$transaction(
+      async (tx) => {
+        await lockAccountModels(tx, actor.userId);
+        await assertCompatibleModelPin(tx, deps.secrets, actor, modelId);
+        return write(tx);
+      },
+      { isolationLevel: Prisma.TransactionIsolationLevel.ReadCommitted },
+    );
+  };
   return {
     routines: {
       listForMentions: authed.routines.listForMentions.handler(async ({ context, input }) => {
@@ -81,10 +105,10 @@ export function routinesRoutes(ctx: RouterContext) {
         if (input.emailSenders) {
           await assertEmailTrigger(deps.prisma, deps.env.inboundEmailDomain, bot.id);
         }
-        await assertRoutineModel(deps, context.actor, input, codexCatalog);
-        const row = await deps.prisma.routine.create({
-          data: routineRowData(context.actor, input, routineNextRunAt(input)),
-        });
+        const data = routineRowData(context.actor, input, routineNextRunAt(input));
+        const row = await writeRoutineModel(context.actor, input, (client) =>
+          client.routine.create({ data }),
+        );
         await announceRoutine(context.actor, bot, row);
         return mapRoutine(row);
       }),
@@ -138,9 +162,6 @@ export function routinesRoutes(ctx: RouterContext) {
               ? null
               : existing.thinkingLevel
             : input.thinkingLevel;
-        if (modelChanged) {
-          await assertRoutineModel(deps, context.actor, { modelProvider, modelId }, codexCatalog);
-        }
         const watch = input.watch === undefined ? parseRoutineWatch(existing.watch) : input.watch;
         if (input.watch) {
           try {
@@ -239,8 +260,12 @@ export function routinesRoutes(ctx: RouterContext) {
         // Re-check the parent in the write itself so an archive that lands after the read wins.
         // Model and schedule patches must also match the snapshot they were computed from, so a
         // tick that fired after the read is not rewound onto an occurrence that already ran.
-        const row = await deps.prisma.routine
-          .update({
+        const model =
+          modelChanged || existing.userId !== context.actor.userId
+            ? { modelProvider, modelId }
+            : {};
+        const row = await writeRoutineModel(context.actor, model, (client) =>
+          client.routine.update({
             where: {
               id: existing.id,
               bot: { archivedAt: null },
@@ -282,7 +307,8 @@ export function routinesRoutes(ctx: RouterContext) {
                 : {}),
               ...(writesSchedule ? { nextRunAt } : {}),
             },
-          })
+          }),
+        )
           .catch(async (error: unknown) => {
             if (isRecordNotFound(error)) {
               if (

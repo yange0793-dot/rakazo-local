@@ -1,14 +1,16 @@
 // @vitest-environment jsdom
 
+import { runInNewContext } from "node:vm";
 import type { ComputerStatus } from "@rakazo/contracts";
 import { COMPUTER_ALLOWANCE_USED_ERROR } from "@rakazo/contracts";
-import type { ReactNode } from "react";
-import { act, createElement, Fragment, useEffect } from "react";
+import type { ReactNode, Ref } from "react";
+import { act, createElement, Fragment, useEffect, useImperativeHandle } from "react";
 import type { Root } from "react-dom/client";
 import { createRoot } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import Computer from "../app/computer";
+import type { ComputerKeyboardCommand } from "./computer-keyboard";
 
 const rpc = vi.hoisted(() => vi.fn());
 const textScale = vi.hoisted(() => ({ fontScale: 1 }));
@@ -19,6 +21,9 @@ const folds = vi.hoisted(() => ({
 }));
 const screens = vi.hoisted(() => ({
   mounts: 0,
+  injectJavaScript: vi.fn<(script: string) => void>(),
+  keyboardProbe: undefined as string | undefined,
+  onCommand: undefined as ((command: ComputerKeyboardCommand) => void) | undefined,
   error: undefined as undefined | (() => void),
   onMessage: undefined as
     | ((event: { nativeEvent: { data: string; url?: string } }) => void)
@@ -115,15 +120,22 @@ vi.mock("react-native-keyboard-controller", () => ({
     createElement("div", { "data-avoids-keyboard": String(enabled ?? true) }, children),
 }));
 vi.mock("../components/computer-keyboard-bar", () => ({
-  ComputerKeyboardBar: (props: { active: boolean }) =>
-    createElement("div", { "data-keyboard-bar": true, "data-active": String(props.active) }),
+  ComputerKeyboardBar: (props: {
+    active: boolean;
+    onCommand: (command: ComputerKeyboardCommand) => void;
+  }) => {
+    screens.onCommand = props.onCommand;
+    return createElement("div", { "data-keyboard-bar": true, "data-active": String(props.active) });
+  },
 }));
 
 vi.mock("react-native-webview", () => {
   return {
     WebView: (props: {
+      ref?: Ref<{ injectJavaScript: typeof screens.injectJavaScript }>;
       accessibilityElementsHidden?: boolean;
       importantForAccessibility?: string;
+      injectedJavaScript?: string;
       onMessage?: (event: { nativeEvent: { data: string; url?: string } }) => void;
       onError?: () => void;
       source?: { uri: string };
@@ -133,6 +145,8 @@ vi.mock("react-native-webview", () => {
       screens.error = props.onError;
       screens.source = props.source?.uri ?? "";
       screens.onLoadStart = props.onLoadStart;
+      screens.keyboardProbe = props.injectedJavaScript;
+      useImperativeHandle(props.ref, () => ({ injectJavaScript: screens.injectJavaScript }), []);
       useEffect(() => {
         screens.mounts += 1;
       }, []);
@@ -283,6 +297,7 @@ describe("computer screen", () => {
     foreground.value = true;
     folds.regions = [];
     screens.mounts = 0;
+    screens.injectJavaScript.mockClear();
     vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
   });
 
@@ -413,6 +428,59 @@ describe("computer screen", () => {
     await act(async () => vi.advanceTimersByTimeAsync(16_000));
     expect(view.textContent).toContain("Could not connect to the computer screen");
     vi.useRealTimers();
+  });
+
+  it.each([
+    ["direct", "https://screen.example.test/embed.html"],
+    ["Android proxy", "https://api.example.test/novnc/session/control/1.t/embed.html"],
+  ])("keeps native keystrokes on the authorized %s screen origin", async (kind, screenUrl) => {
+    respond(
+      { ...botWorking, controlHolder: "user", controlBotId: "bot-1", busyBotName: null },
+      screenUrl,
+    );
+    const view = await render();
+    await act(async () => preview(view).click());
+    await settle();
+    expect(screens.keyboardProbe).toBeTypeOf("string");
+    screens.injectJavaScript.mockClear();
+
+    const screen = new URL(screenUrl);
+    const redirect = new URL("https://elsewhere.example.test/continue");
+    function readyPage(location: URL, senderUrl: string, run = vi.fn()) {
+      screens.onLoadStart?.({ nativeEvent: { url: location.href } });
+      runInNewContext(screens.keyboardProbe!, {
+        window: {
+          location,
+          rakazoComputerKeyboard: { run },
+          ReactNativeWebView: {
+            postMessage: (data: string) =>
+              screens.onMessage?.({ nativeEvent: { url: senderUrl, data } }),
+          },
+        },
+      });
+    }
+
+    const queued: ComputerKeyboardCommand = { type: "text", text: "queued fixture" };
+    act(() => screens.onCommand?.(queued));
+    act(() => readyPage(redirect, redirect.href));
+    expect(screens.injectJavaScript).not.toHaveBeenCalled();
+
+    const run = vi.fn();
+    act(() => readyPage(screen, kind === "Android proxy" ? "null" : screen.href, run));
+    expect(screens.injectJavaScript).toHaveBeenCalledOnce();
+    const script = screens.injectJavaScript.mock.calls[0]![0];
+    runInNewContext(script, { window: { location: screen, rakazoComputerKeyboard: { run } } });
+    expect(run).toHaveBeenCalledExactlyOnceWith(queued);
+
+    // The native command can race with the navigation notification after a page was ready.
+    const later: ComputerKeyboardCommand = { type: "text", text: "later fixture" };
+    act(() => screens.onCommand?.(later));
+    expect(screens.injectJavaScript).toHaveBeenCalledTimes(2);
+    const destination = vi.fn();
+    runInNewContext(screens.injectJavaScript.mock.lastCall![0], {
+      window: { location: redirect, rakazoComputerKeyboard: { run: destination } },
+    });
+    expect(destination).not.toHaveBeenCalled();
   });
 
   it("does not rearm a connected retained page on token rotation", async () => {

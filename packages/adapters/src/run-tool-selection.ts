@@ -68,7 +68,7 @@ const CREATED_RUN_TOOL_NAMES = new Set(["ask_user", "update_bot"]);
  * needs — looking things up, reading and writing files, running commands, and browsing pages
  * on the bot's computer — but never talks to the user, asks them anything, or changes memory,
  * skills or routines, which the bot makes itself when the result comes back. A tool that needs
- * the owner runs only through the same rules, once approvals or Never ask as its own turn: its
+ * the owner runs only through the same rules, once approvals or bypass mode as its own turn: its
  * card goes to the chat that started it. The computer (and its screen) is shared, and its
  * lease decides whose work uses it; only that work waits.
  */

@@ -32,8 +32,8 @@ import {
 } from "./purchase-gate.js";
 import type { RunContext } from "./run-context.js";
 import {
+  bypassesApprovals,
   isRunTainted,
-  neverAsks,
   OWN_INSTRUCTIONS_BASELINE_UNKNOWN_ERROR,
   refuseOwnerSettingsChange,
 } from "./run-context.js";
@@ -360,7 +360,7 @@ export async function prepareToolRequest(
       return refusal("tool_disabled", "This tool is disabled for this bot.");
     if (!ctx.source.ownerStartedRun)
       return refusal("run_not_owner_started", "Bot management tools need a run you started.");
-    if (fleetWrite && !(await neverAsks(ctx)) && (await ctx.trust.receivedOutsideMessage()))
+    if (fleetWrite && !(await bypassesApprovals(ctx)) && (await ctx.trust.receivedOutsideMessage()))
       return refusal(
         "outside_message_blocks_bot_management",
         "Changes to the bots you manage are blocked for the rest of this run because it received a channel or webhook message.",
@@ -531,7 +531,7 @@ async function currentModelNames(
 }
 
 /**
- * `update_bot` on this bot itself. Under Never ask instructions are written at once; otherwise
+ * `update_bot` on this bot itself. Under bypass mode instructions are written at once; otherwise
  * they go through approval like any other action, and outside runs cannot change them.
  */
 async function prepareOwnBotUpdate(
@@ -582,7 +582,7 @@ async function prepareOwnBotUpdate(
       "owner_only_settings",
       `Only the owner can change ${settingsOnly.join(", ")}, in Settings.`,
     );
-  const unguarded = await neverAsks(ctx);
+  const unguarded = await bypassesApprovals(ctx);
   if (OWNER_SETTINGS.some((key) => argumentGiven(args[key]))) {
     if (isSubagentToolExecution(executionId) || (!unguarded && !ctx.source.ownerStartedRun))
       return refusal(

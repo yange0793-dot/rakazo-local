@@ -1,5 +1,15 @@
 import { canonicalPiProviderId, storedPiProviderIds, usableModelId } from "@rakazo/contracts";
-import type { PrismaClient } from "./client.js";
+import type { Prisma, PrismaClient } from "./client.js";
+
+/** Credentials and pins across Spaces share one account-wide transaction lock. */
+export async function lockAccountModels(
+  tx: Pick<Prisma.TransactionClient, "$queryRaw">,
+  userId: string,
+) {
+  await tx.$queryRaw`
+    SELECT 1 AS locked FROM "user" WHERE "id" = ${userId} FOR NO KEY UPDATE
+  `;
+}
 
 export const newestCredentialOrder = [
   { updatedAt: "desc" as const },

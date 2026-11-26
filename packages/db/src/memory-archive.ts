@@ -460,13 +460,13 @@ export class MemoryArchiveStore {
         existing.spaceId === ctx.spaceId &&
         existing.botId === input.botId &&
         existing.userId === input.userId &&
-        existing.scope === authorized.scope &&
         existing.generation === generation
       ) {
         // An activated cursor already owes its own range; extend it to the pinned head.
         await tx.memoryArchiveProgress.update({
           where: { threadId: input.threadId },
           data: {
+            scope: authorized.scope,
             throughSeq,
             pending: existing.processedUpToSeq < throughSeq,
             availableAt,
@@ -475,16 +475,16 @@ export class MemoryArchiveStore {
         return { generation, nextMessageSeq };
       }
       const seedSeq = await this.latestDirectSourceSeq(tx, input, ctx.spaceId, throughSeq);
-      if (seedSeq === null) return { generation, nextMessageSeq };
+      const processedUpToSeq = seedSeq === null ? throughSeq : seedSeq - 1;
       const data = {
         spaceId: ctx.spaceId,
         botId: input.botId,
         userId: input.userId,
         scope: authorized.scope,
         generation,
-        processedUpToSeq: seedSeq - 1,
+        processedUpToSeq,
         throughSeq,
-        pending: seedSeq - 1 < throughSeq,
+        pending: processedUpToSeq < throughSeq,
         availableAt,
       };
       await tx.memoryArchiveProgress.upsert({
@@ -533,7 +533,28 @@ export class MemoryArchiveStore {
       if (directUserText(row.blocks) === null) continue;
       return row.seq;
     }
-    return null;
+    // An eligible user message can exist before its run is recorded.
+    const unscheduled = await tx.message.findMany({
+      where: {
+        threadId: target.threadId,
+        role: "user",
+        authorUserId: target.userId,
+        seq: { lte: throughSeq },
+      },
+      select: { seq: true, blocks: true },
+      orderBy: { seq: "asc" },
+    });
+    return unscheduled.find((row) => directUserText(row.blocks) !== null)?.seq ?? null;
+  }
+
+  async observeClear(input: MemoryArchiveTarget, ctx: AdapterContext) {
+    return this.inTenant(ctx, async () => {
+      const thread = await this.requireDirectThread(this.prisma, input, ctx);
+      return {
+        generation: thread.historyCompactionGeneration,
+        nextMessageSeq: thread.nextMessageSeq,
+      };
+    });
   }
 
   /**
@@ -605,6 +626,7 @@ export class MemoryArchiveStore {
             : null;
         const bytes = Buffer.byteLength(message?.content ?? text ?? "");
         if (bytes > MAX_BATCH_TEXT_BYTES) {
+          if (text !== null) throw new Error("An automatic memory source exceeds the batch limit.");
           batchThroughSeq = row.seq;
           continue;
         }
@@ -820,8 +842,7 @@ export class MemoryArchiveStore {
 
   /**
    * Stop automatic extraction retries for this thread after a failed range. The cursor and
-   * the unprocessed messages stay; the next completed turn re-arms the pointer, and a clear
-   * is allowed to proceed instead of failing on a range that cannot be extracted.
+   * the unprocessed messages stay; the next completed turn or a clear re-arms the pointer.
    */
   async pause(input: MemoryArchiveTarget, ctx: AdapterContext): Promise<void> {
     if (input.userId !== ctx.userId) throw new IsolationError();
@@ -891,7 +912,6 @@ export class MemoryArchiveStore {
         throw new IsolationError();
       if (thread.helperBotId || thread.groupId || thread.externalConversationId) return false;
       return (
-        progress.pending &&
         progress.processedUpToSeq < progress.throughSeq &&
         progress.generation === thread.historyCompactionGeneration
       );

@@ -3,6 +3,7 @@ import { organizationLandingSpaceId, organizationOfSpace } from "@rakazo/core";
 import { queryOptions, useQuery } from "@tanstack/react-query";
 import { queryClient, spaceQueries, useQueryUserId } from "./query";
 import { ORGANIZATION_SPACES_STORAGE_KEY, rpc, selectedSpaceId, selectSpace } from "./rpc";
+import { useBoundSpaceId } from "./space-rpc";
 
 export type Organization = OrganizationList["organizations"][number];
 
@@ -10,7 +11,7 @@ export type Organization = OrganizationList["organizations"][number];
 export function organizationsQuery(userId: string | null) {
   return queryOptions({
     queryKey: [`user:${userId ?? ""}`, "organizations"],
-    queryFn: () => rpc.organizations.list(),
+    queryFn: () => rpc.organizations.list(undefined, { context: { spaceId: null } }),
   });
 }
 
@@ -22,7 +23,8 @@ export function useOrganizations() {
     queryClient,
   );
   const organizations = data?.organizations ?? [];
-  const spaceId = selectedSpaceId();
+  const boundSpaceId = useBoundSpaceId();
+  const spaceId = boundSpaceId === undefined ? selectedSpaceId() : boundSpaceId;
   const activeOrganizationId =
     organizationOfSpace(organizations, spaceId)?.id ?? data?.activeOrganizationId ?? null;
   return { organizations, activeOrganizationId };

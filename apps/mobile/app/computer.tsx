@@ -165,8 +165,14 @@ export default function Computer() {
 
   function injectKeyboardCommands(commands: ComputerKeyboardCommand[]) {
     const webView = screenWebViewRef.current;
-    if (!webView) return;
-    for (const command of commands) webView.injectJavaScript(computerKeyboardScript(command));
+    if (!webView || !loadedScreenUrl) return;
+    const origin = JSON.stringify(new URL(loadedScreenUrl).origin);
+    for (const command of commands) {
+      // A previously ready page can navigate before the native navigation event arrives.
+      webView.injectJavaScript(
+        `if(window.location.origin===${origin}){${computerKeyboardScript(command)}}true;`,
+      );
+    }
   }
 
   const label = computerLabel(computer?.mode, name);
@@ -860,17 +866,13 @@ function ScreenWebView({
         nativeKeyboard && keyboardSession ? computerKeyboardReadyProbe(keyboardSession) : undefined
       }
       onMessage={(event) => {
-        const state = fromScreenPage(
-          event.nativeEvent.url,
-          sourceUrl.current,
-          loadedPageUrl.current,
-        )
-          ? screenPageState(event.nativeEvent.data)
-          : null;
+        const { url: pageUrl, data } = event.nativeEvent;
+        if (!fromScreenPage(pageUrl, sourceUrl.current, loadedPageUrl.current)) return;
+        const state = screenPageState(data);
         if (state) {
           if (state !== "loading") reportStarted.current = true;
           onScreenState?.(state);
-        } else if (nativeKeyboard) onKeyboardMessage?.(event.nativeEvent.data);
+        } else if (nativeKeyboard) onKeyboardMessage?.(data);
       }}
       onLoadStart={(event) => {
         loadedPageUrl.current = event?.nativeEvent?.url ?? null;

@@ -1,10 +1,104 @@
 import type {
   ModelCatalogEntry,
+  ModelCredential,
+  ModelRole,
   ModelRoleChoice,
   ModelRoleSettings,
   ModelRoleView,
 } from "@rakazo/contracts";
-import { modelRoleChoiceKey } from "@rakazo/contracts";
+import {
+  canonicalPiProviderId,
+  connectedBackupOptions,
+  connectionDisplayName,
+  modelRoleChoiceKey,
+} from "@rakazo/contracts";
+import { credentialForModel } from "./model-providers.js";
+
+/** Choices, including the connection an older, unpinned role row already uses. */
+export function modelRolePickerData(
+  catalog: ModelCatalogEntry[],
+  credentials: ModelCredential[],
+  role: ModelRole,
+  displayProvider?: (provider: string, name: string, auth?: string) => string,
+) {
+  const byId = new Map(credentials.map((connection) => [connection.id, connection]));
+  const connectionFor = (choice: ModelRoleChoice) =>
+    choice.credentialId
+      ? byId.get(choice.credentialId)
+      : (credentialForModel(credentials, choice.provider, choice.modelId) ??
+        credentials.find(
+          (entry) =>
+            entry.provider === choice.provider &&
+            entry.catalogSource?.unavailableModelIds.includes(choice.modelId),
+        ) ??
+        credentials.find(
+          (entry) =>
+            canonicalPiProviderId(entry.provider) === canonicalPiProviderId(choice.provider) &&
+            !entry.catalogSource,
+        ));
+  const keyFor = (choice: ModelRoleChoice) =>
+    modelRoleChoiceKey(
+      choice.credentialId ? choice : { ...choice, credentialId: connectionFor(choice)?.id },
+    );
+  const unavailable = (choice: ModelRoleChoice) => {
+    const connection = connectionFor(choice);
+    if (choice.credentialId && !connection) return true;
+    if (connection?.reconnectRequired) return true;
+    const source = connection?.catalogSource;
+    return Boolean(
+      source && (!source.available || source.unavailableModelIds.includes(choice.modelId)),
+    );
+  };
+  const entryFor = (choice: ModelRoleChoice) =>
+    catalog.find(
+      (entry) =>
+        canonicalPiProviderId(entry.provider) === canonicalPiProviderId(choice.provider) &&
+        entry.id === choice.modelId &&
+        (!choice.credentialId ||
+          !entry.credentialIds ||
+          entry.credentialIds.includes(choice.credentialId)),
+    );
+
+  const byName = new Map<string, ModelCredential[]>();
+  for (const credential of credentials) {
+    const provider = canonicalPiProviderId(credential.provider);
+    const catalogName =
+      catalog.find((entry) => canonicalPiProviderId(entry.provider) === provider)?.providerName ??
+      credential.provider;
+    const name = credential.catalogSource
+      ? credential.label
+      : connectionDisplayName(
+          credential,
+          displayProvider?.(credential.provider, catalogName, credential.authKind) ?? catalogName,
+          [catalogName],
+        );
+    const peers = byName.get(name);
+    if (peers) peers.push(credential);
+    else byName.set(name, [credential]);
+  }
+  const names = new Map<string, string>();
+  for (const [name, peers] of byName) {
+    for (const peer of peers) {
+      const group = peer.catalogSource?.group;
+      const qualifier =
+        group && peers.filter((other) => other.catalogSource?.group === group).length === 1
+          ? group
+          : peer.id;
+      names.set(peer.id, peers.length === 1 ? name : `${name} (${qualifier})`);
+    }
+  }
+  const connectionName = (choice: ModelRoleChoice) => {
+    const id = choice.credentialId ?? connectionFor(choice)?.id;
+    return id ? names.get(id) : undefined;
+  };
+  const options = connectedBackupOptions(catalog, credentials, role === "computer")
+    .filter((option) => !unavailable(option))
+    .map((option) => ({
+      ...option,
+      connectionName: connectionName(option) ?? option.connectionName,
+    }));
+  return { options, entryFor, connectionFor, connectionName, keyFor, unavailable };
+}
 
 export interface ModelRoleTransport {
   load(): Promise<ModelRoleView>;
@@ -99,6 +193,9 @@ export function createModelRoleSettings(
         if (failures !== queue.failures) return;
         try {
           confirmed = await transport.save(patch);
+          if (current === generation && queue.tail === write) {
+            publish({ settings: confirmed });
+          }
         } catch (error) {
           queue.failures += 1;
           if (current === generation)

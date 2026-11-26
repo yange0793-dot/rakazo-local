@@ -4,6 +4,7 @@ __pycache__/
 *.py[cod]
 .turbo
 dist
+apps/*/dist-*/
 build
 coverage
 .playwright-report
@@ -40,6 +41,18 @@ verify-report
 .last-deployed-revision
 design/
 PRODUCT_PLAN.md
+
+# Local native installation state
+local-native/env.native
+local-native/env.postgres
+local-native/pgdata/
+local-native/postgres/
+local-native/run/
+local-native/logs/
+local-native/backups/
+local-native/releases/
+local-native/memory-runtime/
+local-native/runtime/*/config.json
 
 # Lingui compiled catalogs — the Vite plugin and Metro compile .po at build time
 packages/i18n/locales/**/*.mjs

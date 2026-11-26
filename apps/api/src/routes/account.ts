@@ -9,12 +9,7 @@ import {
   settleCallRequest,
 } from "@rakazo/adapters";
 import type { ActionApprovalRule, Actor, Me, SettingsScope } from "@rakazo/contracts";
-import {
-  approvalModeFromPreference,
-  approvalPreferenceFromMode,
-  callRequestClientNonce,
-  displayName,
-} from "@rakazo/core";
+import { callRequestClientNonce, displayName } from "@rakazo/core";
 import { urlSite } from "@rakazo/core/egress";
 import {
   auditLogOrganization,
@@ -332,15 +327,7 @@ export function accountRoutes(ctx: RouterContext) {
       }),
       set: authed.autoReview.set.handler(async ({ context, input }) => {
         await deps.prisma.$transaction((tx) =>
-          saveAutoReviewPreference(
-            tx,
-            context.actor,
-            input.mode
-              ? approvalPreferenceFromMode(input.mode)
-              : { enabled: input.enabled, skipApprovals: input.skipApprovals },
-            { enabled: true, skipApprovals: false },
-            input.scope,
-          ),
+          saveAutoReviewPreference(tx, context.actor, { mode: input.mode }, input.scope),
         );
         return loadAutoReviewSettings(deps, context.actor, input.scope);
       }),
@@ -604,11 +591,7 @@ async function loadAutoReviewSettings(deps: RouterDeps, actor: Actor, scope?: Se
     ),
     findAutoReviewPreference(deps.prisma, actor, scope),
   ]);
-  const stored = {
-    enabled: preference?.enabled ?? true,
-    skipApprovals: preference?.skipApprovals ?? false,
-  };
-  const settings = { ...stored, mode: approvalModeFromPreference(stored) };
+  const settings = { mode: preference?.mode ?? ("ask" as const) };
   const deploymentChecker = role.primarySource === "deployment" ? role.primary : null;
   const memberChoices = [
     ...(deploymentChecker || !role.primary ? [] : [role.primary]),

@@ -101,6 +101,7 @@ export type SecretAskPurpose = z.infer<typeof SecretAskPurpose>;
 export const BotSettingsValuesSchema = z.object({
   modelProvider: z.string().trim().min(1).max(80).nullable().optional(),
   modelId: z.string().trim().min(1).max(200).nullable().optional(),
+  modelCredentialId: Id.nullable().optional(),
   thinkingLevel: ThinkingLevelSchema.nullable().optional(),
   autoSpeak: z.boolean().optional(),
   voiceId: z.string().max(120).nullable().optional(),
@@ -134,6 +135,8 @@ export const MessageBlock = z.discriminatedUnion("kind", [
     approvalEffectId: Id.optional(),
     /** Server-verified originating helper card, when an approval is shown in its parent chat. */
     helper: z.object({ messageId: Id, name: z.string() }).optional(),
+    /** A persisted external question routed to the managed task's original chat. */
+    managedInput: z.object({ eventId: Id, questionId: z.string() }).optional(),
     instructionUpdate: z
       .object({
         botId: Id,

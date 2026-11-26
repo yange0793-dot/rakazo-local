@@ -26,6 +26,7 @@ export * from "./improvement-components.js";
 export * from "./integration-settings.js";
 export * from "./local-install.js";
 export * from "./local-settings.js";
+export * from "./managed-work.js";
 export * from "./markdown-text.js";
 export * from "./mcp.js";
 export * from "./mcp-app.js";

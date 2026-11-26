@@ -75,6 +75,7 @@ describe("home archive", () => {
     await mkdir(path.join(source, "empty"));
     await writeFile(path.join(source, ".browser-profiles/default/Cookies"), "session");
     await writeFile(path.join(source, "notes.txt"), "hello");
+    await writeFile(path.join(source, "\uFEFFnotes.txt"), "distinct filename");
     await writeFile(path.join(source, "run.sh"), "#!/bin/sh\n");
     await chmod(path.join(source, "run.sh"), 0o755);
     const dest = path.join(await tempDir(), "home");
@@ -84,6 +85,20 @@ describe("home archive", () => {
 
     expect(await tree(dest)).toEqual(await tree(source));
     expect((await stat(path.join(dest, "run.sh"))).mode & 0o777).toBe(0o755);
+  });
+
+  it("closes the download iterator when the archive header is rejected", async () => {
+    let closed = false;
+    async function* download() {
+      try {
+        yield Buffer.from("invalid archive header");
+        yield Buffer.from("unread data");
+      } finally {
+        closed = true;
+      }
+    }
+    await expect(checkHomeArchive(download())).rejects.toThrow("Not a home archive");
+    expect(closed).toBe(true);
   });
 
   it("packs only durable files and leaves excluded files on the live home", async () => {
@@ -166,6 +181,24 @@ describe("home archive", () => {
     );
     expect(await tree(dest)).toEqual({ keep: "ok" });
   });
+
+  it.skipIf(process.platform !== "win32")(
+    "rejects noncanonical Windows paths before restoring entries",
+    async () => {
+      for (const name of [
+        "notes\\report.txt",
+        "notes/report.txt.",
+        "NUL.txt",
+        "report.txt:stream",
+      ]) {
+        const dest = await tempDir();
+        await expect(unpackHome(once(archive(entry(2, name, "x"))), dest)).rejects.toThrow(
+          "Home archive path is not allowed",
+        );
+        expect(await readdir(dest)).toEqual([]);
+      }
+    },
+  );
 
   it("copies links that stay in the home and leaves out the rest", async () => {
     const outside = await tempDir();

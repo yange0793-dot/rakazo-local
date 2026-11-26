@@ -26,7 +26,7 @@ Run `pnpm install --frozen-lockfile` when you need to run or test the worktree.
 
 | Command                     | When to run                                                                                                                                         |
 | --------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `pnpm test`                 | Default. Units, properties, and in-process contracts. Scripted runtime, fake sandbox, in-memory wakeup — no live connector or model-provider calls. |
+| `pnpm test`                 | Full unit suite. Reserve for broad changes or when focused checks cannot establish correctness. |
 | `pnpm test:integration`     | Postgres via Testcontainers: product journeys, authorization, executor lifecycle, Graphile / LISTEN/NOTIFY. Needs Docker.                           |
 | `pnpm test:e2e`             | Playwright against the emulated API. Needs Docker.                                                                                                  |
 | `pnpm test:topology`        | Local product-path smoke: Docker computer + Graphile worker recovery. Needs Docker. Not PR CI.                                                      |
@@ -37,6 +37,10 @@ Run `pnpm install --frozen-lockfile` when you need to run or test the worktree.
 | `pnpm test:computer`        | Real vision model + E2B desktop. Needs keys; see [computer verification](docs/computer-runtime.md#verification). Not PR CI.                         |
 | `pnpm check`                | TypeScript (`tsc`) across the monorepo.                                                                                                             |
 | `pnpm lint`                 | Biome lint and format check.                                                                                                                        |
+
+During local development, run the focused tests and checks for the affected behavior or
+packages, including affected dependents where relevant. Run the full `pnpm test` or
+`pnpm check` only when requested or focused checks cannot establish correctness.
 
 PR CI always runs `pnpm lint`. Typechecks and unit tests target affected packages and
 their dependents unless a change requires checking all packages. Production builds

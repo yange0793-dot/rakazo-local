@@ -83,7 +83,8 @@ export async function runContainerCommand(
     }
   }
   const inspect = await exec.inspect();
-  const code = inspect.ExitCode ?? 0;
+  const code = inspect.ExitCode;
+  if (inspect.Running || code == null) throw new Error("Computer command exit was not confirmed");
   const completedWithExit124 =
     code === 124 && completionMarker
       ? await consumeCompletionMarker(container, completionMarker)
@@ -173,14 +174,15 @@ export async function writeContainerFile(
   });
   const stream = await exec.start({ hijack: true, stdin: true });
   const chunks: Buffer[] = [];
-  stream.on("data", (data: Buffer) => chunks.push(data));
-  stream.end(content);
   await new Promise<void>((resolve, reject) => {
+    stream.on("data", (data: Buffer) => chunks.push(data));
     stream.on("end", resolve);
     stream.on("error", reject);
+    stream.end(content);
   });
   const inspect = await exec.inspect();
-  if ((inspect.ExitCode ?? 0) !== 0) {
+  if (inspect.Running || inspect.ExitCode == null) throw new Error("File write exit was not confirmed");
+  if (inspect.ExitCode !== 0) {
     const output = demuxDockerStream(Buffer.concat(chunks));
     throw new Error(output.stderr || output.stdout || "file write failed");
   }

@@ -14,6 +14,7 @@ import {
   appendEvent,
   clearThread,
   completedRunBlocks,
+  deleteTransientRunEvents,
   finalizeRun,
   sendUserMessage,
   ThreadClearConflictError,
@@ -538,6 +539,12 @@ describe("thread lock transaction budget", () => {
 
   it("clears a thread with the explicit budget", async () => {
     const tx = {
+      ticket: { findMany: vi.fn(async () => []), updateMany: vi.fn(async () => ({ count: 0 })) },
+      workEvent: { updateMany: vi.fn(async () => ({ count: 0 })) },
+      externalAgentExecution: {
+        findMany: vi.fn(async () => []),
+        updateMany: vi.fn(async () => ({ count: 0 })),
+      },
       $queryRaw: vi.fn(async () => []),
       $executeRaw: vi.fn(async () => 0),
       threadRead: {
@@ -2021,9 +2028,15 @@ describe("answerRunInput", () => {
       expect.objectContaining({ data: expect.objectContaining({ trigger: "user" }) }),
     );
 
-    const typed = await answerIntro("Track our competitors' launches", undefined, "composer-message");
+    const typed = await answerIntro(
+      "Track our competitors' launches",
+      undefined,
+      "composer-message",
+    );
     expect(typed.run.updateMany).toHaveBeenCalledWith(
-      expect.objectContaining({ data: expect.objectContaining({ trigger: "user", sourceMessageId: "composer-message" }) }),
+      expect.objectContaining({
+        data: expect.objectContaining({ trigger: "user", sourceMessageId: "composer-message" }),
+      }),
     );
     expect(typed.task.updateMany).toHaveBeenCalledWith({
       where: { runs: { some: { id: "run-1" } } },
@@ -5241,7 +5254,60 @@ describe("claimSteering", () => {
   });
 });
 
+describe("deleteTransientRunEvents", () => {
+  it("deletes opened activity markers and preserves unrelated opened metadata", async () => {
+    const tx = {
+      $contentEncryption: () => ({}),
+      event: {
+        findMany: vi.fn(async () => [
+          { id: "marker", payload: { activity: { thinking: true } } },
+          { id: "other", payload: { notice: "keep" } },
+        ]),
+        deleteMany: vi.fn(),
+      },
+    };
+    await deleteTransientRunEvents(tx as never, "run-1");
+    expect(tx.event.deleteMany).toHaveBeenCalledWith({
+      where: {
+        runId: "run-1",
+        OR: [
+          { type: "thread.progress" },
+          { type: "thread.meta", payload: { equals: { activity: { thinking: true } } } },
+          { type: "thread.meta", payload: { equals: { activity: { thinking: false } } } },
+          { id: { in: ["marker"] } },
+        ],
+      },
+    });
+  });
+});
+
 describe("clearThread", () => {
+  it("keeps messages when archive progress stops before the pinned head", async () => {
+    const removeMessages = vi.fn();
+    const tx = {
+      thread: {
+        update: vi.fn(async () => ({ nextMessageSeq: 42, historyCompactionGeneration: 1 })),
+      },
+      memoryArchiveProgress: {
+        findUnique: vi.fn(async () => ({ generation: 1, processedUpToSeq: 40 })),
+      },
+      message: { deleteMany: removeMessages },
+    };
+    const prisma = {
+      $transaction: vi.fn(async (fn: (client: typeof tx) => unknown) => fn(tx)),
+    } as unknown as PrismaClient;
+    await expect(
+      clearThread(prisma, {
+        spaceId: "workspace-1",
+        threadId: "thread-1",
+        botId: "bot-1",
+        expectedGeneration: 1,
+        expectedNextMessageSeq: 42,
+      }),
+    ).rejects.toBeInstanceOf(ThreadClearConflictError);
+    expect(removeMessages).not.toHaveBeenCalled();
+  });
+
   it.each([
     { expectedGeneration: 2, expectedNextMessageSeq: 42 },
     { expectedGeneration: 1, expectedNextMessageSeq: 41 },
@@ -5269,6 +5335,12 @@ describe("clearThread", () => {
 
   it("reports a committed clear even when the legacy binding sweep fails", async () => {
     const tx = {
+      ticket: { findMany: vi.fn(async () => []), updateMany: vi.fn(async () => ({ count: 0 })) },
+      workEvent: { updateMany: vi.fn(async () => ({ count: 0 })) },
+      externalAgentExecution: {
+        findMany: vi.fn(async () => []),
+        updateMany: vi.fn(async () => ({ count: 0 })),
+      },
       $queryRaw: vi.fn(async () => []),
       $executeRaw: vi.fn(async () => 0),
       threadRead: {
@@ -5281,15 +5353,19 @@ describe("clearThread", () => {
         findMany: vi.fn().mockResolvedValue([]),
         update: vi
           .fn()
-          .mockResolvedValueOnce({ nextMessageSeq: 3, historyCompactionGeneration: 0 })
+          .mockResolvedValueOnce({
+            nextMessageSeq: 3,
+            historyCompactionGeneration: 0,
+            userId: "user-1",
+          })
           .mockResolvedValue({ nextEventSeq: 1 }),
       },
       run: {
-        findMany: vi
-          .fn()
-          .mockResolvedValue([
-            { id: "run-1", taskId: "task-1", userId: "user-1", spaceId: "workspace-1" },
-          ]),
+        findMany: vi.fn(async ({ where }: { where: { ticketId?: unknown } }) =>
+          where.ticketId
+            ? []
+            : [{ id: "run-1", taskId: "task-1", userId: "user-1", spaceId: "workspace-1" }],
+        ),
         updateManyAndReturn: vi.fn(async ({ where }: { where: { id: { in: string[] } } }) =>
           where.id.in.map((id) => ({ id })),
         ),
@@ -5325,6 +5401,12 @@ describe("clearThread", () => {
     const fanout = new TestFanout();
     const publish = vi.spyOn(fanout, "publish");
     const tx = {
+      ticket: { findMany: vi.fn(async () => []), updateMany: vi.fn(async () => ({ count: 0 })) },
+      workEvent: { updateMany: vi.fn(async () => ({ count: 0 })) },
+      externalAgentExecution: {
+        findMany: vi.fn(async () => []),
+        updateMany: vi.fn(async () => ({ count: 0 })),
+      },
       $queryRaw: vi.fn(async () => []),
       $executeRaw: vi.fn(async () => 0),
       threadRead: {
@@ -5337,15 +5419,19 @@ describe("clearThread", () => {
         findMany: vi.fn().mockResolvedValue([]),
         update: vi
           .fn()
-          .mockResolvedValueOnce({ nextMessageSeq: 42, historyCompactionGeneration: 0 })
+          .mockResolvedValueOnce({
+            nextMessageSeq: 42,
+            historyCompactionGeneration: 0,
+            userId: "user-1",
+          })
           .mockResolvedValue({ nextEventSeq: 1 }),
       },
       run: {
-        findMany: vi
-          .fn()
-          .mockResolvedValue([
-            { id: "run-1", taskId: "task-1", userId: "user-1", spaceId: "workspace-1" },
-          ]),
+        findMany: vi.fn(async ({ where }: { where: { ticketId?: unknown } }) =>
+          where.ticketId
+            ? []
+            : [{ id: "run-1", taskId: "task-1", userId: "user-1", spaceId: "workspace-1" }],
+        ),
         updateManyAndReturn: vi.fn(async ({ where }: { where: { id: { in: string[] } } }) =>
           where.id.in.map((id) => ({ id })),
         ),
@@ -5423,25 +5509,39 @@ describe("clearThread", () => {
   it("scopes group clear lease cleanup to cancelled run ids", async () => {
     const fanout = new TestFanout();
     const tx = {
+      ticket: { findMany: vi.fn(async () => []), updateMany: vi.fn(async () => ({ count: 0 })) },
+      workEvent: { updateMany: vi.fn(async () => ({ count: 0 })) },
+      externalAgentExecution: {
+        findMany: vi.fn(async () => []),
+        updateMany: vi.fn(async () => ({ count: 0 })),
+      },
       $executeRaw: vi.fn(async () => 0),
       threadRead: {
         deleteMany: vi.fn(async () => ({ count: 0 })),
         updateMany: vi.fn(async () => ({ count: 0 })),
       },
-      $queryRaw: vi.fn(async () => [{ id: "group-1" }]),
+      $queryRaw: vi.fn().mockResolvedValue([]).mockResolvedValueOnce([{ id: "group-1" }]),
       externalEffect: { deleteMany: vi.fn(async () => ({ count: 0 })) },
       thread: {
         findMany: vi.fn().mockResolvedValue([]),
         update: vi
           .fn()
-          .mockResolvedValueOnce({ nextMessageSeq: 3, historyCompactionGeneration: 0 })
+          .mockResolvedValueOnce({
+            nextMessageSeq: 3,
+            historyCompactionGeneration: 0,
+            userId: "user-1",
+          })
           .mockResolvedValue({ nextEventSeq: 1 }),
       },
       run: {
-        findMany: vi.fn().mockResolvedValue([
-          { id: "group-run-1", taskId: "task-1" },
-          { id: "group-run-2", taskId: "task-2" },
-        ]),
+        findMany: vi.fn(async ({ where }: { where: { ticketId?: unknown } }) =>
+          where.ticketId
+            ? []
+            : [
+                { id: "group-run-1", taskId: "task-1" },
+                { id: "group-run-2", taskId: "task-2" },
+              ],
+        ),
         updateManyAndReturn: vi.fn(async ({ where }: { where: { id: { in: string[] } } }) =>
           where.id.in.map((id) => ({ id })),
         ),
@@ -5490,6 +5590,7 @@ describe("clearThread", () => {
               trigger: "helper",
               sourceMessage: { threadId: "thread-group" },
             },
+            { id: { in: [] } },
           ],
         }),
       }),

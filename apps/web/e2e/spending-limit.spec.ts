@@ -14,7 +14,6 @@ test("shows the spending limit once a card is saved, sets a monthly limit, and l
   await completeOnboarding(page);
   const settings = await openUserSettings(page);
   await settings.getByTestId("settings-nav-confirmations").click();
-  await expect(settings.getByTestId("approval-mode")).toBeVisible();
   // Nothing can pay yet, so there is nothing to limit.
   await expect(settings.getByTestId("spending-limit")).toHaveCount(0);
 

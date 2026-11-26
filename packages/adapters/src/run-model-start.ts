@@ -24,18 +24,20 @@ export function runModelBackups(
   defaults: DeploymentModelDefaults,
   scripted: boolean,
   registerSecrets: (values: string[]) => void,
+  pinnedConnection = false,
 ) {
   let backupChoices: Promise<ModelRoleChoice[]> | undefined;
   const load = () =>
-    (backupChoices ??= scripted
-      ? Promise.resolve([])
-      : effectiveModelRole(deps.prisma, run, "main", defaults).then(
-          (role) => role.backups,
-          (error: unknown) => {
-            getLogger().warn("Backup models could not be loaded", { runId: run.id, error });
-            return [];
-          },
-        ));
+    (backupChoices ??=
+      scripted || pinnedConnection
+        ? Promise.resolve([])
+        : effectiveModelRole(deps.prisma, run, "main", defaults).then(
+            (role) => role.backups,
+            (error: unknown) => {
+              getLogger().warn("Backup models could not be loaded", { runId: run.id, error });
+              return [];
+            },
+          ));
   // Backups that could not start here are not offered again once the model runs.
   const unavailable = new Set<ModelRoleChoice>();
   // A main model with no connection, or whose provider refused its sign-in, runs on the
@@ -87,6 +89,7 @@ export async function startRunModel(
     provider: string | null | undefined;
     id: string | null | undefined;
     credential: Awaited<ReturnType<typeof resolveConnectedModelKey>>["credential"];
+    pinnedConnection?: boolean;
     thinkingLevel: AgentRunRequest["model"]["thinkingLevel"];
   },
   pinned: Awaited<ReturnType<typeof restoreComputerModels>>["main"] | undefined,
@@ -127,6 +130,9 @@ export async function startRunModel(
               selected.provider,
               selected.id,
               registerSecrets,
+              selected.pinnedConnection
+                ? { requireStoredSecret: true, pinnedConnection: true }
+                : undefined,
             ),
       };
     } catch (error) {

@@ -2739,11 +2739,12 @@ describe("sendThreadMessage", () => {
     );
 
     it.each([
-      ["bot", botTarget],
-      ["group", groupTarget],
+      ["bot", botTarget, undefined, ["bot-a"]],
+      ["group", groupTarget, undefined, ["bot-a", "bot-b"]],
+      ["addressed group", groupTarget, ["bot-b"], ["bot-b"]],
     ] as const)(
       "starts the sender's own %s run instead of answering another person's question",
-      async (_kind, target) => {
+      async (_kind, target, mentions, recipients) => {
         const { tx, prisma } = busyThread([{ ...ownerRun, status: "waiting_input" }]);
 
         await expect(
@@ -2756,15 +2757,16 @@ describe("sendThreadMessage", () => {
             },
             { spaceId: "workspace-1", userId: "user-2" } as Actor,
             target,
-            { text: "Paris", clientNonce: "nonce-partner" },
+            { text: "Paris", mentions: mentions && [...mentions], clientNonce: "nonce-partner" },
           ),
         ).resolves.toMatchObject({ runId: "run-partner" });
-        expect(tx.run.create).toHaveBeenCalledWith({
-          data: expect.objectContaining({
-            userId: "user-2",
-            sourceMessageId: "msg-1",
-          }),
-        });
+        expect(tx.run.create.mock.calls).toEqual(
+          recipients.map((botId) => [
+            {
+              data: expect.objectContaining({ botId, userId: "user-2", sourceMessageId: "msg-1" }),
+            },
+          ]),
+        );
         // The question stays pending on its card for the person who asked.
         expect(tx.run.updateMany).not.toHaveBeenCalledWith(
           expect.objectContaining({
@@ -3490,7 +3492,7 @@ describe("sendThreadMessage", () => {
       expect.objectContaining({ name: "run.continue", payload: { runId: "run-routine" } }),
     );
   });
-  it("answers a group webhook run waiting for input from the composer", async () => {
+  it("answers the sender's own group webhook question without mentions", async () => {
     const waitingAsk = {
       id: "ask-1",
       blocks: [{ kind: "ask", text: "Which city should I use?", status: "pending" }],
@@ -3577,7 +3579,7 @@ describe("sendThreadMessage", () => {
         },
         actor,
         target,
-        { text: "Paris", mentions: ["bot-a"], clientNonce: "nonce-group-webhook-waiting" },
+        { text: "Paris", clientNonce: "nonce-group-webhook-waiting" },
       ),
     ).resolves.toMatchObject({
       runId: "run-webhook",
@@ -4826,6 +4828,14 @@ describe("sendThreadMessage", () => {
 });
 
 describe("stopThreadRuns", () => {
+  const withoutManagedWork = () => ({
+    ticket: { findMany: vi.fn(async () => []), updateMany: vi.fn(async () => ({ count: 0 })) },
+    workEvent: { updateMany: vi.fn(async () => ({ count: 0 })) },
+    externalAgentExecution: {
+      findMany: vi.fn(async () => []),
+      updateMany: vi.fn(async () => ({ count: 0 })),
+    },
+  });
   it("snapshots every lease when group members share a team computer", async () => {
     const releaseScreen = vi.fn().mockResolvedValue(undefined);
     const execute = vi.fn(async function* () {
@@ -4833,12 +4843,14 @@ describe("stopThreadRuns", () => {
     });
     let nextEventSeq = 0;
     const transaction = {
+      ...withoutManagedWork(),
       externalEffect: { deleteMany: vi.fn(async () => ({ count: 0 })) },
       user: { findMany: vi.fn().mockResolvedValue([]) },
       spaceMember: { count: vi.fn().mockResolvedValue(1) },
       $executeRaw: vi.fn(async () => 0),
       $queryRaw: vi.fn(),
       thread: {
+        findUnique: vi.fn(async () => ({ userId: "user-1" })),
         update: vi.fn(async () => ({ nextEventSeq: ++nextEventSeq })),
       },
       message: { findMany: vi.fn(async () => []) },
@@ -4979,12 +4991,14 @@ describe("stopThreadRuns", () => {
       yield { type: "exit", code: 0 };
     });
     const transaction = {
+      ...withoutManagedWork(),
       externalEffect: { deleteMany: vi.fn(async () => ({ count: 0 })) },
       user: { findMany: vi.fn().mockResolvedValue([]) },
       spaceMember: { count: vi.fn().mockResolvedValue(1) },
       $executeRaw: vi.fn(async () => 0),
       $queryRaw: vi.fn(),
       thread: {
+        findUnique: vi.fn(async () => ({ userId: "user-1" })),
         update: vi.fn().mockResolvedValue({ nextEventSeq: 5 }),
       },
       message: { findMany: vi.fn(async () => []) },
@@ -5095,12 +5109,14 @@ describe("stopThreadRuns", () => {
     const writes: string[] = [];
     const created: Array<Record<string, unknown>> = [];
     const transaction = {
+      ...withoutManagedWork(),
       externalEffect: { deleteMany: vi.fn(async () => ({ count: 0 })) },
       user: { findMany: vi.fn().mockResolvedValue([]) },
       spaceMember: { count: vi.fn().mockResolvedValue(1) },
       $executeRaw: vi.fn(async () => 0),
       $queryRaw: vi.fn(),
       thread: {
+        findUnique: vi.fn(async () => ({ userId: "user-1" })),
         update: vi.fn(async () => ({ nextEventSeq: ++nextEventSeq })),
       },
       message: { findMany: vi.fn(async () => []) },
@@ -5230,13 +5246,15 @@ describe("stopThreadRuns", () => {
 
   it("emits no event and skips the wake when nothing was running", async () => {
     const transaction = {
+      ...withoutManagedWork(),
       externalEffect: { deleteMany: vi.fn(async () => ({ count: 0 })) },
       user: { findMany: vi.fn().mockResolvedValue([]) },
       spaceMember: { count: vi.fn().mockResolvedValue(1) },
       $executeRaw: vi.fn(async () => 0),
       $queryRaw: vi.fn(),
-      thread: { update: vi.fn() },
+      thread: { findUnique: vi.fn(async () => ({ userId: "user-1" })), update: vi.fn() },
       run: {
+        findMany: vi.fn(async () => []),
         updateManyAndReturn: vi.fn().mockResolvedValue([]),
         findUnique: vi.fn(),
       },
@@ -5284,9 +5302,11 @@ describe("stopThreadRuns", () => {
 
   it("runs the stop transaction with the explicit thread-lock budget", async () => {
     const transaction = {
+      ...withoutManagedWork(),
       $executeRaw: vi.fn(async () => 0),
       $queryRaw: vi.fn(),
-      run: { updateManyAndReturn: vi.fn().mockResolvedValue([]) },
+      thread: { findUnique: vi.fn(async () => ({ userId: "user-1" })) },
+      run: { findMany: vi.fn(async () => []), updateManyAndReturn: vi.fn().mockResolvedValue([]) },
       steeringMessage: { deleteMany: vi.fn().mockResolvedValue({ count: 0 }) },
     };
     const $transaction = vi.fn(async (callback: (client: typeof transaction) => unknown) =>

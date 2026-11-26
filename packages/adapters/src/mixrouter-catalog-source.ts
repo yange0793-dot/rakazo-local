@@ -10,6 +10,15 @@ const ProviderSchema = z.object({
   model: z.string().optional(),
   models: z.array(z.string()).optional(),
   wire_api: z.string().optional(),
+  keys: z
+    .array(
+      z.object({
+        id: z.string().min(1),
+        label: z.string().optional(),
+        enabled: z.boolean().optional(),
+      }),
+    )
+    .optional(),
 });
 const StateSchema = z.object({
   providers: z.record(z.string(), z.array(ProviderSchema)),
@@ -70,7 +79,7 @@ export function createMixRouterCatalogSource(
         throw new Error("Catalog source returned no channels for the configured group");
       const insights = InsightsSchema.parse(await readJson("/api/insights/models", signal));
       const ids = new Set<string>();
-      return providers.map((provider) => {
+      return providers.flatMap((provider) => {
         if (ids.has(provider.id)) throw new Error("Catalog source returned duplicate channel IDs");
         ids.add(provider.id);
         const models = [...new Set([provider.model, ...(provider.models ?? [])])]
@@ -115,12 +124,27 @@ export function createMixRouterCatalogSource(
             }
             return { id: `${provider.id}/${model}`, label: model, capabilities };
           });
-        return {
+        const channel = {
           id: provider.id,
           label: provider.name,
           enabled: provider.enabled !== false,
           models,
         };
+        if (!provider.keys || provider.keys.length < 2) return [channel];
+        return [
+          channel,
+          ...provider.keys
+            .filter((key) => key.enabled !== false)
+            .map((key) => {
+              const id = `key:${encodeURIComponent(provider.id)}/${encodeURIComponent(key.id)}`;
+              return {
+                ...channel,
+                id,
+                label: `${channel.label} · ${key.label || key.id}`,
+                models: models.map((model) => ({ ...model, id: `${id}/${model.label}` })),
+              };
+            }),
+        ];
       });
     },
   };

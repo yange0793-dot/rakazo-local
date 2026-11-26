@@ -12,6 +12,7 @@ import {
   disabledBuiltinToolSet,
   InstructionVersionSchema,
   initialBotMemory,
+  OPENAI_COMPATIBLE_PROVIDER_ID,
   resolveBotAvatarSet,
 } from "@rakazo/contracts";
 import {
@@ -27,6 +28,7 @@ import type { Prisma, PrismaClient } from "./client.js";
 import type { ComputerMode } from "./computers.js";
 import { ensureComputerRecord, parseComputerMode, teamComputerUserId } from "./computers.js";
 import { createThreadMessageInTransaction } from "./messages.js";
+import { lockAccountModels } from "./model-credentials.js";
 import { withNewestThreadMessages } from "./preview-messages.js";
 import { isUniqueViolation } from "./prisma-errors.js";
 import { BotSectionNameConflictError, IsolationError } from "./scope.js";
@@ -100,6 +102,7 @@ function mapBot(
     autoSpeak?: boolean;
     modelProvider?: string | null;
     modelId?: string | null;
+    modelCredentialId?: string | null;
     thinkingLevel?: string | null;
     teamChatAmbientEnabled?: boolean;
     teamChatRules?: string;
@@ -150,6 +153,7 @@ function mapBot(
     autoSpeak: bot.autoSpeak ?? false,
     modelProvider: bot.modelProvider ? canonicalPiProviderId(bot.modelProvider) : null,
     modelId: bot.modelId ?? null,
+    modelCredentialId: bot.modelCredentialId ?? null,
     thinkingLevel: (bot.thinkingLevel as Bot["thinkingLevel"]) ?? null,
     teamChatAmbientEnabled: bot.teamChatAmbientEnabled ?? false,
     teamChatRules: bot.teamChatRules ?? "",
@@ -523,6 +527,7 @@ export function createRepos(
         spawnKey?: string;
         modelProvider?: string | null;
         modelId?: string | null;
+        modelCredentialId?: string | null;
         thinkingLevel?: string | null;
         disabledBuiltinTools?: string[];
         initialMessage?: {
@@ -532,32 +537,17 @@ export function createRepos(
         };
         /** Adds content in the creation transaction, after the bot and its MEMORY.md exist. */
         seed?: (tx: Prisma.TransactionClient, botId: string) => Promise<void>;
+        validateModelPin?: (
+          tx: Prisma.TransactionClient,
+          provider: string,
+          modelId: string,
+          credentialId: string | null,
+        ) => Promise<void>;
         isolationLevel?: Prisma.TransactionIsolationLevel;
       },
     ): Promise<Bot> {
       // A reserved preview identity is also an idempotency key if the response is lost.
       const spawnKey = input.spawnKey ?? input.id;
-      let modelProvider = input.modelProvider ?? null;
-      let modelId = input.modelId ?? null;
-      let thinkingLevel = input.thinkingLevel ?? null;
-      let disabledBuiltinTools = input.disabledBuiltinTools ?? [];
-      if (input.parentBotId) {
-        const parent = await prisma.bot.findFirst({
-          where: {
-            id: input.parentBotId,
-            spaceId: actor.spaceId,
-          },
-        });
-        if (!parent) throw new IsolationError();
-        if (!modelId) {
-          modelProvider = parent.modelProvider ?? null;
-          modelId = parent.modelId ?? null;
-        }
-        if (thinkingLevel == null) thinkingLevel = parent.thinkingLevel ?? null;
-        if (input.disabledBuiltinTools === undefined) {
-          disabledBuiltinTools = parent.disabledBuiltinTools;
-        }
-      }
       const settings = await prisma.deploymentSettings.findUnique({ where: { id: "default" } });
       const envKind = process.env.SANDBOX_PROVIDER ?? "docker";
       const kind =
@@ -572,6 +562,28 @@ export function createRepos(
             spaceId: actor.spaceId,
             userId: actor.userId,
           });
+          if (
+            input.parentBotId ||
+            input.modelCredentialId ||
+            input.modelProvider === OPENAI_COMPATIBLE_PROVIDER_ID
+          )
+            await lockAccountModels(tx, actor.userId);
+          const parent = input.parentBotId
+            ? await tx.bot.findFirst({ where: { id: input.parentBotId, spaceId: actor.spaceId } })
+            : null;
+          if (input.parentBotId && !parent) throw new IsolationError();
+          const modelProvider = input.modelId
+            ? (input.modelProvider ?? null)
+            : (parent?.modelProvider ?? null);
+          const modelId = input.modelId || parent?.modelId || null;
+          const modelCredentialId = input.modelId
+            ? (input.modelCredentialId ?? null)
+            : (parent?.modelCredentialId ?? null);
+          const thinkingLevel = input.thinkingLevel ?? parent?.thinkingLevel ?? null;
+          const disabledBuiltinTools =
+            input.disabledBuiltinTools ?? parent?.disabledBuiltinTools ?? [];
+          if (modelProvider && modelId)
+            await input.validateModelPin?.(tx, modelProvider, modelId, modelCredentialId);
           const positions = await tx.bot.aggregate({
             where: { spaceId: actor.spaceId },
             _max: { position: true },
@@ -622,6 +634,7 @@ export function createRepos(
               spawnKey,
               modelProvider,
               modelId,
+              modelCredentialId,
               thinkingLevel,
               disabledBuiltinTools,
             },

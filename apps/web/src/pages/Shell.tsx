@@ -59,7 +59,8 @@ import { usePreloadRecoveryState } from "../lib/preload-recovery";
 import { lastChatKey, lastChatOf, queryClient, spaceQueries, spaceSeedKey } from "../lib/query";
 import type { Panel } from "../lib/right-panel-state";
 import { rightPanelStorageKey } from "../lib/right-panel-state";
-import { createSpaceRpc, selectedSpaceId } from "../lib/rpc";
+import { selectedSpaceId } from "../lib/rpc";
+import { SpaceRpcProvider, useBoundSpaceId, useSpaceRpc } from "../lib/space-rpc";
 import { markShellReady, useSpaceEpoch } from "../lib/space-switch";
 import { toolActivityPreference } from "../lib/tool-activity-preference";
 import { useDesktopBadge } from "../lib/use-desktop-badge";
@@ -117,14 +118,23 @@ const NO_PROVIDERS: string[] = [];
 export function ShellPage() {
   // A new key per space switch, so nothing from the previous space survives it.
   const spaceEpoch = useSpaceEpoch();
-  return <SpaceShell key={spaceEpoch} />;
+  return <BoundSpaceShell key={spaceEpoch} />;
+}
+
+function BoundSpaceShell() {
+  const [spaceId] = useState(selectedSpaceId);
+  return (
+    <SpaceRpcProvider spaceId={spaceId}>
+      <SpaceShell />
+    </SpaceRpcProvider>
+  );
 }
 
 function SpaceShell() {
   const { t } = useLingui();
   const { botId, groupId } = useParams();
-  const [shellSpaceId] = useState(selectedSpaceId);
-  const [rpc] = useState(() => createSpaceRpc(shellSpaceId));
+  const shellSpaceId = useBoundSpaceId() ?? null;
+  const rpc = useSpaceRpc();
   const { user, refresh: refreshUser } = useLocalIdentity();
   const userId = user.id;
   // Held from the first render, so Cmd/Ctrl+N works before the sidebar has data.
@@ -252,7 +262,7 @@ function SpaceShell() {
   const miniSidebar = botsSidebarCollapsed && !isMobileSidebar;
   const [botMenu, setBotMenu] = useState<{ kind: "bot" | "group"; id: string } | null>(null);
   const closeBotMenu = useCallback(() => setBotMenu(null), []);
-  const currentSpaceId = selectedSpaceId() ?? bootstrapMe?.spaceId ?? null;
+  const currentSpaceId = shellSpaceId ?? bootstrapMe?.spaceId ?? null;
   // null: settings follow the space the app is showing.
   const settingsSpaceId = overlay?.kind === "settings" ? overlay.spaceId : null;
   const settingsSpace =
@@ -575,7 +585,7 @@ function SpaceShell() {
   );
   useDesktopBadge(userId ? unreadChatCount : 0);
   const openSpaceChat = useOpenSpaceChat({
-    bootstrapSpaceId: bootstrapMe?.spaceId,
+    currentSpaceId,
     userId,
     navigate,
     navigationRevision,
@@ -601,7 +611,8 @@ function SpaceShell() {
   );
   const workingRuns = currentRuns.filter((run) => isRunWorking(run.status));
   const transcriptRunning = workingRuns.length > 0;
-  const composerRunning = currentRuns.some((run) => isActive(run.status));
+  const composerRunning =
+    currentRuns.some((run) => isActive(run.status)) || Boolean(activeSnapshot?.hasManagedWork);
   const transcript = useMemo(
     () => foldPeerReplies(activeSnapshot?.messages ?? [], { includePeerReceipts: true }),
     [activeSnapshot?.messages],
@@ -871,7 +882,7 @@ function SpaceShell() {
     alive,
     setSpaces,
     refreshBots,
-    bootstrapMe,
+    currentSpaceId,
     closePanel: () => setPanel(null),
   });
 

@@ -30,9 +30,9 @@ export default function ServerScreen() {
   const router = useRouter();
   const current = currentApiBase();
   const [draft, setDraft] = useState(current);
-  const [headerRows, setHeaderRows] = useState<ModelHeaderRow[]>(() =>
-    Object.entries(serverHeaders(current)).map(([name, value]) => ({ name, value })),
-  );
+  const [headersByOrigin, setHeadersByOrigin] = useState<Record<string, ModelHeaderRow[]>>(() => ({
+    [current]: Object.entries(serverHeaders(current)).map(([name, value]) => ({ name, value })),
+  }));
   const [error, setError] = useState<string | null>(null);
   const [pending, setPending] = useState(false);
   const active = useRef(true);
@@ -52,6 +52,8 @@ export default function ServerScreen() {
   }
 
   const parsedDraft = normalizeApiBase(draft);
+  const draftOrigin = parsedDraft.ok ? parsedDraft.url : null;
+  const headerRows = draftOrigin ? (headersByOrigin[draftOrigin] ?? []) : [];
   const warning = parsedDraft.ok ? apiBaseWarning(parsedDraft.url) : null;
 
   async function save() {
@@ -163,10 +165,11 @@ export default function ServerScreen() {
           <HeaderRowsEditor
             rows={headerRows}
             onChange={(rows) => {
-              setHeaderRows(rows);
+              if (!draftOrigin) return;
+              setHeadersByOrigin((current) => ({ ...current, [draftOrigin]: rows }));
               setError(null);
             }}
-            disabled={pending}
+            disabled={pending || !draftOrigin}
           />
           {error ? <Text style={{ color: tokens.destructive, marginTop: 12 }}>{error}</Text> : null}
           {usesCustomApiBase(current) || draft.trim() !== current ? (

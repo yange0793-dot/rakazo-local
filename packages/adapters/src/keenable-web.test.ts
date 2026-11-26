@@ -49,7 +49,7 @@ describe("optional Keenable web provider", () => {
       expect(request.headers.has("x-api-key")).toBe(false);
       expect(request.headers.has("authorization")).toBe(false);
     }
-    expect(createWebProvider().describe().id).toBe("keyless-http");
+    expect(createWebProvider(resolveWebProviderKind({})).describe().id).toBe("tinyfish");
   });
 
   it("sends KEENABLE_API_KEY only to the Keenable endpoint", async () => {

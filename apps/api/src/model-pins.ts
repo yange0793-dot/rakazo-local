@@ -1,9 +1,19 @@
 import { ORPCError } from "@orpc/server";
 import type { CodexLiveCatalog, parseModelSecret } from "@rakazo/adapters";
-import { findConnectedModelCredential, validateConnectedModelChoice } from "@rakazo/adapters";
+import {
+  findConnectedModelCredential,
+  validateCompatibleModelChoice,
+  validateConnectedModelChoice,
+} from "@rakazo/adapters";
 import type { Actor } from "@rakazo/contracts";
 import { OPENAI_COMPATIBLE_PROVIDER_ID, usableModelId } from "@rakazo/contracts";
-import { modelRoleTarget, runAsSystem } from "@rakazo/db";
+import type { Prisma } from "@rakazo/db";
+import {
+  findModelCredentialById,
+  lockAccountModels,
+  modelRoleTarget,
+  runAsSystemInTransaction,
+} from "@rakazo/db";
 import type { RouterDeps } from "./router.js";
 
 /**
@@ -11,7 +21,7 @@ import type { RouterDeps } from "./router.js";
  * account's models (spaceId null) and from the Spaces that override them.
  */
 async function compatibleModelPins(
-  deps: RouterDeps,
+  tx: Prisma.TransactionClient,
   actor: Actor,
   modelId: string | { notIn: string[] },
 ) {
@@ -20,20 +30,21 @@ async function compatibleModelPins(
   const pin = { spaceId: true, modelId: true } as const;
   const role = { modelId: true, role: true, position: true, credentialId: true } as const;
   // A connection is the account's, so its pins are checked in every Space it is used in.
-  const [bots, routines, accountRoles, spaceRoles] = await runAsSystem(
+  const [bots, routines, accountRoles, spaceRoles] = await runAsSystemInTransaction(
+    tx,
     "model pins across the account's Spaces",
     () =>
       Promise.all([
-        deps.prisma.bot.findMany({
+        tx.bot.findMany({
           where: { ...where, archivedAt: null, modelProvider: provider },
-          select: { ...pin, name: true },
+          select: { ...pin, name: true, modelCredentialId: true },
         }),
-        deps.prisma.routine.findMany({
+        tx.routine.findMany({
           where: { ...where, modelProvider: provider, bot: { archivedAt: null } },
           select: { ...pin, name: true },
         }),
-        deps.prisma.userModelRoleChoice.findMany({ where: { ...where, provider }, select: role }),
-        deps.prisma.spaceModelRoleChoice.findMany({
+        tx.userModelRoleChoice.findMany({ where: { ...where, provider }, select: role }),
+        tx.spaceModelRoleChoice.findMany({
           where: {
             ...where,
             provider,
@@ -44,9 +55,99 @@ async function compatibleModelPins(
       ]),
   );
   return {
-    named: [...bots, ...routines],
+    named: [
+      ...bots.map(({ modelCredentialId, ...bot }) => ({
+        ...bot,
+        credentialId: modelCredentialId,
+      })),
+      ...routines,
+    ],
     backups: [...accountRoles.map((row) => ({ ...row, spaceId: null })), ...spaceRoles],
   };
+}
+
+/** Validate a compatible pin against the connection state in its write transaction. */
+export async function assertCompatibleModelPin(
+  tx: Prisma.TransactionClient,
+  secrets: Pick<RouterDeps["secrets"], "load">,
+  actor: Actor,
+  modelId: string,
+  credentialId?: string | null,
+) {
+  const message = await validateCompatibleModelChoice(tx, secrets, actor, modelId, {
+    credentialId,
+  });
+  if (message) throw new ORPCError("BAD_REQUEST", { message });
+}
+
+/** Recheck the connection after taking the account lock and before writing the Bot. */
+export async function assertBotModelPin(
+  tx: Prisma.TransactionClient,
+  secrets: Pick<RouterDeps["secrets"], "load">,
+  actor: Actor,
+  provider: string,
+  modelId: string,
+  credentialId: string | null,
+) {
+  if (provider === OPENAI_COMPATIBLE_PROVIDER_ID) {
+    await assertCompatibleModelPin(tx, secrets, actor, modelId, credentialId);
+  } else if (credentialId && !(await findModelCredentialById(tx, actor, credentialId, provider))) {
+    throw new ORPCError("BAD_REQUEST", { message: "Connect that model provider first" });
+  }
+}
+
+/** Restoring a bot also makes its routines' saved models live again. */
+export async function assertRestoredBotPins(
+  tx: Prisma.TransactionClient,
+  secrets: Pick<RouterDeps["secrets"], "load">,
+  actor: Actor,
+  bots: readonly { id: string; userId: string }[],
+) {
+  const ids = bots.map((bot) => bot.id);
+  if (!ids.length) return;
+  await runAsSystemInTransaction(tx, "validate restored model pins", async () => {
+    const routinesWhere = {
+      botId: { in: ids },
+      spaceId: actor.spaceId,
+      modelProvider: OPENAI_COMPATIBLE_PROVIDER_ID,
+      modelId: { not: null },
+    };
+    const routineOwners = await tx.routine.findMany({
+      where: routinesWhere,
+      select: { userId: true },
+      distinct: ["userId"],
+    });
+    const owners = [...new Set([...bots, ...routineOwners].map((row) => row.userId))].sort();
+    for (const userId of owners) await lockAccountModels(tx, userId);
+    const [current, routines] = await Promise.all([
+      tx.bot.findMany({
+        where: { id: { in: ids }, spaceId: actor.spaceId, archivedAt: { not: null } },
+        select: { userId: true, modelProvider: true, modelId: true, modelCredentialId: true },
+      }),
+      tx.routine.findMany({
+        where: { ...routinesWhere, userId: { in: owners } },
+        select: { userId: true, modelId: true },
+      }),
+    ]);
+    for (const bot of current)
+      if (bot.modelProvider && bot.modelId)
+        await assertBotModelPin(
+          tx,
+          secrets,
+          { ...actor, userId: bot.userId },
+          bot.modelProvider,
+          bot.modelId,
+          bot.modelCredentialId,
+        );
+    for (const routine of routines)
+      if (routine.modelId)
+        await assertCompatibleModelPin(
+          tx,
+          secrets,
+          { ...actor, userId: routine.userId },
+          routine.modelId,
+        );
+  });
 }
 
 type ModelPinRow = { spaceId: string | null; modelId: string | null; credentialId?: string | null };
@@ -66,14 +167,15 @@ function refuseModelPins(
 
 /** Refuse only pins that runtime selection cannot serve after this connection save. */
 export async function assertNoDanglingModelPins(
-  deps: RouterDeps,
+  tx: Prisma.TransactionClient,
+  secrets: Pick<RouterDeps["secrets"], "load">,
   actor: Actor,
   connection: { id: string },
   secret: ReturnType<typeof parseModelSecret>,
-  actorDefault: string,
+  actorDefault: string | null,
 ) {
   const stored = secret.kind === "openai_compatible" ? (secret.enabledModelIds ?? []) : [];
-  const pins = await compatibleModelPins(deps, actor, { notIn: stored });
+  const pins = await compatibleModelPins(tx, actor, { notIn: stored });
   // The connection's own model is the account's, so it stays enabled in every Space.
   const defaultModel = usableModelId(actorDefault);
   const dangling = new Set<ModelPinRow>();
@@ -86,8 +188,8 @@ export async function assertNoDanglingModelPins(
     }
     // Which connection serves a model is the account's choice, the same in every Space.
     const selected = await findConnectedModelCredential(
-      deps.prisma,
-      deps.secrets,
+      tx,
+      secrets,
       actor,
       OPENAI_COMPATIBLE_PROVIDER_ID,
       row.modelId,
@@ -104,7 +206,7 @@ export async function assertNoDanglingModelPins(
  * it can strand are pins on an outgoing default that is outside the stored list.
  */
 export async function assertCompatibleDefaultChange(
-  deps: RouterDeps,
+  tx: Prisma.TransactionClient,
   actor: Actor,
   modelId: string,
   thinking: { enabledModelIds?: string[]; storedEnabledModelIds?: string[] },
@@ -118,8 +220,8 @@ export async function assertCompatibleDefaultChange(
   const outgoing = enabled.find((id) => id !== requested && !stored?.includes(id));
   if (!outgoing) return;
   const [pins, target] = await Promise.all([
-    compatibleModelPins(deps, actor, outgoing),
-    modelRoleTarget(deps.prisma, actor),
+    compatibleModelPins(tx, actor, outgoing),
+    modelRoleTarget(tx, actor),
   ]);
   const replacedSpaceId = target.scope === "space" ? actor.spaceId : null;
   // The main model's own row is the choice being replaced, not a pin left behind.

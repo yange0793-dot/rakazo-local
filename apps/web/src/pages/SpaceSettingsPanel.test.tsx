@@ -125,6 +125,18 @@ afterEach(async () => {
 });
 
 describe("SpaceSettingsPanel", () => {
+  it("shows a refreshed name without writing the old name back on blur", async () => {
+    const onRename = vi.fn(async () => undefined);
+    await render({ onRename });
+    await render({
+      onRename,
+      space: { id: "space-a", name: "Operations", canRename: true, canDelete: true },
+    });
+    expect(container.querySelector("input")?.value).toBe("Operations");
+    await commit();
+    expect(onRename).not.toHaveBeenCalled();
+  });
+
   it("renames the space when its name field is left", async () => {
     const onRename = vi.fn(async () => undefined);
     await render({ onRename });

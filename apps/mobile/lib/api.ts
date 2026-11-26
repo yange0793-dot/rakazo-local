@@ -11,6 +11,7 @@ import {
   isUnreachableStatus,
   parseRetryAfter,
   readBoundedJsonResponse,
+  ResponseBodyTooLargeError,
   withAbort,
 } from "@rakazo/core";
 import { clientCorrelationHeaders, responseCorrelation } from "@rakazo/logging/monitoring";
@@ -40,6 +41,93 @@ export const SPACE_ROLLBACK_KEY = "rakazo.space_rollback";
 const RPC_TIMEOUT_MS = 8_000;
 export const MAX_MOBILE_METADATA_BYTES = 256 * 1024;
 export const MAX_MOBILE_RPC_RESPONSE_BYTES = 16 * 1024 * 1024;
+
+function joinResponseChunks(chunks: Uint8Array[], length: number): Uint8Array {
+  const bytes = new Uint8Array(length);
+  let offset = 0;
+  for (const chunk of chunks) {
+    const part = chunk.subarray(0, length - offset);
+    bytes.set(part, offset);
+    offset += part.byteLength;
+    if (offset === length) break;
+  }
+  return bytes;
+}
+
+function artifactResponseBudget(prefix: string, bytesRead: number) {
+  // The oRPC artifact schema serializes stored size before its final base64 field.
+  const field = ',"contentBase64":';
+  const contentField = prefix.indexOf(field);
+  if (contentField < 0) throw new ResponseBodyTooLargeError(MAX_MOBILE_RPC_RESPONSE_BYTES);
+  const metadata = JSON.parse(`${prefix.slice(0, contentField)}}}`) as {
+    json?: { size?: number };
+  };
+  const size = metadata.json?.size;
+  if (typeof size !== "number" || !Number.isSafeInteger(size) || size < 0)
+    throw new ResponseBodyTooLargeError(MAX_MOBILE_RPC_RESPONSE_BYTES);
+  // Prefix through the field name, two string quotes and the two closing braces.
+  const limit =
+    new TextEncoder().encode(prefix.slice(0, contentField + field.length)).byteLength +
+    Math.ceil(size / 3) * 4 +
+    4;
+  if (!Number.isSafeInteger(limit) || bytesRead > limit) throw new ResponseBodyTooLargeError(limit);
+  return limit;
+}
+
+function parseArtifactRpcResponse(text: string) {
+  const parsed = JSON.parse(text) as {
+    json?: { size?: unknown; contentBase64?: unknown } | null;
+  };
+  if (parsed?.json != null) {
+    const { size, contentBase64 } = parsed.json;
+    if (typeof contentBase64 !== "string" || contentBase64.length % 4 !== 0)
+      throw new Error("Incomplete artifact download");
+    const padding = contentBase64.endsWith("==") ? 2 : contentBase64.endsWith("=") ? 1 : 0;
+    if (
+      size !== (contentBase64.length / 4) * 3 - padding ||
+      !/^[A-Za-z0-9+/]*={0,2}$/.test(contentBase64)
+    )
+      throw new Error("Incomplete artifact download");
+  }
+  return parsed;
+}
+
+async function readArtifactRpcResponse(response: Response, signal: AbortSignal) {
+  const body = response.body;
+  const decoder = new TextDecoder();
+  let limit = MAX_MOBILE_RPC_RESPONSE_BYTES;
+  if (!body) {
+    if (signal.aborted) throw signal.reason ?? new Error("Request aborted");
+    const bytes = new Uint8Array(await withAbort(response.arrayBuffer(), signal));
+    if (bytes.byteLength > limit) {
+      artifactResponseBudget(decoder.decode(bytes.subarray(0, limit)), bytes.byteLength);
+    }
+    return parseArtifactRpcResponse(decoder.decode(bytes));
+  }
+
+  const reader = body.getReader();
+  const chunks: Uint8Array[] = [];
+  let bytesRead = 0;
+  try {
+    for (;;) {
+      const { done, value } = await withAbort(reader.read(), signal);
+      if (done) break;
+      chunks.push(value);
+      bytesRead += value.byteLength;
+      if (bytesRead <= limit) continue;
+      if (limit !== MAX_MOBILE_RPC_RESPONSE_BYTES) throw new ResponseBodyTooLargeError(limit);
+
+      limit = artifactResponseBudget(decoder.decode(joinResponseChunks(chunks, limit)), bytesRead);
+    }
+  } catch (error) {
+    void reader.cancel().catch(() => undefined);
+    throw error;
+  } finally {
+    reader.releaseLock();
+  }
+  return parseArtifactRpcResponse(decoder.decode(joinResponseChunks(chunks, bytesRead)));
+}
+
 /** Inbox bootstrap reads safe to replay without a Space header during auth recovery. */
 const SPACE_AUTH_RECOVERY_SAFE_PROCS = new Set(["spaces/list", "me"]);
 let cachedApiBase: string | undefined;
@@ -280,19 +368,19 @@ async function request(
   // Bind recovery to the Space + selection epoch this request was sent with:
   // a 401 arriving after the user switched Spaces — including A → B → A —
   // belongs to a stale request and must not touch the current selection.
-  const requestHeaders = consentContext?.headers ?? (await authHeaders());
-  const requestSpaceId = requestHeaders["x-rakazo-space-id"];
   try {
+    const requestHeaders = consentContext?.headers ?? (await authHeaders());
+    const requestSpaceId = requestHeaders["x-rakazo-space-id"];
     if (
-      consentContext?.sessionGeneration !== undefined &&
-      consentContext.sessionGeneration !== currentSessionGeneration()
+      requestApiBase !== currentApiBase() ||
+      (consentContext?.sessionGeneration ?? requestSessionGeneration) !== currentSessionGeneration()
     )
       throw new Error(t`Something went wrong. Try again.`);
     let res: Response;
     const correlation = clientCorrelationHeaders();
     try {
       res = await fetchServer(
-        `${consentContext?.apiBase ?? currentApiBase()}/rpc/${proc}`,
+        `${requestApiBase}/rpc/${proc}`,
         {
           method: "POST",
           headers: {
@@ -304,7 +392,7 @@ async function request(
           body: JSON.stringify({ json: body }),
           signal: controller.signal,
         },
-        consentContext?.apiBase ?? currentApiBase(),
+        requestApiBase,
       );
     } catch (error) {
       // The native fetch reports an aborted request with an implementation detail
@@ -323,10 +411,14 @@ async function request(
       cancelResponseBody(res);
       throw new Error(t`Update your server to use AI data sharing in this mobile version.`);
     }
-    const parsed: { json?: unknown } = await readBoundedJsonResponse<{ json?: unknown }>(
-      res,
-      MAX_MOBILE_RPC_RESPONSE_BYTES,
-      controller.signal,
+    const artifactDownload = res.ok && (proc === "artifacts/get" || proc === "artifacts/getById");
+    const parsed: { json?: unknown } = await (artifactDownload
+      ? readArtifactRpcResponse(res, controller.signal)
+      : readBoundedJsonResponse<{ json?: unknown }>(
+          res,
+          MAX_MOBILE_RPC_RESPONSE_BYTES,
+          controller.signal,
+        )
     ).catch((error: unknown) => {
       // A proxy, or a server without this procedure, can fail with a body that is not JSON.
       if (!res.ok && error instanceof SyntaxError) return {};
@@ -335,7 +427,7 @@ async function request(
     if (!res.ok) {
       // oRPC sends a failure as `{ json: { code, status, message } }`; the message is the
       // server's user-facing copy.
-      const error = parsed.json as
+      const error = parsed?.json as
         | { message?: unknown; code?: unknown; data?: unknown }
         | undefined;
       const message = errorText(typeof error?.message === "string" ? error.message : "");
@@ -370,6 +462,8 @@ async function request(
         unauthorized &&
         previousSpaceId &&
         requestSpaceId &&
+        requestApiBase === currentApiBase() &&
+        requestSessionGeneration === currentSessionGeneration() &&
         selectedSpaceId() === requestSpaceId &&
         spaceSelectionGeneration === requestSpaceGeneration &&
         !options.requestContext &&
@@ -409,6 +503,9 @@ async function request(
         httpError(message, res, typeof error?.code === "string" ? error.code : undefined),
         { data: error?.data },
       );
+    }
+    if (!parsed || typeof parsed !== "object" || !Object.hasOwn(parsed, "json")) {
+      throw new Error(t`Something went wrong. Try again.`);
     }
     const verifiedUser = parsed.json as { userId?: unknown; spaceId?: unknown } | null;
     if (

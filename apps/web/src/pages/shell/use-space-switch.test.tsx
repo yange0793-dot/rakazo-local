@@ -31,7 +31,7 @@ vi.mock("../../lib/query", () => ({
   queryClient: { getQueryData: state.cached },
   spaceSeedKey: () => [],
 }));
-vi.mock("../../lib/rpc", () => ({ selectedSpaceId: () => "old-space", selectSpace: state.select }));
+vi.mock("../../lib/rpc", () => ({ selectSpace: state.select }));
 vi.mock("../../lib/tts", () => ({ speaker: { stop: state.stop } }));
 vi.mock("../../lib/space-switch", async (importOriginal) => ({
   ...(await importOriginal<typeof SpaceSwitch>()),
@@ -48,7 +48,7 @@ let navigate: ReturnType<typeof vi.fn>;
 
 function Harness() {
   open = useOpenSpaceChat({
-    bootstrapSpaceId: "old-space",
+    currentSpaceId: "old-space",
     userId: "user",
     navigate: navigate as NavigateFunction,
     navigationRevision,
@@ -96,7 +96,7 @@ describe("pending space switches", () => {
       redirect = navigation.redirectKeepingOverlay;
       open = useOpenSpaceChat({
         ...navigation,
-        bootstrapSpaceId: "old-space",
+        currentSpaceId: "old-space",
         userId: "user",
         closeMobileSidebar: () => {},
       });

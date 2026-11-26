@@ -86,7 +86,7 @@ describe("readOwnBotSettings", () => {
       thinkingLevel: "default",
       readAloud: false,
       voice: "default",
-      thinkingLevels: ["low", "medium", "high"],
+      thinkingLevels: ["minimal", "low", "medium", "high", "xhigh", "max"],
     });
     expect(settings.models).toEqual([
       expect.objectContaining({

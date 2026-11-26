@@ -398,38 +398,52 @@ export async function emitSkillDraftMessages(
   skill: TaughtSkillRow,
   bot: { id: string; thread: { id: string } | null },
 ): Promise<void> {
-  if (skill.status !== "draft" || !bot.thread) return;
+  if (skill.status !== "draft" || skill.spaceId !== actor.spaceId || !bot.thread) return;
   const threadId = bot.thread.id;
-  const published = await deps.prisma.$transaction(async (tx: Prisma.TransactionClient) => {
-    await tx.$executeRaw`SELECT id FROM taught_skills WHERE id = ${skill.id} FOR UPDATE`;
-    let created = await findSkillDraftMessage(tx, threadId, skill.id);
-    if (!created) {
-      const blocks = skillDraftBlocks(skill);
-      const message = await createThreadMessageInTransaction(tx, {
-        threadId,
-        role: "bot",
-        blocks,
-      });
-      created = { id: message.id, blocks };
-    }
-    if (await hasSkillDraftCreatedEvent(tx, threadId, skill.id)) return null;
-    await appendEventInTransaction(tx, {
-      spaceId: actor.spaceId,
-      threadId,
-      botId: bot.id,
-      type: "thread.message.created",
-      payload: { messageId: created.id, role: "bot", blocks: created.blocks },
-    });
-    const draftEvent = await appendEventInTransaction(tx, {
-      spaceId: actor.spaceId,
-      threadId,
-      botId: bot.id,
-      type: "skill.draft.created",
-      payload: { skillId: skill.id, name: skill.name || skill.goal.slice(0, 80) },
-    });
-    return draftEvent.seq;
+  const published = await deps.prisma.$transaction(async (tx) => {
+    await tx.$queryRaw`SELECT id FROM threads WHERE id = ${threadId} FOR NO KEY UPDATE`;
+    return emitSkillDraftMessagesInTransaction(tx, skill, threadId);
   });
   if (published != null) await deps.events.notify(threadId, published);
+}
+
+export async function emitSkillDraftMessagesInTransaction(
+  tx: Prisma.TransactionClient,
+  skill: TaughtSkillRow,
+  threadId: string,
+): Promise<number | null> {
+  await tx.$executeRaw`SELECT id FROM taught_skills WHERE id = ${skill.id} FOR UPDATE`;
+  const current = await tx.taughtSkill.findUnique({
+    where: { id: skill.id },
+    select: { status: true },
+  });
+  if (current?.status !== "draft") return null;
+  let created = await findSkillDraftMessage(tx, threadId, skill.id);
+  if (!created) {
+    const blocks = skillDraftBlocks(skill);
+    const message = await createThreadMessageInTransaction(tx, {
+      threadId,
+      role: "bot",
+      blocks,
+    });
+    created = { id: message.id, blocks };
+  }
+  if (await hasSkillDraftCreatedEvent(tx, threadId, skill.id)) return null;
+  await appendEventInTransaction(tx, {
+    spaceId: skill.spaceId,
+    threadId,
+    botId: skill.botId,
+    type: "thread.message.created",
+    payload: { messageId: created.id, role: "bot", blocks: created.blocks },
+  });
+  const draftEvent = await appendEventInTransaction(tx, {
+    spaceId: skill.spaceId,
+    threadId,
+    botId: skill.botId,
+    type: "skill.draft.created",
+    payload: { skillId: skill.id, name: skill.name || skill.goal.slice(0, 80) },
+  });
+  return draftEvent.seq;
 }
 
 export async function completeTeachingSession(

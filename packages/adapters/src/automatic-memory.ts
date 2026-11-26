@@ -9,12 +9,14 @@ import type {
   MemoryStore,
 } from "@rakazo/adapter-kit";
 import { automaticMemoryJob, semanticMemorySyncJob } from "@rakazo/adapter-kit";
+import { redactSecrets } from "@rakazo/core";
 import type { MemoryArchiveBatch, PrismaClient } from "@rakazo/db";
 import { FORCE_BATCH_MESSAGES, MemoryArchiveStore } from "@rakazo/db";
 import { getLogger } from "@rakazo/logging";
 import { MAX_EXTRACTION_REQUEST_BYTES } from "./langmem-memory-extractor.js";
 import { readAgentMemory } from "./memory-context.js";
 import type { MemoryProviderResolver } from "./memory-provider-factory.js";
+import { truncateUtf8 } from "./utf8.js";
 
 /** A normal background pass finishes within one job lease; the rest defers to another job. */
 const DEFAULT_MAX_BATCHES = 4;
@@ -57,9 +59,8 @@ export interface AutomaticMemoryOptions {
 /**
  * Archive new direct user text from one personal conversation. Ordinary chat never calls this on
  * its hot path: a durable pointer job invokes it, and a batch with no new source only advances the
- * checkpoint. A failure still propagates, but the pointer stops retrying so a range that cannot
- * be extracted costs one call per turn instead of one per reconciler tick; a forced clear steps
- * over such a range instead of blocking the clear for good.
+ * checkpoint. Background failures pause the pointer to avoid paying for the same failed range
+ * every reconciler tick. A forced clear must propagate failures without advancing the cursor.
  */
 export async function archiveConversationMemory(
   deps: AutomaticMemoryDeps,
@@ -77,39 +78,17 @@ export async function archiveConversationMemory(
   const batchInput = options.force ? { ...input, limit: FORCE_BATCH_MESSAGES } : input;
 
   for (let processed = 0; ; processed += 1) {
-    if (processed === maxBatches) {
-      const remaining = await store.loadBatch(batchInput, ctx);
-      if (!remaining) return;
-      if (options.force) {
-        throw new Error(
-          `Automatic memory still had batches to apply after ${maxBatches} for thread ${input.threadId}.`,
-        );
-      }
-      // The durable cursor keeps the source; one job resumes it after this pass returns.
-      await deps.jobs.enqueue(
-        automaticMemoryJob(input.threadId, input.botId, input.userId, new Date()),
-      );
-      return;
-    }
-    const batch = await store.loadBatch(batchInput, ctx);
-    if (!batch) return;
     try {
-      await archiveBatch(deps, store, batch, ctx);
-    } catch (error) {
-      if (options.force && !ctx.signal.aborted) {
-        // The person asked for these messages to be deleted: archive what can be archived,
-        // step over one unextractable range, and keep the clear inside its request budget.
-        getLogger().error("automatic memory skipped an unextractable range during a clear", error, {
-          threadId: batch.threadId,
-          fromSeq: batch.fromSeq,
-          throughSeq: batch.throughSeq,
-        });
-        await store.applyBatch(batch, [], ctx);
+      const batch = await store.loadBatch(batchInput, ctx);
+      if (!batch) return;
+      if (processed < maxBatches) {
+        await archiveBatch(deps, store, batch, ctx);
         continue;
       }
+    } catch (error) {
       // The reconciler would retry this same range forever, one paid model call per tick.
       // Stop the automatic retries and keep the range; the next completed turn re-arms it.
-      if (!ctx.signal.aborted) {
+      if (!options.force && !ctx.signal.aborted) {
         await store.pause(input, ctx).catch((pauseError) => {
           getLogger().error("automatic memory pause failed", pauseError, {
             threadId: input.threadId,
@@ -122,6 +101,16 @@ export async function archiveConversationMemory(
       }
       throw error;
     }
+    if (options.force) {
+      throw new Error(
+        `Automatic memory still had batches to apply after ${maxBatches} for thread ${input.threadId}.`,
+      );
+    }
+    // The durable cursor keeps the source; one job resumes it after this pass returns.
+    await deps.jobs.enqueue(
+      automaticMemoryJob(input.threadId, input.botId, input.userId, new Date()),
+    );
+    return;
   }
 }
 
@@ -196,20 +185,24 @@ async function buildExtractionRequest(
   ctx: AdapterContext,
   secrets: readonly string[],
 ): Promise<MemoryExtractionRequest> {
-  const query = tailBytes(batch.newSources.at(-1)?.text ?? "", MAX_RECALL_QUERY_BYTES);
-  const recalled = await recallRelatedFacts(deps, batch, ctx, redactText(query, secrets));
+  const query = truncateUtf8(
+    redactSecrets(batch.newSources.at(-1)?.text ?? "", secrets),
+    MAX_RECALL_QUERY_BYTES,
+    "end",
+  );
+  const recalled = await recallRelatedFacts(deps, batch, ctx, query);
   const notes = (await readAgentMemory(deps.memory, batch.botId, ctx)).map(
     (document): MemoryExtractionNote => ({
       scope: document.scope,
-      path: document.path,
+      path: redactSecrets(document.path, secrets),
       revision: document.revision,
-      content: redactText(document.content, secrets),
+      content: redactSecrets(document.content, secrets),
     }),
   );
   return {
     messages: batch.messages.map((message) => ({
       ...message,
-      content: redactText(message.content, secrets),
+      content: redactSecrets(message.content, secrets),
     })),
     existing: mergeExisting(recalled, batch.retirementEvidence, secrets),
     notes,
@@ -266,10 +259,10 @@ function mergeExisting(
   for (const fact of retirementEvidence) byId.set(fact.id, fact);
   return [...byId.values()].map((fact) => ({
     ...fact,
-    content: redactText(fact.content, secrets),
+    content: redactSecrets(fact.content, secrets),
     ...(fact.sourceQuote === undefined
       ? {}
-      : { sourceQuote: redactText(fact.sourceQuote, secrets) }),
+      : { sourceQuote: redactSecrets(fact.sourceQuote, secrets) }),
   }));
 }
 
@@ -284,12 +277,13 @@ function verifyProposedChanges(
   batch: MemoryArchiveBatch,
   secrets: readonly string[],
 ): MemoryExtractionChange[] {
-  const sources = new Map(batch.newSources.map((source) => [source.id, source.text] as const));
+  const sources = new Map(
+    batch.newSources.map((source) => [source.id, redactSecrets(source.text, secrets)] as const),
+  );
   return changes.filter((change) => {
     const source = sources.get(change.sourceMessageId);
     if (source === undefined) return false;
     if (!change.sourceQuote || !source.includes(change.sourceQuote)) return false;
-    if (containsSecret(change.sourceQuote, secrets)) return false;
     if (change.sourceQuote.includes(REDACTED)) return false;
     if (change.remove === true) {
       const revision = change.expectedRevision;
@@ -300,41 +294,20 @@ function verifyProposedChanges(
         revision > 0
       );
     }
-    return !containsSecret(change.content, secrets) && !change.content.includes(REDACTED);
+    return (
+      redactSecrets(change.content, secrets) === change.content && !change.content.includes(REDACTED)
+    );
   });
 }
 
 async function collectSecrets(deps: AutomaticMemoryDeps, ctx: AdapterContext): Promise<string[]> {
   const loaded = deps.loadSecrets ? await deps.loadSecrets(ctx) : [];
-  // Longest first so a secret that contains another value is replaced whole. A one- or
-  // two-character command value would otherwise shred ordinary text into [redacted].
+  // A one- or two-character command value would shred ordinary text into [redacted].
   return [
     ...new Set(
       [...(deps.secrets ?? []), ...loaded].filter(
         (secret) => secret.length >= MIN_SECRET_REDACTION_LENGTH,
       ),
     ),
-  ].sort((left, right) => right.length - left.length);
-}
-
-/** The tail of a text in whole characters, at most maxBytes of UTF-8. */
-function tailBytes(text: string, maxBytes: number): string {
-  if (Buffer.byteLength(text) <= maxBytes) return text;
-  const bytes = Buffer.from(text);
-  return bytes
-    .subarray(bytes.length - maxBytes)
-    .toString("utf8")
-    .replace(/^\uFFFD+/, "");
-}
-
-function redactText(text: string, secrets: readonly string[]): string {
-  let redacted = text;
-  for (const secret of secrets) {
-    redacted = redacted.split(secret).join(REDACTED);
-  }
-  return redacted;
-}
-
-function containsSecret(text: string, secrets: readonly string[]): boolean {
-  return secrets.some((secret) => text.includes(secret));
+  ];
 }

@@ -11,7 +11,6 @@ import type {
 import type { MessageBlock } from "@rakazo/contracts";
 import {
   applyJudgeDecision,
-  approvalModeFromPreference,
   BACKGROUND_HELPER_TRIGGER,
   batchActions,
   connectorKindFromToolName,
@@ -52,6 +51,7 @@ import {
   DENIED_ACTION_ERROR,
   resolveDuplicateEffectGate,
   settleUncertainEffect,
+  terminatingToolResult,
   uncertainEffectResult,
 } from "./approval-effect.js";
 import type { AutoReviewChecker } from "./auto-review.js";
@@ -115,6 +115,25 @@ const PAGE_TOOLS = ["browser_navigate", "browser_snapshot", "browser_act"];
 
 function isWorkspaceRead(name: string): name is "read_file" | "list_files" {
   return name === "read_file" || name === "list_files";
+}
+
+// Only classify single commands on literal workspace-relative paths. Shell expressions
+// and custom working directories still go through the normal approval gate.
+function workspaceShellAction(args: Record<string, unknown>): "read" | "edit" | undefined {
+  const command = args.command ?? args.cmd;
+  if (typeof command !== "string" || args.cwd || /[^a-zA-Z0-9_ ./-]/.test(command)) return;
+  const [name, ...paths] = command.trim().split(/ +/);
+  if (name === "mkdir" && paths[0] === "-p") paths.shift();
+  if (
+    !paths.every((path) =>
+      /^[a-zA-Z0-9_][a-zA-Z0-9_.-]*(\/[a-zA-Z0-9_][a-zA-Z0-9_.-]*)*$/.test(path),
+    )
+  )
+    return;
+  if ((name === "pwd" && !paths.length) || name === "ls" || (name === "cat" && paths.length))
+    return "read";
+  if ((name === "touch" || name === "mkdir") && paths.length) return "edit";
+  if ((name === "cp" || name === "mv") && paths.length === 2) return "edit";
 }
 
 type ApprovalCard = {
@@ -194,7 +213,11 @@ export async function gateToolCall(
   const durableBrowser =
     PAGE_TOOLS.includes(name) &&
     Boolean(ctx.providers.browser.checkpoint && ctx.providers.browser.restore);
-  if (durableBrowser && ctx.computer.stored.providerRef) {
+  const browserComputer = durableBrowser
+    ? (ctx.computer.lazy.ready ??
+      (ctx.computer.stored.providerRef ? toComputerRef(ctx.computer.stored) : undefined))
+    : undefined;
+  if (durableBrowser && browserComputer) {
     const last = await deps.prisma.externalEffect.findFirst({
       where: {
         spaceId: run.spaceId,
@@ -209,7 +232,7 @@ export async function gateToolCall(
     const result = last?.result as Record<string, unknown> | null | undefined;
     const saved = result?.browserState as { computerId?: unknown; provider?: unknown } | undefined;
     if (saved?.computerId === ctx.computer.stored.id) {
-      ctx.providers.browser.restore?.(toComputerRef(ctx.computer.stored), saved.provider, context);
+      ctx.providers.browser.restore?.(browserComputer, saved.provider, context);
     }
   }
   const viaConnector = !BUILTIN_AGENT_TOOL_NAMES.has(name);
@@ -408,8 +431,6 @@ export async function gateToolCall(
   // on their card would save a rule that never takes effect.
   const asksEveryTime =
     (unattendedWatch || scheduleNamesNewSite) && !toolRequiresApproval(name, viaConnector);
-  // Never ask runs everything else: only another owner's connection could have been steered into it.
-  const guardedInNeverAsk = name === "respond_agent_connection";
   const resolvedRules = resolveActionApprovalForTools({
     tools: approvalToolNames.map((toolName) => ({
       name: toolName,
@@ -428,10 +449,9 @@ export async function gateToolCall(
     unidentifiedAction && resolvedRules.decision === "allow"
       ? { ...resolvedRules, decision: "ask" as const }
       : resolvedRules;
-  const mode = approvalModeFromPreference(await ctx.trust.loadAutoReviewPreference());
+  const mode = (await ctx.trust.loadAutoReviewPreference()).mode;
   // A helper's brief is the bot's own words, never the owner's, so Auto Review could only
-  // authorize a write from text the model wrote itself. A helper's write still runs on the
-  // owner's explicit allow or Never ask, exactly as it would in the owner's own turn.
+  // authorize a write from text the model wrote itself.
   const helperWriteNeedsPerson =
     run.trigger === BACKGROUND_HELPER_TRIGGER &&
     viaConnector &&
@@ -474,22 +494,50 @@ export async function gateToolCall(
             ),
           )
         : false));
-  const plan = USER_COMPUTER_TOOLS.has(name)
+  const shellAction =
+    name === "shell" &&
+    ctx.source.ownerStartedRun &&
+    !ctx.source.messagingChannelRun &&
+    !request.heldForApproval &&
+    !personApproval
+      ? workspaceShellAction(args)
+      : undefined;
+  const personalComputer = USER_COMPUTER_TOOLS.has(name);
+  const deviceDecision = personalComputer
     ? await userComputerGate(ctx, approvalResolved.decision === "deny", name, args)
-    : planActionGate({
-        resolved: approvalResolved,
-        mode,
-        mandatory: mandatoryInAnyRun,
-        steerable:
-          guardedInNeverAsk && mode === "never"
-            ? !ctx.source.ownerStartedRun || (await isRunTainted(ctx))
-            : undefined,
-        consequential: requiresApprovalByDefault,
-        reviewOnly: connectorReadGated,
-        checkerConfigured,
-        newDestination: siteGate === "new",
-        purchase: paying,
-      });
+    : undefined;
+  const plan =
+    mode === "bypermission"
+      ? unidentifiedAction || approvalResolved.decision === "deny" || deviceDecision === "deny"
+        ? "deny"
+        : "allow"
+      : deviceDecision
+        ? deviceDecision === "deny"
+          ? "deny"
+          : approvalResolved.decision === "ask" || deviceDecision === "ask"
+            ? "ask"
+            : "allow"
+        : planActionGate({
+            resolved: approvalResolved,
+            mode,
+            mandatory: mandatoryInAnyRun,
+            consequential: requiresApprovalByDefault && shellAction !== "read",
+            editAction: name === "write_file" || shellAction === "edit",
+            planReadOnly:
+              shellAction === "read" ||
+              (READ_ONLY_AGENT_TOOLS.has(name) &&
+                name !== "run_subagent" &&
+                name !== "request_takeover") ||
+              (viaConnector &&
+                approvalToolNames.every(
+                  (toolName) =>
+                    !connectorToolRequiresApproval(toolName, declaredReadOnlyFor(toolName)),
+                )),
+            reviewOnly: connectorReadGated,
+            checkerConfigured,
+            newDestination: siteGate === "new",
+            purchase: paying,
+          });
   // Nobody is there to approve a purchase a webhook run reaches.
   if (paying && run.trigger === "webhook" && plan !== "deny") {
     await auditToolCall(ctx, name, "denied", { reason: "purchase_unattended" });
@@ -509,7 +557,7 @@ export async function gateToolCall(
         "approval_denied",
         approvalResolved.decision === "deny"
           ? `${name} is blocked in this space${blockingRuleSuffix(approvalResolved)}. Don't try it another way; tell the user it's blocked.`
-          : `${name} needs the owner's approval because it could have been asked for by someone else, and this space never asks. Don't retry; tell the user.`,
+          : `${name} is not permitted in ${mode} mode. Don't retry; tell the user.`,
       ),
     };
   }
@@ -870,6 +918,11 @@ function createToolCall(
     claimedEffect: false,
     persistEffectResult: async (result) => {
       if (!applied) return true;
+      const browserComputer =
+        PAGE_TOOLS.includes(name) && ctx.providers.browser.checkpoint
+          ? (ctx.computer.lazy.ready ??
+            (ctx.computer.stored.providerRef ? toComputerRef(ctx.computer.stored) : undefined))
+          : undefined;
       let stored = result;
       if (isWorkspaceRead(name)) {
         const ring = contentEncryptionOf(deps.prisma)?.ring;
@@ -880,11 +933,7 @@ function createToolCall(
             JSON.stringify(result),
           );
         }
-      } else if (
-        PAGE_TOOLS.includes(name) &&
-        ctx.providers.browser.checkpoint &&
-        ctx.computer.stored.providerRef
-      ) {
+      } else if (PAGE_TOOLS.includes(name) && ctx.providers.browser.checkpoint && browserComputer) {
         const details =
           result &&
           typeof result === "object" &&
@@ -898,7 +947,7 @@ function createToolCall(
           browserState: {
             computerId: ctx.computer.stored.id,
             provider: redactConnectorPayload(
-              ctx.providers.browser.checkpoint(toComputerRef(ctx.computer.stored), ctx.context),
+              ctx.providers.browser.checkpoint(browserComputer, ctx.context),
               ctx.secrets,
             ),
           },
@@ -946,6 +995,20 @@ async function replayEffectResult(
   effectId: string,
   result: unknown,
 ): Promise<unknown> {
+  if (
+    name === "ticket_update" &&
+    result &&
+    typeof result === "object" &&
+    "ok" in result &&
+    result.ok === true &&
+    "managed" in result &&
+    result.managed === true &&
+    "messageId" in result &&
+    typeof result.messageId === "string"
+  ) {
+    ctx.state.deliveredWorkReceipt = true;
+    return terminatingToolResult("Work receipt saved.", { ...result });
+  }
   if (isWorkspaceRead(name) && typeof result === "string") {
     const keyId = ciphertextKeyId(result);
     if (keyId) {

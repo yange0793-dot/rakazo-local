@@ -35,7 +35,13 @@ vi.mock("./ticket-delivery.js", () => ({
     input: { id: string; result: unknown },
   ) => {
     delivery.receipts.push(input);
-    return { ok: true, version: 1, messageId: "fixture-receipt", status: "done" };
+    const findings = (input.result as { findings: Array<{ outcome: string }> }).findings;
+    return {
+      ok: true,
+      version: 1,
+      messageId: "fixture-receipt",
+      status: findings.every(({ outcome }) => outcome === "pass") ? "done" : "review",
+    };
   },
 }));
 
@@ -439,6 +445,45 @@ function fixture(
 }
 
 describe("executor ticket receipt finalization with real Pi", () => {
+  it.each(["pass", "unknown"] as const)(
+    "stops the receipt phase at the first durable %s result without another model call",
+    async (outcome) => {
+      const state = fixture((_request, index) => {
+        if (index === 1) return { text: "Output prepared." };
+        if (index < 4)
+          return {
+            name: "deliver_work",
+            args: {
+              result: {
+                previousVersion: index - 2,
+                summary: "Output delivered.",
+                findings: [
+                  { outcome, conclusion: "Source audit", evidence: "Recorded available evidence." },
+                ],
+              },
+            },
+          };
+        return { text: "Receipt rewritten." };
+      });
+      await state.execute();
+      expect(state.requests).toHaveLength(2);
+      expect(delivery.receipts).toHaveLength(1);
+      expect(state.usage.map((row) => row.operationId)).toEqual([
+        "fixture-run",
+        "fixture-run:ticket-finalize",
+      ]);
+      expect(state.finalizeRun).toHaveBeenCalledWith(
+        expect.objectContaining({ outcome: "completed" }),
+      );
+      expect(state.events.append).toHaveBeenCalledWith(
+        expect.objectContaining({
+          type: "agent.tool.completed",
+          payload: expect.objectContaining({ name: "deliver_work", outcome: "succeeded" }),
+        }),
+      );
+    },
+  );
+
   it.each([true, false])(
     "only injects one replan in the main transcript when calibration is verified=%s",
     async (calibrated) => {
@@ -569,7 +614,7 @@ describe("executor ticket receipt finalization with real Pi", () => {
       return { text: "Receipt delivered." };
     });
     await state.execute();
-    expect(state.requests).toHaveLength(6);
+    expect(state.requests).toHaveLength(5);
     expect(state.runtimeRun).toHaveBeenCalledTimes(2);
     const [first, second] = state.runtimeRun.mock.calls.map(([request]) => request);
     expect(second!.model).toBe(first!.model);
@@ -588,13 +633,13 @@ describe("executor ticket receipt finalization with real Pi", () => {
     expect(state.finalizeRun).toHaveBeenCalledWith(
       expect.objectContaining({ outcome: "completed" }),
     );
-    expect(state.usage).toHaveLength(6);
+    expect(state.usage).toHaveLength(5);
     expect(state.usage.map((row) => row.operationId)).toEqual([
       "fixture-run",
       "fixture-run",
-      ...Array(4).fill("fixture-run:ticket-finalize"),
+      ...Array(3).fill("fixture-run:ticket-finalize"),
     ]);
-    expect(new Set(state.usage.map((row) => row.callId)).size).toBe(6);
+    expect(new Set(state.usage.map((row) => row.callId)).size).toBe(5);
     expect(state.usage.every((row) => row.runId === "fixture-run")).toBe(true);
     expect(sink.events).toContainEqual(
       expect.objectContaining({

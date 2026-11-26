@@ -13,13 +13,7 @@ import {
   parseModelMaxImagesPerPrompt,
   parseModelMaxTokens,
 } from "@rakazo/contracts";
-import {
-  clampCatalogThinkingLevel,
-  compatibleThinkingLevels,
-  connectionFormFields,
-  pickCatalogModelId,
-  popularModelProvidersFirst,
-} from "@rakazo/core";
+import { connectionFormFields, pickCatalogModelId, popularModelProvidersFirst } from "@rakazo/core";
 import { useMemo, useState } from "react";
 import { useCopyText } from "../../lib/copy-text";
 import { providerDisplayName } from "../../lib/localized-provider-hint";
@@ -239,10 +233,7 @@ export function useOnboardingModel({
   }
 
   function stagedThinkingLevel(): ThinkingLevel | null {
-    return clampCatalogThinkingLevel(
-      thinkingLevel,
-      reasoning ? compatibleThinkingLevels(apiProtocol) : [],
-    ) as ThinkingLevel | null;
+    return thinkingLevel !== "off" ? thinkingLevel : null;
   }
 
   async function saveModel() {

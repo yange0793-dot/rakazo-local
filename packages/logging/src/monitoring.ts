@@ -105,7 +105,7 @@ const IDENTIFIER = /^[\w.:-]{1,100}$/;
 function breadcrumbUrl(value: string): string {
   let path: string;
   try {
-    path = new URL(value, "http://relative.invalid").pathname;
+    path = scrubMonitoringText(new URL(value, "http://relative.invalid").pathname);
   } catch {
     return "[external]";
   }

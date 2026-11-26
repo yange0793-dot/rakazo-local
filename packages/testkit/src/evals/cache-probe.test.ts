@@ -45,3 +45,22 @@ it("replays exact prefixes and changes them without inferring a retention deadli
   }
   expect(abort).toHaveBeenCalledTimes(4);
 });
+
+it.each(["text", "done"] as const)("stops an unmeasured probe after a %s event", async (type) => {
+  const abort = vi.fn(async () => {});
+  const runtime: AgentRuntime = {
+    abort,
+    describe: vi.fn(),
+    async *run() {
+      if (type === "text") yield { type, text: "PROBE-OK" };
+      else yield { type };
+    },
+  };
+  const report = await runCachePrefixProbe(
+    runtime,
+    { provider: "fixture", id: "fixture" },
+    { source: "fixture", version: "v1", input: 1, output: 2, cacheRead: 0.1, cacheWrite: 3 },
+  );
+  expect(report.phases).toMatchObject([{ phase: "fresh-prefix", failed: true, modelCalls: 0 }]);
+  expect(abort).toHaveBeenCalledOnce();
+});

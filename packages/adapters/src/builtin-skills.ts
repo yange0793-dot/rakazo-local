@@ -60,8 +60,10 @@ const SKILLS: Array<{ name: string; description: string; body: string }> = [
   },
   {
     name: "Rakazo",
-    description: "How to use or set up Rakazo: chat apps, your computer, billing, hosting",
-    body: `Answer questions about Rakazo itself from its docs. Fetch the matching page with web_fetch before answering, then answer briefly in your own words and link the page. If fetching fails or is unavailable, answer only what this index says and link the page. Never invent menus, buttons, or steps the page doesn't show. Account-specific facts (credit balance, plan, usage) aren't in the docs: point to the screen that shows them.
+    description: "User-facing Rakazo help, app connections, and published setup steps.",
+    body: `Use this skill only for user-facing questions about operating Rakazo and published setup instructions. Do not use it for repository implementation, source code, this installation's configuration or logs; inspect the local workspace or runtime context for those questions instead.
+
+Choose the relevant official docs page below. Fetch it with web_fetch when exact current UI steps or page details are needed, or when the user asks for an official source. If the available context already answers a general question, answer without browsing. If fetching fails, say the docs page could not be read and use only information already available here; do not switch to unrelated shell or file exploration. Never invent menus, buttons, or steps the page does not show. Account-specific facts (credit balance, plan, usage) are not in the docs: point to the screen that shows them.
 
 ${RAKAZO_DOCS.map(([topics, url]) => `- ${topics}: ${url}`).join("\n")}`,
   },

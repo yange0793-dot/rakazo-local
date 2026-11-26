@@ -68,6 +68,31 @@ function expectContainerUser() {
 }
 
 describe("computer command identity", () => {
+  it("reports failure when an ended exec stream has no confirmed exit", async () => {
+    mock.exec.mockResolvedValue({
+      start: async () =>
+        Duplex.from({
+          readable: Readable.from([]),
+          writable: new Writable({
+            write(_chunk, _encoding, callback) {
+              callback();
+            },
+          }),
+        }),
+      inspect: async () => ({ Running: true, ExitCode: null }),
+    });
+    const command = await post("/computers/computer-exec/exec", { argv: ["echo", "hi"] });
+    expect((await command.text()).trim().split("\n").at(-1)).toBe(
+      JSON.stringify({ type: "exit", code: 1 }),
+    );
+    const write = await post("/computers/computer-files/files", {
+      path: "notes.txt",
+      content: Buffer.from("hello").toString("base64"),
+    });
+    expect(write.ok).toBe(false);
+    expect(await write.json()).toMatchObject({ error: "File write exit was not confirmed" });
+  });
+
   it("runs the bot's commands with the workspace environment and the container's user", async () => {
     const response = await post("/computers/computer-exec/exec", {
       argv: ["echo", "hi"],

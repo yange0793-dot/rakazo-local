@@ -13,6 +13,15 @@ import {
 const publicResolver = async () => [{ address: "203.0.113.10", family: 4 as const }];
 
 describe("web SSRF policy", () => {
+  it("does not resolve a hostname after the caller has already cancelled", async () => {
+    const resolve = vi.fn(publicResolver);
+    const reason = new Error("Cancelled by caller");
+    await expect(
+      assertSafeWebUrl("https://example.test/page", resolve, AbortSignal.abort(reason)),
+    ).rejects.toBe(reason);
+    expect(resolve).not.toHaveBeenCalled();
+  });
+
   it.each([
     "http://localhost/x",
     "https://127.0.0.1/x",

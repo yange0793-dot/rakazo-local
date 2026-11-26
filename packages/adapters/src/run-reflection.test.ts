@@ -175,8 +175,22 @@ function harness(options: HarnessOptions = {}) {
     updatedAt: new Date("2026-11-17T10:01:00.000Z"),
   }));
   let statusMessage: { id: string } | null = null;
+  const findSource = vi.fn(async () => {
+    const trigger = options.trigger ?? RUN.trigger;
+    if (options.sourceMessage === null && trigger !== "routine" && trigger !== "tickets")
+      return null;
+    return {
+      threadId: RUN.threadId,
+      sourceMessageId: options.sourceMessage === null ? null : RUN.sourceMessageId,
+      thread: { historyCompactionGeneration: 0 },
+      ticket: null,
+    };
+  });
   const tx = {
+    $queryRaw: vi.fn(async () => []),
     $executeRaw: vi.fn(async () => 0),
+    run: { findFirst: findSource },
+    taughtSkill: { create, findUnique: vi.fn(async () => ({ status: "draft" })) },
     message: {
       findMany: vi.fn(async () => []),
       findUnique: vi.fn(
@@ -200,6 +214,7 @@ function harness(options: HarnessOptions = {}) {
   );
   const prisma = {
     run: {
+      findFirst: findSource,
       findUnique: vi.fn(async () => ({
         ...RUN,
         status: options.status ?? RUN.status,
@@ -445,6 +460,16 @@ describe("reflectRun", () => {
     expect(h.events.notify).toHaveBeenCalledTimes(2);
   });
 
+  it("keeps a skipped automatic review out of the chat", async () => {
+    const h = harness({ output: '{"skip": true, "reason": "one-off answer"}' });
+    await reflectRun(h.deps, { runId: "run-1", auto: true });
+    expect(h.runtimeRun).toHaveBeenCalledOnce();
+    expect(h.saveLesson).not.toHaveBeenCalled();
+    expect(createThreadMessageInTransaction).not.toHaveBeenCalled();
+    expect(appendEventInTransaction).not.toHaveBeenCalled();
+    expect(h.events.notify).not.toHaveBeenCalled();
+  });
+
   it("creates one draft skill card from the run's evidence", async () => {
     const h = harness({
       output: `Draft:\n\`\`\`json\n${JSON.stringify({ lessons: [], skill: DRAFT })}\n\`\`\`\nDone.`,
@@ -566,7 +591,7 @@ describe("reflectRun", () => {
       output: JSON.stringify({ lessons: [LESSON], skill: null }),
       toolEvents: failedToolEvents(),
     });
-    await reflectRun(h.deps, { runId: "run-1" });
+    await reflectRun(h.deps, { runId: "run-1", auto: true });
 
     expect(h.saveLesson).toHaveBeenCalledOnce();
     const [input] = h.saveLesson.mock.calls[0]!;
@@ -586,10 +611,14 @@ describe("reflectRun", () => {
         },
       },
     });
-    const cardCalls = vi
-      .mocked(createThreadMessageInTransaction)
-      .mock.calls.filter(([, input]) => input.clientNonce?.startsWith("reflect-lesson:"));
-    expect(cardCalls).toHaveLength(0);
+    expect(createThreadMessageInTransaction).not.toHaveBeenCalled();
+    expect(appendEventInTransaction).not.toHaveBeenCalled();
+    expect(h.events.notify).not.toHaveBeenCalled();
+    expect(recordUsage).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({ type: "usage" }),
+      expect.objectContaining({ operationId: "reflect:run-1", operationKind: "learning" }),
+    );
   });
 
   it("passes a valid replacement through to the host store", async () => {
@@ -666,11 +695,13 @@ describe("reflectRun", () => {
     expect(JSON.stringify(h.saveLesson.mock.calls)).not.toContain("PRIVATE_FACT_BODY");
   });
 
-  it("retains host read sources on a lesson draft through the message contract", async () => {
+  it("retains host read sources on a manual lesson draft through the message contract", async () => {
     const source = { id: "fact-1", revision: 3, botId: "bot-1", scope: "shared", kind: "durable" };
     const h = harness({
       output: JSON.stringify({ lessons: [LESSON] }),
       tainted: true,
+      trigger: "bot_message",
+      sourceMessage: { ...SOURCE_MESSAGE, role: "bot" },
       toolEvents: failedToolEvents(),
       memoryEvents: [
         {
@@ -683,7 +714,7 @@ describe("reflectRun", () => {
         },
       ],
     });
-    await reflectRun(h.deps, { runId: "run-1", auto: true });
+    await reflectRun(h.deps, { runId: "run-1" });
     const [, card] = vi
       .mocked(createThreadMessageInTransaction)
       .mock.calls.find(([, input]) => input.clientNonce?.startsWith("reflect-lesson:"))!;
@@ -783,7 +814,9 @@ describe("reflectRun", () => {
     });
     expect(h.prisma.event.findMany).toHaveBeenCalledTimes(10);
   });
-  it("leaves a card instead of a lesson when the run read outside content", async () => {
+  it("audits an automatic lesson from outside content without saving it or publishing a card", async () => {
+    const write = vi.fn();
+    installLogger(createLogger({ service: "rakazo-worker", level: "info", sinks: [{ write }] }));
     const h = harness({
       output: JSON.stringify({
         lessons: [{ ...LESSON, replaces: { id: "old", revision: 4 } }],
@@ -805,6 +838,36 @@ describe("reflectRun", () => {
     await reflectRun(h.deps, { runId: "run-1", auto: true });
 
     expect(h.saveLesson).not.toHaveBeenCalled();
+    expect(createThreadMessageInTransaction).not.toHaveBeenCalled();
+    expect(appendEventInTransaction).not.toHaveBeenCalled();
+    expect(h.events.notify).not.toHaveBeenCalled();
+    expect(write).toHaveBeenCalledWith(
+      expect.objectContaining({
+        message: "harness.reflect left automatic lessons unapplied",
+        "run.id": "run-1",
+        "lesson.count": 1,
+        "lesson.evidence_kinds": ["tool_error"],
+        "run.owner_started": true,
+        "run.tainted": true,
+        "run.learning_source_checked": true,
+      }),
+    );
+  });
+
+  it("keeps an unsaved lesson card visible when the owner explicitly reviews delegated work", async () => {
+    const h = harness({
+      output: JSON.stringify({
+        lessons: [{ ...LESSON, replaces: { id: "old", revision: 4 } }],
+        skill: null,
+      }),
+      trigger: "bot_message",
+      sourceMessage: { ...SOURCE_MESSAGE, role: "bot", authorUserId: "" },
+      tainted: true,
+      toolEvents: failedToolEvents(),
+    });
+    await reflectRun(h.deps, { runId: "run-1" });
+
+    expect(h.saveLesson).not.toHaveBeenCalled();
     const [, card] = vi
       .mocked(createThreadMessageInTransaction)
       .mock.calls.find(([, input]) => input.clientNonce?.startsWith("reflect-lesson:"))!;
@@ -815,28 +878,108 @@ describe("reflectRun", () => {
         runId: "run-1",
         cue: LESSON.cue,
         replaces: { id: "old", expectedRevision: 4 },
-        domainKey: "research",
+        domainKey: "bot_message",
         status: "draft",
       }),
     ]);
     expect(card.markUnread).toBe(false);
     // The card the review writes has to survive the thread's own block contract.
     expect(MessageBlock.parse(card.blocks[0])).toEqual(card.blocks[0]);
+    expect(h.events.notify).toHaveBeenCalledTimes(3);
+    expect(h.tx.message.update).toHaveBeenCalledWith({
+      where: { id: "status-message" },
+      data: { blocks: [{ kind: "meta", text: "Review finished." }] },
+    });
   });
 
-  it("leaves a card when the run was not started by its owner", async () => {
+  it("saves evidence-verified lessons from an owner's manual review", async () => {
     const h = harness({
       output: JSON.stringify({ lessons: [LESSON], skill: null }),
-      trigger: "routine",
-      sourceMessage: { ...SOURCE_MESSAGE, role: "bot" },
+      tainted: true,
+      toolEvents: failedToolEvents(),
+    });
+    await reflectRun(h.deps, { runId: "run-1" });
+
+    expect(h.saveLesson).toHaveBeenCalledWith(
+      expect.objectContaining({
+        cue: LESSON.cue,
+        lesson: LESSON.lesson,
+        provenance: expect.objectContaining({
+          harness: expect.objectContaining({ autoApplied: true }),
+        }),
+      }),
+      expect.anything(),
+    );
+    expect(
+      vi
+        .mocked(createThreadMessageInTransaction)
+        .mock.calls.some(([, input]) => input.clientNonce?.startsWith("reflect-lesson:")),
+    ).toBe(false);
+  });
+
+  it.each([
+    { trigger: "bot_message", sourceMessage: { ...SOURCE_MESSAGE, role: "bot" } },
+    { trigger: "routine", sourceMessage: { ...SOURCE_MESSAGE, role: "bot" } },
+    { sourceMessage: { ...SOURCE_MESSAGE, authorUserId: "someone-else" } },
+    { thread: { groupId: "group-1", externalConversationId: null } },
+    { thread: { groupId: null, externalConversationId: "external-1" } },
+  ])("does not promote or publish an ineligible automatic lesson: %j", async (options) => {
+    const h = harness({
+      ...options,
+      output: JSON.stringify({ lessons: [LESSON], skill: null }),
       toolEvents: failedToolEvents(),
     });
     await reflectRun(h.deps, { runId: "run-1", auto: true });
     expect(h.saveLesson).not.toHaveBeenCalled();
-    const card = vi
-      .mocked(createThreadMessageInTransaction)
-      .mock.calls.find(([, input]) => input.clientNonce?.startsWith("reflect-lesson:"));
-    expect(card).toBeTruthy();
+    expect(createThreadMessageInTransaction).not.toHaveBeenCalled();
+    expect(appendEventInTransaction).not.toHaveBeenCalled();
+    expect(h.events.notify).not.toHaveBeenCalled();
+  });
+
+  it("automatically saves the owner's verified correction after reading outside content", async () => {
+    const quote = "Use the connected browser and verify its actual page.";
+    const h = harness({
+      tainted: true,
+      steering: [{ id: "owner-correction", text: quote }],
+      output: JSON.stringify({
+        lessons: [
+          {
+            ...LESSON,
+            evidence: { kind: "user_steering", quote },
+          },
+        ],
+      }),
+    });
+    await reflectRun(h.deps, { runId: "run-1", auto: true });
+    expect(h.saveLesson).toHaveBeenCalledWith(
+      expect.objectContaining({
+        provenance: expect.objectContaining({
+          harness: expect.objectContaining({
+            autoApplied: true,
+            evidence: { kind: "user_steering", quote, messageId: "owner-correction" },
+          }),
+        }),
+      }),
+      expect.anything(),
+    );
+    expect(createThreadMessageInTransaction).not.toHaveBeenCalled();
+    expect(h.events.notify).not.toHaveBeenCalled();
+  });
+
+  it("does not promote a tool-derived lesson alongside an owner's correction", async () => {
+    const quote = "Use the connected browser.";
+    const h = harness({
+      tainted: true,
+      steering: [{ id: "owner-correction", text: quote }],
+      toolEvents: failedToolEvents(),
+      output: JSON.stringify({
+        lessons: [{ ...LESSON, evidence: { kind: "user_steering", quote } }, LESSON],
+      }),
+    });
+    await reflectRun(h.deps, { runId: "run-1", auto: true });
+    expect(h.saveLesson).toHaveBeenCalledTimes(1);
+    expect(createThreadMessageInTransaction).not.toHaveBeenCalled();
+    expect(h.events.notify).not.toHaveBeenCalled();
   });
 
   it("never drafts a skill for a signal-triggered review", async () => {
@@ -848,6 +991,8 @@ describe("reflectRun", () => {
     expect(request.prompt).toContain("<skill_requested>false</skill_requested>");
     expect(request.prompt).not.toContain("<user_follow_up>");
     expect(h.create).not.toHaveBeenCalled();
+    expect(createThreadMessageInTransaction).not.toHaveBeenCalled();
+    expect(h.events.notify).not.toHaveBeenCalled();
   });
 
   it("drops a lesson whose quote was never shown", async () => {
@@ -970,7 +1115,7 @@ describe("reflectRun", () => {
     expect(h.saveLesson).not.toHaveBeenCalled();
   });
 
-  it("leaves an unchecked historical run for a person even if tainted is false", async () => {
+  it("does not save or publish an unchecked historical run even if tainted is false", async () => {
     const h = harness({
       learningSourceChecked: false,
       toolEvents: failedToolEvents(),
@@ -978,11 +1123,8 @@ describe("reflectRun", () => {
     });
     await reflectRun(h.deps, { runId: "run-1", auto: true });
     expect(h.saveLesson).not.toHaveBeenCalled();
-    expect(
-      vi
-        .mocked(createThreadMessageInTransaction)
-        .mock.calls.some(([, r]) => r.clientNonce?.startsWith("reflect-lesson:")),
-    ).toBe(true);
+    expect(createThreadMessageInTransaction).not.toHaveBeenCalled();
+    expect(h.events.notify).not.toHaveBeenCalled();
   });
 
   it("shows a failed run's own error as the outcome", async () => {
@@ -998,6 +1140,20 @@ describe("reflectRun", () => {
       '<run_outcome status="failed" error="upstream 400 &lt;bad&gt;"></run_outcome>',
     );
     expect(request.prompt).toContain("<review_signals>\nrun_failed, tool_error\n</review_signals>");
+  });
+
+  it("rejects a lesson that cites the undisplayed tail of the run error", async () => {
+    const quote = "synthetic detail outside the review prompt";
+    const h = harness({
+      status: "failed",
+      error: `${"x".repeat(300)} ${quote}`,
+      output: JSON.stringify({ lessons: [{ ...LESSON, evidence: { kind: "run_failed", quote } }] }),
+    });
+
+    await reflectRun(h.deps, { runId: "run-1", auto: true });
+
+    expect(h.runtimeRun.mock.calls[0]![0].prompt).not.toContain(quote);
+    expect(h.saveLesson).not.toHaveBeenCalled();
   });
 
   it("offers existing lessons of the same domain first", async () => {
@@ -1104,11 +1260,61 @@ describe("reflectRun", () => {
     ]);
   });
 
-  it("deletes the draft row when the card cannot be published", async () => {
+  it("propagates an automatic review failure without writing a status message", async () => {
+    const h = harness({ output: "no draft today" });
+    await expect(reflectRun(h.deps, { runId: "run-1", auto: true })).rejects.toThrow(
+      /could not parse/,
+    );
+    expect(h.create).not.toHaveBeenCalled();
+    expect(h.saveLesson).not.toHaveBeenCalled();
+    expect(createThreadMessageInTransaction).not.toHaveBeenCalled();
+    expect(appendEventInTransaction).not.toHaveBeenCalled();
+    expect(h.tx.message.update).not.toHaveBeenCalled();
+    expect(h.events.notify).not.toHaveBeenCalled();
+  });
+
+  it("rejects the draft transaction when the card cannot be published", async () => {
     const h = harness();
     // The status line's own transactions never lock the skill row; this rejects only the card.
     h.tx.$executeRaw.mockRejectedValueOnce(new Error("card write failed"));
     await expect(reflectRun(h.deps, { runId: "run-1" })).rejects.toThrow("card write failed");
-    expect(h.prisma.taughtSkill.delete).toHaveBeenCalledWith({ where: { id: "skill-1" } });
+    expect(h.tx.taughtSkill.create).toHaveBeenCalledOnce();
+    expect(h.prisma.taughtSkill.delete).not.toHaveBeenCalled();
+  });
+
+  it("drops a queued chat review whose source was cleared before the worker starts", async () => {
+    const h = harness({ sourceMessage: null });
+    await reflectRun(h.deps, { runId: "run-1", auto: true });
+    expect(h.runtimeRun).not.toHaveBeenCalled();
+    expect(h.saveLesson).not.toHaveBeenCalled();
+    expect(h.create).not.toHaveBeenCalled();
+    expect(h.events.notify).not.toHaveBeenCalled();
+  });
+
+  it("does not publish a skill or status after clear during the model call", async () => {
+    const h = harness();
+    const runModel = h.runtimeRun.getMockImplementation()!;
+    h.runtimeRun.mockImplementationOnce(async function* (...args) {
+      h.prisma.run.findFirst.mockResolvedValue(null);
+      yield* runModel(...args);
+    });
+    await reflectRun(h.deps, { runId: "run-1" });
+    expect(h.runtimeRun).toHaveBeenCalledOnce();
+    expect(h.create).not.toHaveBeenCalled();
+    expect(h.events.notify).toHaveBeenCalledOnce();
+  });
+
+  it.each(["routine", "tickets"])("reviews a message-free %s run", async (trigger) => {
+    const h = harness({
+      trigger,
+      sourceMessage: null,
+      output: JSON.stringify({ lessons: [LESSON] }),
+      toolEvents: failedToolEvents(),
+    });
+    await reflectRun(h.deps, { runId: "run-1", auto: true });
+    expect(h.runtimeRun).toHaveBeenCalledOnce();
+    expect(h.saveLesson).not.toHaveBeenCalled();
+    expect(createThreadMessageInTransaction).not.toHaveBeenCalled();
+    expect(h.events.notify).not.toHaveBeenCalled();
   });
 });

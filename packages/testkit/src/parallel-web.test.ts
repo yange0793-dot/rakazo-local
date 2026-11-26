@@ -94,7 +94,7 @@ function executorFixture(
     agentSkill: { findMany: async () => [] },
     scratchpadItem: { findMany: async () => [] },
     userActionApprovalRule: { findMany: async () => [] },
-    userActionAutoReviewPreference: { findUnique: async () => ({ enabled: false }) },
+    userActionAutoReviewPreference: { findUnique: async () => ({ mode: "bypermission" }) },
     externalEffect: { findMany: async () => [] },
     usageRecord: { createMany: async () => ({ count: 1 }) },
     modelCreditEntry: { findUnique: async () => null },
@@ -175,8 +175,12 @@ describe("Parallel through the ordinary bot caller", () => {
   });
 
   it.each([false, true])(
-    "passes large MCP envelopes through executor dispatch into real Pi's next model steps (text-only=%s)",
+    "passes search evidence and a complete fetch window from a large MCP envelope to Pi (text-only=%s)",
     async (textOnly) => {
+      const url = "https://example.test/page";
+      const title = "Source";
+      const pageText = "Page text ".repeat(120_000);
+      const maxChars = 10_000;
       const model = await startModelEmulator({
         steps: [
           {
@@ -192,26 +196,29 @@ describe("Parallel through the ordinary bot caller", () => {
           },
           {
             expect: (request) => {
-              expect(
-                JSON.stringify(request.messages.findLast((message) => message.role === "tool")),
-              ).toContain("Useful evidence");
+              const result = request.messages.findLast((message) => message.role === "tool");
+              expect(result?.tool_call_id).toBe("search");
+              expect(JSON.parse(String(result?.content))).toEqual({
+                results: [{ url, title, snippet: "Useful evidence" }],
+              });
             },
             response: {
               type: "tool",
               id: "fetch",
               name: "web_fetch",
-              arguments: { url: "https://example.test/page", maxChars: 100 },
+              arguments: { url, maxChars },
             },
           },
           {
             expect: (request) => {
-              const result = JSON.stringify(
-                request.messages.findLast((message) => message.role === "tool"),
-              );
-              expect(result).toContain("Page text");
-              expect(result).toContain("[Content truncated;");
-              expect(result).not.toContain("Invalid Parallel MCP response");
-              expect(result.length).toBeLessThan(1_000);
+              const result = request.messages.findLast((message) => message.role === "tool");
+              expect(result?.tool_call_id).toBe("fetch");
+              expect(JSON.parse(String(result?.content))).toEqual({
+                url,
+                title,
+                text: `${pageText.slice(0, maxChars)}\n\n[Content truncated; continue with offset ${maxChars}]`,
+                truncated: true,
+              });
             },
             response: { type: "text", text: "The source supports the answer." },
           },
@@ -231,10 +238,10 @@ describe("Parallel through the ordinary bot caller", () => {
         const data = {
           results: [
             {
-              url: "https://example.test/page",
-              title: "Source",
+              url,
+              title,
               excerpts: ["Useful evidence"],
-              full_content: "Page text ".repeat(120_000),
+              full_content: pageText,
             },
           ],
         };
@@ -245,10 +252,10 @@ describe("Parallel through the ordinary bot caller", () => {
         expect(Buffer.byteLength(JSON.stringify(result))).toBeGreaterThan(1_000_000);
         const fixture = executorFixture(runtime, [], result);
         await fixture.execute();
+        model.assertComplete();
         expect(fixture.finalizeRun).toHaveBeenCalledWith(
           expect.objectContaining({ outcome: "completed" }),
         );
-        model.assertComplete();
         expect(fixture.peer.calls.map((call) => call.name)).toEqual(["web_search", "web_fetch"]);
         expect(
           fixture.peer.requests.every(

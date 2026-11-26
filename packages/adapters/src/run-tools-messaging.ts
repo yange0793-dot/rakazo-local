@@ -1,5 +1,5 @@
 import { posix } from "node:path";
-import { ATTACHMENT_MAX_COUNT } from "@rakazo/contracts";
+import { ATTACHMENT_MAX_COUNT, ManagedWorkDependencySchema } from "@rakazo/contracts";
 import {
   BOT_MESSAGE_MAX_LENGTH,
   BOT_MESSAGE_TOO_LONG,
@@ -301,6 +301,14 @@ export const messagingTools: ToolHandlers = {
     const { args, effectKey } = call;
     const invalid = messageError(ctx, args.message);
     if (invalid) return call.finish({ error: invalid });
+    if (args.new_task !== undefined && typeof args.new_task !== "boolean")
+      return call.finish({ error: "new_task must be a boolean" });
+    if (args.new_task && (args.ticket_id !== undefined || (args.intent ?? "request") !== "request"))
+      return call.finish({ error: "new_task requires a request without ticket_id" });
+    const dependencies = ManagedWorkDependencySchema.array()
+      .optional()
+      .safeParse(args.dependencies);
+    if (!dependencies.success) return call.finish({ error: "Invalid managed work dependencies." });
     const stored = await prepareSentFiles(ctx, call, {
       botId: args.bot_id ? String(args.bot_id) : undefined,
       name: args.confirm_name ? String(args.confirm_name) : undefined,
@@ -322,6 +330,9 @@ export const messagingTools: ToolHandlers = {
         message: delivered.message,
         intent: args.intent as "request" | "result" | "question" | "status" | "fyi" | undefined,
         deliveryKey: effectKey,
+        ticket_id: args.ticket_id === undefined ? undefined : String(args.ticket_id),
+        new_task: args.new_task,
+        dependencies: dependencies.data,
         replyToId: args.reply_to_message_id ? String(args.reply_to_message_id) : undefined,
         files: stored.files,
       },
@@ -333,6 +344,9 @@ export const messagingTools: ToolHandlers = {
       botId: sent.botId,
       name: sent.name,
       messageId: sent.messageId,
+      managed: "managed" in sent ? sent.managed : false,
+      ...("ticketId" in sent ? { ticketId: sent.ticketId } : {}),
+      ...("eventId" in sent ? { eventId: sent.eventId } : {}),
       note: sent.note,
     });
   },

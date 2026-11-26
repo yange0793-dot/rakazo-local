@@ -334,6 +334,14 @@ function fixture(
       ),
     },
     semanticFactRevision: {
+      findUniqueOrThrow: vi.fn(async ({ where }) => {
+        const { factId, revision } = where.factId_revision;
+        return { id: `${factId}:${revision}` };
+      }),
+      update: vi.fn(async ({ where, data }) => {
+        const snapshot = revisions.find((row) => `${row.factId}:${row.revision}` === where.id);
+        if (snapshot) Object.assign(snapshot, data);
+      }),
       create: vi.fn(async ({ data }: { data: Record<string, unknown> }) => {
         revisions.push(data);
         return data;
@@ -373,6 +381,7 @@ function fixture(
     $transaction: vi.fn(async (fn: (tx: unknown) => Promise<unknown>) => fn(db)),
     $contentEncryption: () => ({
       ring: {
+        remember: vi.fn(),
         encryptWrites: true,
         current: async () => ({ key: Buffer.alloc(32, 7) }),
         all: async () => [{ key: Buffer.alloc(32, 7) }],
@@ -679,9 +688,15 @@ describe("automatic memory archive", () => {
     expect(batch!.throughSeq).toBe(1);
   });
 
-  it("skips one overlarge source and checkpoints later messages instead of blocking", async () => {
+  it("rejects an overlarge source and leaves the messages and checkpoint intact", async () => {
     const overlarge = "x".repeat(512 * 1024 + 1);
     const withinLimit = "字".repeat(100_000);
+    const messages = [
+      message(1, { blocks: [{ kind: "text", text: overlarge }] }),
+      message(2, { blocks: [{ kind: "text", text: withinLimit }] }),
+      message(3, { blocks: [{ kind: "text", text: withinLimit }] }),
+      message(4, { blocks: [{ kind: "text", text: "A later source." }] }),
+    ];
     const f = fixture({
       thread: threadRow(),
       progress: {
@@ -696,24 +711,17 @@ describe("automatic memory archive", () => {
         pending: true,
         availableAt: now,
       },
-      messages: [
-        message(1, { blocks: [{ kind: "text", text: overlarge }] }),
-        message(2, { blocks: [{ kind: "text", text: withinLimit }] }),
-        message(3, { blocks: [{ kind: "text", text: withinLimit }] }),
-        message(4, { blocks: [{ kind: "text", text: "A later source." }] }),
-      ],
+      messages,
     });
     const target = { threadId: "thread-a", botId: "bot-a", userId: "user-a" };
-    const first = await f.store.loadBatch(target, ctx);
+    const checkpoint = { ...f.progress() };
+    const originalMessages = structuredClone(messages);
 
-    expect(first!.newSources.map((source) => source.id)).toEqual(["m2"]);
-    expect(first!.messages.map((message) => message.id)).toEqual(["m2"]);
-    expect(first!.throughSeq).toBe(2);
-
-    await f.store.applyBatch(first!, [], ctx);
-    const next = await f.store.loadBatch(target, ctx);
-    expect(next!.newSources.map((source) => source.id)).toEqual(["m3", "m4"]);
-    expect(next!.throughSeq).toBe(4);
+    await expect(f.store.loadBatch(target, ctx)).rejects.toThrow(
+      "An automatic memory source exceeds the batch limit.",
+    );
+    expect(f.progress()).toEqual(checkpoint);
+    expect(f.messages).toEqual(originalMessages);
   });
 
   it("never advances the cursor past a page it truncated", async () => {
@@ -792,6 +800,9 @@ describe("automatic memory archive", () => {
     expect(
       await f.store.loadBatch({ threadId: "thread-a", botId: "bot-a", userId: "user-a" }, ctx),
     ).toBeNull();
+    expect(
+      await f.store.hasPending({ threadId: "thread-a", botId: "bot-a", userId: "user-a" }, ctx),
+    ).toBe(true);
   });
 
   it("arms a caught-up cursor for messages added since it finished", async () => {
@@ -1257,7 +1268,7 @@ describe("automatic memory archive", () => {
 describe("automatic memory clear preparation", () => {
   const target = { threadId: "thread-a", botId: "bot-a", userId: "user-a" };
 
-  it("extends an activated cursor to the pinned head without scanning messages or runs", async () => {
+  it.each(["isolated", "shared"])("extends an activated %s cursor despite scope changes", async (scope) => {
     const f = fixture({
       thread: threadRow({ nextMessageSeq: 8, historyCompactionGeneration: 2 }),
       progress: {
@@ -1265,7 +1276,7 @@ describe("automatic memory clear preparation", () => {
         spaceId: "space-a",
         botId: "bot-a",
         userId: "user-a",
-        scope: "isolated",
+        scope,
         generation: 2,
         throughSeq: 5,
         processedUpToSeq: 3,
@@ -1280,6 +1291,7 @@ describe("automatic memory clear preparation", () => {
       processedUpToSeq: 3,
       pending: true,
       generation: 2,
+      scope: "isolated",
     });
     expect(f.db.message.findMany).not.toHaveBeenCalled();
     expect(f.db.run.findMany).not.toHaveBeenCalled();
@@ -1337,7 +1349,7 @@ describe("automatic memory clear preparation", () => {
     });
   });
 
-  it("returns only the fence when the latest run source is not direct user text", async () => {
+  it("records coverage when the remaining transcript has no direct user source", async () => {
     const f = fixture({
       thread: threadRow({ nextMessageSeq: 3 }),
       messages: [
@@ -1357,8 +1369,12 @@ describe("automatic memory clear preparation", () => {
     });
 
     expect(await f.store.prepareClear(target, ctx)).toEqual({ generation: 0, nextMessageSeq: 3 });
-    expect(f.progress()).toBeNull();
-    expect(f.db.memoryArchiveProgress.upsert).not.toHaveBeenCalled();
+    expect(f.progress()).toMatchObject({
+      generation: 0,
+      processedUpToSeq: 2,
+      throughSeq: 2,
+      pending: false,
+    });
   });
 
   it("rejects a different target owner for prepareClear and hasPending", async () => {

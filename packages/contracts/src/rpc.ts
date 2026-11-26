@@ -1384,9 +1384,7 @@ export const appContract = {
     set: oc
       .input(
         settingsScopeInput.extend({
-          mode: ApprovalModeSchema.optional(),
-          enabled: z.boolean().optional(),
-          skipApprovals: z.boolean().optional(),
+          mode: ApprovalModeSchema,
         }),
       )
       .output(ActionAutoReviewSettingsSchema),
@@ -1463,6 +1461,9 @@ export const appContract = {
         }),
       )
       .output(PageDetailSchema),
+    frame: oc
+      .input(z.strictObject({ pageId: Id }))
+      .output(z.strictObject({ image: z.string().nullable() })),
     rename: oc
       .input(z.strictObject({ pageId: Id, title: PageTitleSchema }))
       .output(PageSummarySchema),

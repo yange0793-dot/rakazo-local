@@ -5,7 +5,7 @@ import { isUniqueViolation } from "@rakazo/db";
 import { checkPageSource, PAGE_KIT_GUIDE } from "@rakazo/page-kit/validate";
 import { MAX_APPROVAL_DETAIL_LENGTH } from "./approval-ask.js";
 import type { RunContext } from "./run-context.js";
-import { neverAsks } from "./run-context.js";
+import { bypassesApprovals } from "./run-context.js";
 import { publishMessage } from "./run-messages.js";
 import type { ToolCall, ToolHandlers } from "./run-tool-gate.js";
 import type { ToolRequest } from "./run-tool-request.js";
@@ -129,7 +129,7 @@ function changedLines(before: string, after: string): string[] {
 
 /**
  * Anyone with a shared page's link sees each save at once, so a save to one is held for approval,
- * except under Never ask. The card shows every line that changes, and the approval holds the
+ * except under bypass mode. The card shows every line that changes, and the approval holds the
  * version it was shown against. A save that would fail anyway is not held: it fails as it would.
  * An approved replay stays held so it claims the approval it was given.
  */
@@ -149,7 +149,7 @@ export async function holdSharedPageSave(
   const hasTitle = argumentGiven(args.title);
   if (!argumentGiven(args.source) && !editsGiven(args) && !hasTitle) return undefined;
   if (argumentGiven(args.source) && editsGiven(args)) return undefined;
-  if (await neverAsks(ctx)) return undefined;
+  if (await bypassesApprovals(ctx)) return undefined;
   const page = await ctx.deps.prisma.page.findFirst({
     where: reachablePage(ctx, String(args.pageId)),
     select: {
@@ -256,7 +256,7 @@ async function savePage(ctx: RunContext, call: ToolCall) {
     page !== null &&
     !call.bypassApproval &&
     call.nextApprovedTool !== "save_page" &&
-    !(await neverAsks(ctx));
+    !(await bypassesApprovals(ctx));
   let saved: { pageId: string; version: number; title: string };
   try {
     saved = await deps.prisma.$transaction(async (tx) => {

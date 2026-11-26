@@ -289,7 +289,7 @@ infra/      local services and computer images
 docs/       architecture, operations, and release guides
 ```
 
-よく使うチェック：
+利用できるチェック（変更に合わせて選択し、毎回すべて実行する必要はありません）：
 
 ```bash
 pnpm lint

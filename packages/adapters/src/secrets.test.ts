@@ -16,6 +16,26 @@ const context = {
 };
 
 describe("EncryptedSecretStore", () => {
+  it("accepts complete legacy records and rejects a short authentication tag", async () => {
+    const password = "test-only-encryption-key";
+    const store = new EncryptedSecretStore(password);
+    const iv = Buffer.alloc(12);
+    const key = crypto.createHash("sha256").update(password).digest();
+    for (const plaintext of ["", "legacy value"]) {
+      const cipher = crypto.createCipheriv("aes-256-gcm", key, iv);
+      const encrypted = Buffer.concat([cipher.update(plaintext, "utf8"), cipher.final()]);
+      const tag = cipher.getAuthTag();
+      const record = Buffer.concat([iv, tag, encrypted]).toString("base64");
+      await expect(store.load(record, "legacy")).resolves.toBe(plaintext);
+      if (!plaintext) {
+        const truncated = Buffer.concat([iv, tag.subarray(0, 12)]).toString("base64");
+        await expect(store.load(truncated, "legacy")).rejects.toThrow(
+          "Encrypted secret is malformed",
+        );
+      }
+    }
+  });
+
   it("derives each record's key once however often it is read", async () => {
     const store = new EncryptedSecretStore("test-only-encryption-key");
     const records = await Promise.all(

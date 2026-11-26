@@ -18,6 +18,7 @@ import {
   BOT_DESCRIPTION_MAX_LENGTH,
   BOT_INSTRUCTIONS_MAX_LENGTH,
   GROUP_MEMBER_MIN,
+  OPENAI_COMPATIBLE_PROVIDER_ID,
 } from "@rakazo/contracts";
 import { ACTIVE_RUN_STATUSES } from "@rakazo/core";
 import type { Prisma, PrismaClient, SemanticFactStore } from "@rakazo/db";
@@ -29,6 +30,7 @@ import {
   createThreadMessageInTransaction,
   deletePageShareSecrets,
   expireComputerExecutionLeases,
+  findModelCredentialById,
   legacyTeamHomeKey,
   recordComputerRunEnd,
   THREAD_LOCK_TRANSACTION_OPTIONS,
@@ -46,6 +48,7 @@ import {
   withCleanupDeadline,
 } from "./computer-workspace.js";
 import { removeAgentHome, removeAgentHomeFolders } from "./home.js";
+import { validateCompatibleModelChoice } from "./model-selection.js";
 import { forgetPageShareSecrets } from "./page-share-secrets.js";
 import { removePiBotSessions } from "./pi-session.js";
 import { isSandboxGoneError } from "./sandbox-errors.js";
@@ -64,6 +67,7 @@ export async function spawnBot(
   deps: {
     prisma: PrismaClient;
     jobs: JobPublisher;
+    secretStore: Pick<SecretStore, "load">;
   },
   input: {
     spawnedBy: {
@@ -100,6 +104,19 @@ export async function spawnBot(
       notifyOnFinish: true,
       // Creation provenance only; bots remain peers in the roster.
       parentBotId: input.spawnedBy.id,
+      validateModelPin: async (tx, provider, modelId, credentialId) => {
+        if (provider === OPENAI_COMPATIBLE_PROVIDER_ID) {
+          const error = await validateCompatibleModelChoice(tx, deps.secretStore, actor, modelId, {
+            credentialId,
+          });
+          if (error) throw new Error(error);
+        } else if (
+          credentialId &&
+          !(await findModelCredentialById(tx, actor, credentialId, provider))
+        ) {
+          throw new Error("Connect that model provider first");
+        }
+      },
       spawnKey: input.spawnKey,
       computerMode: input.computerMode,
       initialMessage: {
@@ -494,6 +511,14 @@ export async function destroyBot(
           WHERE "botId" = ${bot.id}
         `;
         }
+        // Tickets survive, but their source messages are about to be deleted with this bot.
+        await tx.ticket.updateMany({
+          where: {
+            spaceId: bot.spaceId,
+            originMessage: { thread: { botId: bot.id } },
+          },
+          data: { originMessageId: null },
+        });
         await tx.botDeletion.create({
           data: {
             id: bot.id,

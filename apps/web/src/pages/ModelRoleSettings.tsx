@@ -1,6 +1,5 @@
 import { Trans, useLingui } from "@lingui/react/macro";
 import type {
-  ModelBackupChoice,
   ModelCredential,
   ModelRole,
   ModelRoleChoice,
@@ -8,17 +7,12 @@ import type {
   SettingsScope,
   ThinkingLevel,
 } from "@rakazo/contracts";
+import { MAX_MODEL_BACKUPS, modelRoleChoiceKey } from "@rakazo/contracts";
 import {
-  canonicalPiProviderId,
-  connectedBackupOptions,
-  MAX_MODEL_BACKUPS,
-  modelRoleChoiceKey,
-} from "@rakazo/contracts";
-import {
-  clampCatalogThinkingLevel,
   createModelRoleSettings,
-  credentialForModel,
   modelRoleListPatch,
+  modelRolePickerData,
+  THINKING_LEVEL_OPTIONS,
 } from "@rakazo/core";
 import {
   Button,
@@ -39,6 +33,7 @@ import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { GripVertical, MoreHorizontal, Plus } from "lucide-react";
 import type { ReactNode } from "react";
 import { useEffect, useMemo, useState, useSyncExternalStore } from "react";
+import { providerDisplayName } from "../lib/localized-provider-hint";
 import { thinkingLevelLabel } from "../lib/model-catalog";
 import { spaceQueries } from "../lib/query";
 import { useSpaceRpc } from "../lib/space-rpc";
@@ -77,9 +72,6 @@ type Props = {
   /** Extra items in the first row's menu. */
   primaryMenuItems?: ReactNode;
 };
-
-const sameChoice = (left: ModelRoleChoice, right: ModelRoleChoice) =>
-  modelRoleChoiceKey(left) === modelRoleChoiceKey(right);
 
 const choiceOf = (option: RoleModelOption): ModelRoleChoice => ({
   provider: option.provider,
@@ -165,7 +157,7 @@ export function ModelRoleSettings({
   // After a connection the slot's picker reopens on that provider's models.
   const [reopen, setReopen] = useState<{
     slot: "primary" | number | "add";
-    query: string;
+    choice: ModelRoleChoice;
     key: number;
   } | null>(null);
   useEffect(() => {
@@ -176,67 +168,31 @@ export function ModelRoleSettings({
   const primary = settings?.primary ?? null;
   const backups = settings?.backups ?? [];
   const rows = primary ? [primary, ...backups] : backups;
-  const entryFor = (choice: ModelBackupChoice) =>
-    state.catalog.find(
-      (entry) =>
-        canonicalPiProviderId(entry.provider) === canonicalPiProviderId(choice.provider) &&
-        entry.id === choice.modelId,
-    );
-  const connectionFor = (choice: ModelRoleChoice) =>
-    choice.credentialId
-      ? credentials.find((entry) => entry.id === choice.credentialId)
-      : (credentialForModel(credentials, choice.provider, choice.modelId) ??
-        credentials.find(
-          (entry) =>
-            entry.provider === choice.provider &&
-            (entry.modelId === choice.modelId ||
-              entry.catalogSource?.unavailableModelIds.includes(choice.modelId)),
-        ) ??
-        credentials.find(
-          (entry) =>
-            canonicalPiProviderId(entry.provider) === canonicalPiProviderId(choice.provider) &&
-            !entry.catalogSource,
-        ));
-  const unavailable = (choice: ModelRoleChoice) => {
-    const source = connectionFor(choice)?.catalogSource;
-    return Boolean(
-      source && (!source.available || source.unavailableModelIds.includes(choice.modelId)),
-    );
-  };
-  const thinkingLevels =
-    thinking && primary
-      ? (entryFor(primary)?.thinkingLevels ?? []).filter((level) => level !== "off")
-      : [];
-  // Grouped by the connection that runs them.
-  const options: RoleModelOption[] = connectedBackupOptions(
-    state.catalog,
-    credentials,
-    role === "computer",
-  )
-    .filter((choice) => !unavailable(choice))
-    .map((choice) => ({
-      ...(entryFor(choice) ?? {
-        provider: choice.provider,
-        id: choice.modelId,
-        label: choice.label,
-        billing: "",
-      }),
-      providerName: connectionFor(choice)?.catalogSource
-        ? connectionFor(choice)?.label
-        : choice.credentialId
-          ? choice.connectionName
-          : providerLabel(choice.provider),
-      ...(choice.credentialId ? { credentialId: choice.credentialId } : {}),
-    }));
+  const {
+    options: choices,
+    entryFor,
+    connectionFor,
+    connectionName,
+    keyFor,
+    unavailable,
+  } = modelRolePickerData(state.catalog, credentials, role, providerDisplayName);
+  const thinkingLevels = thinking && primary ? THINKING_LEVEL_OPTIONS : [];
+  const options: RoleModelOption[] = choices.map((choice) => ({
+    ...(entryFor(choice) ?? {
+      provider: choice.provider,
+      id: choice.modelId,
+      label: choice.label,
+      billing: "",
+    }),
+    providerName: choice.credentialId ? choice.connectionName : providerLabel(choice.provider),
+    ...(choice.credentialId ? { credentialId: choice.credentialId } : {}),
+  }));
   const providerName = (choice: ModelRoleChoice) =>
-    (connectionFor(choice)?.catalogSource ? connectionFor(choice)?.label : undefined) ||
-    (choice.credentialId &&
-      options.find((option) => option.credentialId === choice.credentialId)?.providerName) ||
-    providerLabel(choice.provider);
+    connectionName(choice) ?? providerLabel(choice.provider);
   // What runs when the member chose no first model; named in the empty row and offered to
   // return to from the picker.
   const deployment = settings?.deploymentPrimary ?? null;
-  const modelLabel = (choice: ModelBackupChoice) => entryFor(choice)?.label ?? choice.modelId;
+  const modelLabel = (choice: ModelRoleChoice) => entryFor(choice)?.label ?? choice.modelId;
   const busy = state.busy || state.stale || !settings;
   // Picks build their change from the settings loaded when they save, so a reload in flight
   // does not lock them; moves and removals use the rows on screen and wait for it.
@@ -259,8 +215,11 @@ export function ModelRoleSettings({
       const list = current.primary ? [current.primary, ...current.backups] : current.backups;
       // A pick made from rows that were still catching up may already be in the loaded
       // list; it keeps its place rather than moving and displacing the main model.
-      if (list.some((item) => sameChoice(item, choice))) return {};
-      const at = slot === "add" ? -1 : list.findIndex((item) => sameChoice(item, slot));
+      const at =
+        slot === "add"
+          ? -1
+          : list.findIndex((item) => modelRoleChoiceKey(item) === modelRoleChoiceKey(slot));
+      if (list.some((item, index) => index !== at && keyFor(item) === keyFor(choice))) return {};
       return modelRoleListPatch(
         current,
         at < 0 ? [...list, choice] : list.map((item, index) => (index === at ? choice : item)),
@@ -274,7 +233,7 @@ export function ModelRoleSettings({
     save((current) => ({
       primary: choice,
       backups: choice
-        ? current.backups.filter((item) => !sameChoice(item, choice))
+        ? current.backups.filter((item) => keyFor(item) !== keyFor(choice))
         : current.backups,
     }));
   const move = (index: number, target: number) => {
@@ -291,11 +250,11 @@ export function ModelRoleSettings({
       onConnected: async (choice) => {
         await controller.load();
         onChanged?.();
-        setReopen({ slot, query: providerName(choice), key: Date.now() });
+        setReopen({ slot, choice, key: Date.now() });
       },
     });
   const reopenFor = (slot: "primary" | number | "add") =>
-    reopen?.slot === slot ? { query: reopen.query, key: reopen.key } : undefined;
+    reopen?.slot === slot ? { query: providerName(reopen.choice), key: reopen.key } : undefined;
 
   const canAdd = backups.length < MAX_MODEL_BACKUPS;
   // Order only means something once there is more than one row.
@@ -331,7 +290,7 @@ export function ModelRoleSettings({
             <RoleModelPicker
               trigger={pickerTrigger(
                 deployment ? modelLabel(deployment) : defaultLabel,
-                deployment ? providerName(deployment) : undefined,
+                deployment ? providerLabel(deployment.provider) : undefined,
               )}
               label={t`Change ${title}`}
               options={options}
@@ -370,10 +329,7 @@ export function ModelRoleSettings({
           const offset = primary ? 0 : 1;
           const connection = connectionFor(choice);
           const missing = unavailable(choice);
-          const effectiveThinking = clampCatalogThinkingLevel(
-            choice.thinkingLevel,
-            thinkingLevels,
-          ) as ThinkingLevel | null;
+          const effectiveThinking = choice.thinkingLevel as ThinkingLevel | null;
           return (
             <li
               key={modelRoleChoiceKey(choice)}
@@ -527,7 +483,7 @@ export function ModelRoleSettings({
               }
               label={t`Add fallback`}
               options={options.filter((option) =>
-                rows.every((row) => !sameChoice(row, choiceOf(option))),
+                rows.every((row) => keyFor(row) !== modelRoleChoiceKey(choiceOf(option))),
               )}
               providers={providers}
               disabled={pickerLocked}

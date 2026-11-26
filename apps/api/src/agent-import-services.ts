@@ -1,7 +1,11 @@
 import type { CodexLiveCatalog } from "@rakazo/adapters";
 import { mcpStdioRefusal, providerCatalogCache, validateBotModelChange } from "@rakazo/adapters";
 import type { Actor } from "@rakazo/contracts";
-import { canonicalPiProviderId, ModelConnectInputSchema } from "@rakazo/contracts";
+import {
+  canonicalPiProviderId,
+  ModelConnectInputSchema,
+  OPENAI_COMPATIBLE_PROVIDER_ID,
+} from "@rakazo/contracts";
 import type { createRepos } from "@rakazo/db";
 import { findModelCredential, Prisma, withTransactionRetry } from "@rakazo/db";
 import { getLogger } from "@rakazo/logging";
@@ -11,6 +15,7 @@ import type { createMcpServers } from "./mcp-servers.js";
 import { mcpCredentialRecords, mcpStdioPolicy } from "./mcp-servers.js";
 import type { createModelConnector } from "./model-credentials.js";
 import { createImportedModelCredential, prepareModelCredential } from "./model-credentials.js";
+import { assertBotModelPin } from "./model-pins.js";
 import type { RouterDeps } from "./router.js";
 import type { createRoutineAnnouncer } from "./routines.js";
 import { assertRoutineSchedule, routineNextRunAt, routineRowData } from "./routines.js";
@@ -45,7 +50,12 @@ export function createAgentImportServices({
       withTransactionRetry(() =>
         repos.createBot(actor, {
           ...input,
-          isolationLevel: Prisma.TransactionIsolationLevel.Serializable,
+          isolationLevel:
+            input.modelProvider === OPENAI_COMPATIBLE_PROVIDER_ID
+              ? Prisma.TransactionIsolationLevel.ReadCommitted
+              : Prisma.TransactionIsolationLevel.Serializable,
+          validateModelPin: (tx, provider, modelId, credentialId) =>
+            assertBotModelPin(tx, deps.secrets, actor, provider, modelId, credentialId),
         }),
       ),
     hasModelConnection: async (actor, provider) =>

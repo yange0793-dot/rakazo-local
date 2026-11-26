@@ -29,6 +29,7 @@ import {
   CodexCatalogCache,
   contentKeyProviderFromEnv,
   createAgentHomeStore,
+  createAgentRuntimeSelection,
   createApnsActivityProvider,
   createApnsVoipProvider,
   createArtifactStore,
@@ -54,7 +55,6 @@ import {
   messagingPlatformsFromEnv,
   modelCatalogSourcesFromEnv,
   ObjectAgentHomeStore,
-  PiAgentRuntime,
   PiOAuthLogins,
   PostgresRealtimeFanout,
   PrismaPushTokenStore,
@@ -62,7 +62,6 @@ import {
   RunJobPublisher,
   RunStarter,
   resolveDeploymentModel,
-  ScriptedAgentRuntime,
   SpaceMemoryProviderResolver,
   StripeBillingProvider,
   sandboxProviderOptionsFromEnv,
@@ -443,11 +442,12 @@ async function buildApp(overrides: CreateAppOverrides): Promise<AppHandles> {
   const { mcpOAuth, mcp, pipedream, installed, integrationSettings, stack } = connectors;
   const runtime =
     runtimeOverride ??
-    (env.agentRuntime === "scripted"
-      ? new ScriptedAgentRuntime()
-      : new PiAgentRuntime({
-          sessionRoot: env.piSessionRecording ? piSessionsRoot(env.dataDir) : undefined,
-        }));
+    (await createAgentRuntimeSelection({
+      defaultRuntime: env.agentRuntime,
+      routes: env.agentRuntimeRoutes,
+      dataDir: env.dataDir,
+      piSessionRoot: env.piSessionRecording ? piSessionsRoot(env.dataDir) : undefined,
+    }));
   const pushTokens = new PrismaPushTokenStore(prisma, env.encryptionKey);
   const notifications =
     notificationsOverride ??
@@ -534,6 +534,8 @@ async function buildApp(overrides: CreateAppOverrides): Promise<AppHandles> {
         prisma,
         jobs,
         events,
+        connector: connectors.stack.connector,
+        shutdownSignal: shutdown.signal,
         notifications,
         cloudAgent,
         paymentWallet,

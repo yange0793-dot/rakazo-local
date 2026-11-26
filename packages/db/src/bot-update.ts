@@ -25,7 +25,13 @@ export async function commitBotUpdate(
     expectedSettings?: Partial<
       Pick<
         Bot,
-        "modelProvider" | "modelId" | "thinkingLevel" | "autoSpeak" | "voiceId" | "avatarSetPinned"
+        | "modelProvider"
+        | "modelId"
+        | "modelCredentialId"
+        | "thinkingLevel"
+        | "autoSpeak"
+        | "voiceId"
+        | "avatarSetPinned"
       >
     >;
     /**
@@ -36,6 +42,7 @@ export async function commitBotUpdate(
      */
     expectedUserAvatarSet?: { userId: string; botAvatarSet: string };
     instructionRestore?: { versionId: string; undo?: boolean };
+    validateModelPin?: (tx: Prisma.TransactionClient) => Promise<void>;
     reason?: string;
   },
   appendEvent: AppendEvent = appendEventInTransaction,
@@ -48,6 +55,7 @@ export async function commitBotUpdate(
   }
   if (
     !options.emitBotUpdated &&
+    !options.validateModelPin &&
     options.data.instructions === undefined &&
     !options.instructionRestore
   ) {
@@ -60,6 +68,7 @@ export async function commitBotUpdate(
 
   const { instructions, ...data } = options.data;
   const committed = await options.prisma.$transaction(async (tx) => {
+    await options.validateModelPin?.(tx);
     // The owner's share lock comes first: a timezone save holds the user row while it
     // moves routines, and a routine wake inserts a task whose foreign key waits for the
     // thread, so thread → user closes a cycle user → routines → thread around this write.

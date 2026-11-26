@@ -328,13 +328,13 @@ async function openAppOnce(targetUrl: string, switching: boolean) {
   desktop.hostComputer?.activate(
     desktop.currentSetup?.mode === "new" && targetUrl === desktop.localStack.webUrl(),
   );
-  const target = await resolveSessionForTarget(targetUrl);
-  configureHeaderSession(target.value);
-  // A failed switch must leave telemetry with the window that remains selected.
-  if (desktop.mainWindow === null) activateDesktopMonitoring(targetUrl, target.value);
   const previous = desktop.mainWindow;
   let win: BrowserWindow | null = null;
   try {
+    const target = await resolveSessionForTarget(targetUrl);
+    configureHeaderSession(target.value);
+    // A failed switch must leave telemetry with the window that remains selected.
+    if (desktop.mainWindow === null) activateDesktopMonitoring(targetUrl, target.value);
     const documentError = await probeDocument(targetUrl);
     if (documentError !== null) throw documentError;
     await installBundledRenderer(
@@ -348,6 +348,7 @@ async function openAppOnce(targetUrl: string, switching: boolean) {
     // On launch the window stays up: the web app shows its own loading, reconnecting or error
     // screen and recovers from it. Switching to a server that is not ready keeps the previous one.
     const state = await created.loaded;
+    if (win.isDestroyed()) throw new ServerUnavailable("The app window closed during load.");
     if (switching && state === "pending") {
       throw withDetail(
         new ServerUnavailable("The server page did not become ready."),
@@ -481,8 +482,10 @@ async function rollbackSetupFile(userDataDir: string, previousSetup: DesktopSetu
   try {
     if (previousSetup !== null) await writeSetup(userDataDir, previousSetup);
     else await clearSetup(userDataDir);
-  } catch {
-    // Disk rollback is best-effort; callers already restored in-memory state when possible.
+    return true;
+  } catch (error) {
+    reportDesktopError(error, "desktop.startup");
+    return false;
   }
 }
 /**
@@ -495,7 +498,7 @@ async function recoverFromCrashedSave(
   previousUrl: string | null,
 ): Promise<string> {
   const outcome = abandonPendingAppSwitch(previousSetup, previousUrl);
-  await rollbackSetupFile(userDataDir, previousSetup);
+  const restoredSetup = await rollbackSetupFile(userDataDir, previousSetup);
   if (outcome === "kept") {
     if (desktop.mainWindow !== null && !desktop.mainWindow.isDestroyed())
       desktop.mainWindow.destroy();
@@ -509,7 +512,7 @@ async function recoverFromCrashedSave(
     } else activateDesktopMonitoring(undefined);
   }
   const message =
-    previousSetup !== null
+    previousSetup !== null && restoredSetup
       ? t(
           "Could not open that server. Renderer stopped. The previous instance was restored for the next launch.",
         )

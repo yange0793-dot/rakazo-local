@@ -1,0 +1,45 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>Agent 通信 · Rakazo</title>
+  <link rel="stylesheet" href="/style.css">
+  <script src="/lucide.js" defer></script>
+  <script src="/app.js" defer></script>
+</head>
+<body>
+  <header class="topbar">
+    <h1><i data-lucide="radio" aria-hidden="true"></i>Agent 通信</h1>
+    <span id="connection" role="status">连接中</span>
+  </header>
+  <main>
+    <aside>
+      <div class="section-title"><h2>会话</h2><button id="new-session" class="icon" title="新建会话" aria-label="新建会话"><i data-lucide="plus"></i></button></div>
+      <nav id="sessions" aria-label="会话列表"></nav>
+    </aside>
+    <section class="conversation">
+      <div class="conversation-head">
+        <div><h2 id="title">新建会话</h2><p id="meta">Codex · Claude Code</p></div>
+        <div class="actions">
+          <span id="status"></span>
+          <button id="copy-id" class="icon" title="复制会话编号" aria-label="复制会话编号" disabled><i data-lucide="copy"></i></button>
+          <button id="stop" class="icon" title="停止执行" aria-label="停止执行" disabled><i data-lucide="square"></i></button>
+        </div>
+      </div>
+      <div id="events" role="log" aria-label="实时进度" tabindex="0"><div class="empty">暂无消息</div></div>
+      <div id="error" role="alert" hidden></div>
+      <form id="compose">
+        <div id="new-fields">
+          <label>执行器<select id="agent"><option value="codex">Codex</option><option value="claude">Claude Code</option></select></label>
+          <label class="directory">工作目录<input id="cwd" placeholder="/absolute/project/path" autocomplete="off"></label>
+        </div>
+        <div class="message-row">
+          <textarea id="message" rows="3" aria-label="消息" placeholder="发送任务或追加消息…" required></textarea>
+          <button type="submit" id="send" class="icon primary" aria-label="发送消息" title="发送消息"><i data-lucide="arrow-up"></i></button>
+        </div>
+      </form>
+    </section>
+  </main>
+</body>
+</html>

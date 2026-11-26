@@ -108,35 +108,36 @@ class RakazoNotificationService : Service() {
     while (scope.isActive) {
       val storage = NotificationStorage(this)
       val settings = storage.settings
+      val connection = storage.connection()
       if (
         !settings.liveConnection ||
-        storage.endpoint.isBlank() ||
-        storage.spaceId.isBlank() ||
-        !isAllowedNotificationEndpoint(storage.endpoint)
+        connection.endpoint.isBlank() ||
+        connection.spaceId.isBlank() ||
+        !isAllowedNotificationEndpoint(connection.endpoint)
       ) {
         stopIfCurrent(generation)
         return
       }
-      val token = tokenCache.getOrLoad({ storage.token }) { cache ->
+      val token = tokenCache.getOrLoad(connection.encodedToken, { connection.token }) { cache ->
         runIfCurrent(generation, cache)
       } ?: return
       if (token.isBlank()) {
         stopIfCurrent(generation)
         return
       }
-      val seeded = prepareHistorySpace(generation, storage.endpoint, storage.spaceId, token) ?: return
-      val copyContext = localizedContext(this, storage.locale)
+      val seeded = prepareHistorySpace(generation, connection.endpoint, connection.spaceId, token) ?: return
+      val copyContext = localizedContext(this, connection.locale)
       var recentPageBusy = true
       try {
         if (generation != sessionGeneration.get()) return
         val avatarStyle = selectedAvatarStyle
-          ?: avatarStyle(storage.endpoint, token, storage.spaceId, storage.headers)
+          ?: avatarStyle(connection.endpoint, token, connection.spaceId, connection.headers)
             .also { selectedAvatarStyle = it }
         if (generation != sessionGeneration.get()) return
-        val active = runs(storage.endpoint, token, storage.spaceId, storage.headers, "active")
+        val active = runs(connection.endpoint, token, connection.spaceId, connection.headers, "active")
         val working = active.filter(::isWorking).filter { it.notificationsEnabled }
         if (generation != sessionGeneration.get()) return
-        val recent = runs(storage.endpoint, token, storage.spaceId, storage.headers, "recent")
+        val recent = runs(connection.endpoint, token, connection.spaceId, connection.headers, "recent")
         var replyLookups = emptyList<RunRecord>()
         val immediate = mutableListOf<Pair<RunRecord, NotificationCopy>>()
         if (!runIfCurrent(generation) {
@@ -164,7 +165,7 @@ class RakazoNotificationService : Service() {
         for (run in replyLookups) {
           if (generation != sessionGeneration.get()) return
           val reply = runCatching {
-            latestReply(storage.endpoint, token, storage.spaceId, storage.headers, run)
+            latestReply(connection.endpoint, token, connection.spaceId, connection.headers, run)
           }.getOrDefault("")
           if (!runIfCurrent(generation) {
               completions.complete(run, alreadyPosted = {

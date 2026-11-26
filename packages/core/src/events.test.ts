@@ -1047,6 +1047,22 @@ describe("sanitizeUtf16ForJson", () => {
       },
     });
   });
+
+  it("preserves existing keys that would collide with a generated suffix", () => {
+    expect(
+      sanitizeJsonValue({
+        "meta\u0000": "first",
+        "meta\uD83D": "second",
+        "meta\uFFFD#2": "original",
+        "meta\uDE00": "third",
+      }),
+    ).toEqual({
+      "meta\uFFFD": "first",
+      "meta\uFFFD#2": "original",
+      "meta\uFFFD#3": "second",
+      "meta\uFFFD#4": "third",
+    });
+  });
 });
 
 describe("stale helper projection", () => {

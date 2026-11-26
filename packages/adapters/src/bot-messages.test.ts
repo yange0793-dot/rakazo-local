@@ -100,7 +100,10 @@ function deps(
         ),
     },
     message: { findUnique: messageFindUnique, findMany: vi.fn().mockResolvedValue([]) },
-    run: { updateMany: vi.fn().mockResolvedValue({ count: 1 }) },
+    run: {
+      findFirst: vi.fn().mockResolvedValue({ ticketId: null, ticket: null }),
+      updateMany: vi.fn().mockResolvedValue({ count: 1 }),
+    },
     $transaction: vi.fn(async (fn: (client: unknown) => unknown) => {
       transactionAttempts += 1;
       if (options.transactionConflictOnce && transactionAttempts === 1) {

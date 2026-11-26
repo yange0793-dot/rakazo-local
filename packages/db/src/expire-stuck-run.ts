@@ -7,8 +7,8 @@ import { expireComputerExecutionLeases } from "./computers.js";
 import { notifyRealtime } from "./event-stream.js";
 import {
   appendEventInTransaction,
+  deleteTransientRunEvents,
   THREAD_LOCK_TRANSACTION_OPTIONS,
-  transientRunEventsWhere,
 } from "./events.js";
 import { createThreadMessageInTransaction } from "./messages.js";
 import { clearEndedRunState } from "./run-secrets.js";
@@ -120,9 +120,7 @@ export async function expireStuckRun(
     runId: input.runId,
     payload: {},
   });
-  await tx.event.deleteMany({
-    where: { runId: input.runId, ...transientRunEventsWhere() },
-  });
+  await deleteTransientRunEvents(tx, input.runId);
   await expireComputerExecutionLeases(tx, { runId: input.runId });
   // A user lease still on this row is on the screen until release or revocation.
   // Dropping controlRunId first makes maintenance treat the takeover as idle.

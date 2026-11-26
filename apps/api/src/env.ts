@@ -1,4 +1,5 @@
 import type {
+  AgentRuntimeRoutes,
   ApnsVoipConfig,
   PhotonProjectCredentials,
   TelegramBotCredentials,
@@ -8,6 +9,7 @@ import {
   boatApiKeyFromEnv,
   boatApiUrlFromEnv,
   mcpStdioOptionsFromEnv,
+  parseAgentRuntimeRoutes,
   photonProjectsFromEnv,
   resolveCloudAgentProvider,
   resolveDeploymentModel,
@@ -83,6 +85,8 @@ export interface AppEnv {
   paymentWalletProvider: string | undefined;
   paymentWalletClientId: string | undefined;
   agentRuntime: string;
+  /** Optional per-bot execution overrides; the deployment default stays unchanged. */
+  agentRuntimeRoutes?: AgentRuntimeRoutes;
   deploymentModelKey: string | undefined;
   /** The deployment default model can run; see resolveDeploymentModel. */
   deploymentModelConfigured: boolean;
@@ -224,6 +228,7 @@ export function loadEnv(source: NodeJS.ProcessEnv = process.env): AppEnv {
     paymentWalletProvider: optional(source.PAYMENT_WALLET_PROVIDER),
     paymentWalletClientId: optional(source.PAYMENT_WALLET_CLIENT_ID),
     agentRuntime: source.AGENT_RUNTIME ?? "pi",
+    agentRuntimeRoutes: parseAgentRuntimeRoutes(source.AGENT_RUNTIME_ROUTES),
     // Provider, model and key resolve together: see resolveDeploymentModel.
     deploymentModelKey: deploymentModel.key,
     deploymentModelConfigured: deploymentModel.configured,

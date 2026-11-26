@@ -138,7 +138,11 @@ export const fileTools: ToolHandlers = {
     if ("error" in read) return fail(read.error);
     try {
       // Background runs post no message (publishMessage drops attachment blocks).
-      const background = isBackgroundRunTrigger(run.trigger);
+      const managed = await deps.prisma.run.findFirst({
+        where: { id: run.id, ticket: { managedVersion: { gt: 0 } } },
+        select: { id: true },
+      });
+      const background = isBackgroundRunTrigger(run.trigger) || Boolean(managed);
       const lease = runLeaseFor(deps, run.id);
       let committed: Awaited<ReturnType<typeof persistMessageInTransaction>> | undefined;
       const saved = await saveWorkspaceFile(

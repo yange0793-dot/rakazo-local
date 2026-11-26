@@ -1,6 +1,14 @@
 import { reflectRunJob } from "@rakazo/adapter-kit";
+import type { ManagedWorkDependency } from "@rakazo/contracts";
 import { TicketSubscriptionSourceSchema } from "@rakazo/contracts";
-import { cancelTicketSubscription, createTicketSubscription, requireMembership } from "@rakazo/db";
+import {
+  cancelTicketSubscription,
+  createTicketSubscription,
+  readReflectionSource,
+  reflectionSourceWhere,
+  requireMembership,
+} from "@rakazo/db";
+import { terminatingToolResult } from "./approval-effect.js";
 import {
   desktopGuardApplies,
   desktopProtectionGuardMessage,
@@ -232,14 +240,18 @@ export const taskTools: ToolHandlers = {
     if (args.result !== undefined) {
       if (Object.keys(args).some((key) => key !== "id" && key !== "result"))
         return call.finish({ error: "Use only id and result for a delivery." });
-      return call.finish(
-        await deliverTicketWork(deps, run, {
-          id: String(args.id ?? ""),
-          result: args.result,
-          ownerAuthored: ctx.source.ownerAuthoredRun && !ctx.source.channelId,
-          secrets: ctx.secrets,
-        }),
-      );
+      const delivered = await deliverTicketWork(deps, run, {
+        id: String(args.id ?? ""),
+        result: args.result,
+        ownerAuthored: ctx.source.ownerAuthoredRun && !ctx.source.channelId,
+        secrets: ctx.secrets,
+      });
+      const finished = await call.finish(delivered);
+      if (finished === delivered && "ok" in delivered && delivered.ok && delivered.managed) {
+        ctx.state.deliveredWorkReceipt = true;
+        return terminatingToolResult("Work receipt saved.", delivered);
+      }
+      return finished;
     }
     const updated = await updateTicket(deps, {
       spaceId: run.spaceId,
@@ -256,13 +268,20 @@ export const taskTools: ToolHandlers = {
       ownerBotId: args.ownerBotId !== undefined ? String(args.ownerBotId) : undefined,
       expectedRequirementsVersion: args.expectedRequirementsVersion as number | undefined,
       fileDeliveryRequirements: args.fileDeliveryRequirements,
+      dependencies: args.dependencies as ManagedWorkDependency[] | undefined,
     });
-    if ("ticket" in updated && args.ownerBotId === bot.id && ticketReceiptsEnabled()) {
+    if (
+      "ticket" in updated &&
+      (args.ownerBotId === bot.id || args.id === run.ticketId) &&
+      ticketReceiptsEnabled()
+    ) {
       const current = await deps.prisma.run.findUniqueOrThrow({
         where: { id: run.id },
-        select: { ticketId: true },
+        select: { ticketId: true, workControlEpoch: true, workRequirementsVersion: true },
       });
       run.ticketId = current.ticketId;
+      run.workControlEpoch = current.workControlEpoch;
+      run.workRequirementsVersion = current.workRequirementsVersion;
     }
     return call.finish(updated);
   },
@@ -562,12 +581,16 @@ export const taskTools: ToolHandlers = {
         botId: bot.id,
         threadId: thread.id,
         status: { in: ["completed", "failed", "cancelled"] },
+        ...reflectionSourceWhere,
         ...(requested ? { id: requested } : { id: { not: ctx.runId } }),
       },
       orderBy: { createdAt: "desc" },
       select: { id: true },
     });
-    if (!target)
+    const source = target
+      ? await readReflectionSource(deps.prisma, { ...target, spaceId: run.spaceId, botId: bot.id })
+      : null;
+    if (!target || !source)
       return {
         error: requested
           ? "That run is not a finished run in this chat."
@@ -582,12 +605,12 @@ export const taskTools: ToolHandlers = {
         skill: { id: existing.id, name: existing.name, status: existing.status },
         hint: `This run already produced the skill "${existing.name}" (${existing.status}); no new draft will be created. Edit that skill instead, or delete it first to review this run again.`,
       };
-    await deps.jobs.enqueue(
-      reflectRunJob(target.id, {
-        // The owner may include a specific correction in the message asking for the review.
-        ...(run.sourceMessageId ? { exceptMessageId: run.sourceMessageId } : {}),
-      }),
-    );
+    const options = {
+      // The owner may include a specific correction in the message asking for the review.
+      ...(run.sourceMessageId ? { exceptMessageId: run.sourceMessageId } : {}),
+      source,
+    };
+    await deps.jobs.enqueue(reflectRunJob(target.id, options));
     return {
       ok: true,
       runId: target.id,

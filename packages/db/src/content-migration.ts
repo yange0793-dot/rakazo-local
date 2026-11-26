@@ -21,7 +21,9 @@ interface TableSpec {
     | "semanticFact"
     | "semanticFactRevision"
     | "thread"
-    | "botEmailMessage";
+    | "botEmailMessage"
+    | "externalAgentExecution"
+    | "workEvent";
   /** Scans return them in this order as `values`. */
   columns: string[];
   json: boolean;
@@ -63,6 +65,33 @@ const TABLES: TableSpec[] = [
       WHERE id > ${cursor} ORDER BY id LIMIT ${limit}`,
     writePlaintext: (id, row) =>
       Prisma.sql`UPDATE events SET payload = ${JSON.stringify(row.payload)}::jsonb WHERE id = ${id}`,
+  },
+  {
+    model: "ExternalAgentExecution",
+    delegate: "externalAgentExecution",
+    columns: ["request", "result"],
+    json: true,
+    updatedAt: true,
+    scan: (cursor, limit) => Prisma.sql`
+      SELECT id, jsonb_build_array(request, result) AS values, "spaceId", "userId" AS owner
+      FROM external_agent_executions WHERE id > ${cursor} ORDER BY id LIMIT ${limit}`,
+    writePlaintext: (id, row) => Prisma.sql`
+      UPDATE external_agent_executions
+      SET request = COALESCE(${row.request == null ? null : JSON.stringify(row.request)}::jsonb, request),
+        result = COALESCE(${row.result == null ? null : JSON.stringify(row.result)}::jsonb, result)
+      WHERE id = ${id}`,
+  },
+  {
+    model: "WorkEvent",
+    delegate: "workEvent",
+    columns: ["payload"],
+    json: true,
+    updatedAt: true,
+    scan: (cursor, limit) => Prisma.sql`
+      SELECT id, jsonb_build_array(payload) AS values, "spaceId", "userId" AS owner
+      FROM work_events WHERE id > ${cursor} AND payload IS NOT NULL ORDER BY id LIMIT ${limit}`,
+    writePlaintext: (id, row) =>
+      Prisma.sql`UPDATE work_events SET payload = ${JSON.stringify(row.payload)}::jsonb WHERE id = ${id}`,
   },
   {
     model: "MemoryDocument",
@@ -155,7 +184,7 @@ async function needsWork(
   const ids = keyIds(table, row.values);
   if (mode === "decrypt") return ids.length > 0 || row.tokens === true;
   const plaintext = row.values.some((value) =>
-    table.json ? jsonNeedsSealing(value) : !isCiphertext(value),
+    table.json ? value != null && jsonNeedsSealing(value) : !isCiphertext(value),
   );
   if (plaintext || row.tokens === false) return true;
   if (mode !== "reencrypt" || !row.spaceId) return false;
@@ -362,6 +391,27 @@ export async function contentEncryptionStatus(
     SELECT 'memory_documents', count(*), count(*) FILTER (WHERE content NOT LIKE 'rkz1:%') FROM memory_documents
     UNION ALL
     SELECT 'memory_revisions', count(*), count(*) FILTER (WHERE content NOT LIKE 'rkz1:%') FROM memory_revisions
+    UNION ALL
+    SELECT 'semantic_facts', count(*), count(*) FILTER (WHERE
+      content NOT LIKE 'rkz1:%' OR provenance NOT LIKE 'rkz1:%') FROM semantic_facts
+    UNION ALL
+    SELECT 'semantic_fact_revisions', count(*), count(*) FILTER (WHERE
+      content NOT LIKE 'rkz1:%' OR provenance NOT LIKE 'rkz1:%') FROM semantic_fact_revisions
+    UNION ALL
+    SELECT 'external_agent_executions', count(*), count(*) FILTER (WHERE
+      EXISTS (
+        SELECT 1 FROM jsonb_array_elements(jsonb_build_array(request, result)) AS field(value)
+        CROSS JOIN LATERAL jsonb_array_elements(CASE jsonb_typeof(field.value)
+          WHEN 'array' THEN field.value ELSE jsonb_build_array(field.value) END) AS item(value)
+        WHERE item.value <> 'null'::jsonb AND NOT jsonb_exists(item.value, '$sealed')
+      )) FROM external_agent_executions
+    UNION ALL
+    SELECT 'work_events', count(*), count(*) FILTER (WHERE
+      EXISTS (
+        SELECT 1 FROM jsonb_array_elements(CASE jsonb_typeof(payload)
+          WHEN 'array' THEN payload ELSE jsonb_build_array(payload) END) AS item(value)
+        WHERE item.value <> 'null'::jsonb AND NOT jsonb_exists(item.value, '$sealed')
+      )) FROM work_events
     UNION ALL
     SELECT 'threads', count(*) FILTER (WHERE "historyCompactionSummary" IS NOT NULL),
       count(*) FILTER (WHERE "historyCompactionSummary" NOT LIKE 'rkz1:%') FROM threads

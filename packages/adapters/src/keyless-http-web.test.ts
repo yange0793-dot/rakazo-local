@@ -1,5 +1,5 @@
 import type { AdapterContext } from "@rakazo/adapter-kit";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { FakeWebProvider } from "./fake-web.js";
 import {
   extractReadableText,
@@ -27,9 +27,15 @@ const ctx: AdapterContext = {
 const publicResolver = async () => [{ address: "203.0.113.10", family: 4 as const }];
 
 describe("web provider factory", () => {
-  it("defaults to keyless-http", () => {
-    expect(resolveWebProviderKind({})).toBe("keyless-http");
-    expect(createWebProvider().describe().id).toBe("keyless-http");
+  it("defaults to TinyFish and keeps keyless HTTP selectable", () => {
+    expect(resolveWebProviderKind({})).toBe("tinyfish");
+    vi.stubEnv("WEB_PROVIDER", undefined);
+    try {
+      expect(createWebProvider().describe().id).toBe("tinyfish");
+    } finally {
+      vi.unstubAllEnvs();
+    }
+    expect(createWebProvider("keyless-http").describe().id).toBe("keyless-http");
     expect(createWebProvider("fake").describe().id).toBe("fake");
   });
 });

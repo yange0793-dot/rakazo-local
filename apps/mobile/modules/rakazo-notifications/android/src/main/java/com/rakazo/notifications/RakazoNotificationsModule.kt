@@ -5,6 +5,7 @@ import android.content.Context
 import android.content.Intent
 import android.os.Build
 import android.provider.Settings
+import androidx.core.content.ContextCompat
 import expo.modules.kotlin.Promise
 import expo.modules.kotlin.modules.Module
 import expo.modules.kotlin.modules.ModuleDefinition
@@ -21,8 +22,7 @@ class RakazoNotificationsModule : Module() {
       }
       incomingReceiver = receiver
       val filter = android.content.IntentFilter(IncomingCalls.CHANGED)
-      if (Build.VERSION.SDK_INT >= 33) context().registerReceiver(receiver, filter, Context.RECEIVER_NOT_EXPORTED)
-      else context().registerReceiver(receiver, filter)
+      ContextCompat.registerReceiver(context(), receiver, filter, ContextCompat.RECEIVER_NOT_EXPORTED)
     }
     OnStopObserving {
       incomingReceiver?.let { context().unregisterReceiver(it) }
@@ -32,9 +32,11 @@ class RakazoNotificationsModule : Module() {
     AsyncFunction("configureIncomingSession") { endpoint: String, headers: Map<String, String> ->
       if (!isAllowedNotificationEndpoint(endpoint)) throw IllegalArgumentException("Invalid notification endpoint")
       val storage = NotificationStorage(context())
-      storage.endpoint = endpoint
-      storage.token = headers["x-rakazo-install-id"] ?: ""
-      storage.headers = org.json.JSONObject(headers.filterKeys { it.lowercase() != "x-rakazo-install-id" && it.lowercase() != "x-rakazo-space-id" }).toString()
+      storage.saveConnection(
+        endpoint,
+        headers["x-rakazo-install-id"] ?: "",
+        org.json.JSONObject(headers.filterKeys { it.lowercase() != "x-rakazo-install-id" && it.lowercase() != "x-rakazo-space-id" }).toString(),
+      )
     }
     AsyncFunction("reportIncomingCall") { call: Map<String, String> ->
       IncomingCalls.report(context(), org.json.JSONObject(call), fromApp = true)
@@ -54,11 +56,7 @@ class RakazoNotificationsModule : Module() {
       if (endpoint.isNotBlank() && !isAllowedNotificationEndpoint(endpoint)) {
         throw IllegalArgumentException("Public servers need https://. HTTP only works on your local network.")
       }
-      storage.endpoint = endpoint
-      storage.token = token
-      storage.headers = headers
-      storage.spaceId = spaceId
-      storage.locale = locale
+      storage.saveConnection(endpoint, token, headers, spaceId, locale)
       storage.settings = NotificationSettings.fromMap(value)
       if (storage.settings.liveConnection && endpoint.isNotBlank() && token.isNotBlank()) {
         RakazoNotificationService.start(context)
@@ -79,10 +77,7 @@ class RakazoNotificationsModule : Module() {
       val context = context()
       if (clearSession) {
         RakazoNotificationService.clearSession(context)
-        val storage = NotificationStorage(context)
-        storage.token = ""
-        storage.headers = ""
-        storage.spaceId = ""
+        NotificationStorage(context).clearConnection()
       } else {
         RakazoNotificationService.stop(context)
       }
@@ -153,11 +148,7 @@ class RakazoNotificationsModule : Module() {
       RakazoNotificationService.stop(context)
     } else {
       val storage = NotificationStorage(context)
-      storage.endpoint = endpoint
-      storage.token = token
-      storage.headers = headers
-      storage.spaceId = spaceId
-      storage.locale = locale
+      storage.saveConnection(endpoint, token, headers, spaceId, locale)
       if (storage.settings.liveConnection && endpoint.isNotBlank() && token.isNotBlank()) {
         RakazoNotificationService.start(context, mutedBotId = mutedBotId)
       }

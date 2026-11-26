@@ -61,7 +61,6 @@ async function main() {
 
   await assertSafeOutputDirectory(outDir);
   const udid = await simulatorUdid();
-  if (requested.length === 0) await rm(outDir, { recursive: true, force: true });
   await mkdir(outDir, { recursive: true });
 
   const backend = await startIosScreenshotBackend({
@@ -71,20 +70,19 @@ async function main() {
     dataDir: path.join(ROOT, ".tmp", "ios-screenshots-data"),
   });
   const { apiUrl, databaseUrl } = backend;
-  const metro = await startMetro(apiUrl, outDir);
-  const screenRelay = await startScreenRelay(apiUrl, outDir).catch(async (error: unknown) => {
-    metro.stop();
-    await backend.stop();
-    throw error;
-  });
+  let metro: Awaited<ReturnType<typeof startMetro>> | undefined;
+  let screenRelay: Awaited<ReturnType<typeof startScreenRelay>> | undefined;
+  let results: SectionResult[];
   try {
+    metro = await startMetro(apiUrl, outDir);
+    screenRelay = await startScreenRelay(apiUrl, outDir);
     await firstLaunch(udid, outDir);
     const fixture = await seedIosScreenshotFixture({
       apiUrl,
       databaseUrl,
       completeCheckout: backend.completeCheckout,
     });
-    await captureSections({
+    results = await captureSections({
       sections,
       udid,
       outDir,
@@ -107,11 +105,17 @@ async function main() {
       botId: fixture.botId,
     });
   } finally {
-    screenRelay.stop();
-    metro.stop();
+    screenRelay?.stop();
+    metro?.stop();
     await backend.stop();
   }
-  if (publish) console.log(`Published: ${await publishIosGallery(outDir, ROOT)}`);
+  if (results.some((result) => !result.ok)) process.exitCode = 1;
+  else if (publish) {
+    const screenshots = results.flatMap(({ id, screenshots }) =>
+      screenshots.map((name) => `${id}/${name}`),
+    );
+    console.log(`Published: ${await publishIosGallery(outDir, ROOT, screenshots)}`);
+  }
 }
 
 async function captureSections(input: {
@@ -153,19 +157,21 @@ async function captureSections(input: {
       } else {
         await capture();
       }
+      const screenshots = await publishShots(work, path.join(outDir, section.id));
+      if (!screenshots.length) throw new Error("Maestro produced no screenshots");
       results.push({
         id: section.id,
         title: section.title,
         ok: true,
-        screenshots: await publishShots(work, path.join(outDir, section.id)),
+        screenshots,
       });
-    } catch (_error) {
+    } catch (error) {
       results.push({
         id: section.id,
         title: section.title,
         ok: false,
         screenshots: await publishShots(work, path.join(outDir, section.id)).catch(() => []),
-        error: await describeFailure(work),
+        error: await describeFailure(work, error),
       });
     }
   }
@@ -194,11 +200,11 @@ async function captureSections(input: {
     if (result.error) console.log(`  ${result.error.replaceAll("\n", "\n  ")}`);
   }
   console.log(`Gallery: ${path.join(outDir, "index.html")}`);
-  if (results.some((result) => !result.ok)) process.exitCode = 1;
+  return results;
 }
 
 /** The failing Maestro step and the last screen it saw, so a failure needs no log digging. */
-async function describeFailure(work: string) {
+async function describeFailure(work: string, error: unknown) {
   let step = "";
   let screen = "";
   await walk(work, async (file) => {
@@ -217,7 +223,8 @@ async function describeFailure(work: string) {
       screen = file;
     }
   });
-  return [step || "flow failed", screen && `last screen: ${screen}`].filter(Boolean).join("\n");
+  const reason = error instanceof Error ? error.message : String(error);
+  return [step || reason, screen && `last screen: ${screen}`].filter(Boolean).join("\n");
 }
 
 /** SIM_UDID, or the only booted simulator. */

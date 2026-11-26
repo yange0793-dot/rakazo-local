@@ -199,6 +199,10 @@ export function secureFetch(
       allowHttpLocalhost: new URL(source.url).origin === localOrigin,
     });
     const headers = new Headers();
+    const localHttp = url.protocol === "http:" && isLocalhostOrLoopbackIp(url.hostname);
+    if (localHttp && url.origin !== localOrigin) {
+      throw new Error("Loopback MCP HTTP requests must use the configured resource origin");
+    }
     for (const [name, value] of source.headers) {
       const normalized = name.toLowerCase();
       if (RESOURCE_HEADERS.has(normalized)) {
@@ -207,7 +211,6 @@ export function secureFetch(
       if (url.origin !== resourceUrl.origin && configuredCredentialValues.has(value)) continue;
       headers.set(name, value);
     }
-    const localHttp = url.protocol === "http:" && isLocalhostOrLoopbackIp(url.hostname);
     if (localHttp && urlPolicy.allowLocalHttpCredentials !== true) {
       for (const name of [...headers.keys()]) {
         if (localCredentialHeaders.has(name.toLowerCase())) headers.delete(name);
@@ -285,7 +288,10 @@ export function withEndpointOriginFallback(
       });
     } catch {
       init?.signal?.throwIfAborted();
-      return fetchImpl(new URL(url.pathname + url.search, endpointOrigin), sanitizedInit(init));
+      const endpoint = new URL(endpointOrigin);
+      endpoint.pathname = url.pathname;
+      endpoint.search = url.search;
+      return fetchImpl(endpoint, sanitizedInit(init));
     }
   };
 }

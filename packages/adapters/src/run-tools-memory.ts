@@ -9,7 +9,7 @@ import type {
   SemanticMemorySaveRequest,
 } from "@rakazo/adapter-kit";
 import { MEMORY_REVISION_CONFLICT_ERROR } from "@rakazo/adapter-kit";
-import type { MessageBlock } from "@rakazo/contracts";
+import type { HistoryReadInput, MessageBlock } from "@rakazo/contracts";
 import {
   HistoryReadInputSchema,
   HistorySearchInputSchema,
@@ -17,7 +17,8 @@ import {
   SemanticMemoryRecallInputSchema,
 } from "@rakazo/contracts";
 import { BACKGROUND_HELPER_TRIGGER, redactSecrets } from "@rakazo/core";
-import { readHistory, searchHistory } from "@rakazo/db";
+import type { PrismaClient } from "@rakazo/db";
+import { boundHistoryResponse, readHistory, searchHistory } from "@rakazo/db";
 import { sharedMemorySaveError } from "./builtin-tools.js";
 import { redactConnectorPayload, sanitizeConnectorError } from "./connector-safety.js";
 import {
@@ -97,7 +98,7 @@ export function recallQueryText(options: {
   prompt: string;
   secrets: readonly string[];
 }): string {
-  if (!options.source) return options.prompt;
+  if (!options.source) return redactSecrets(options.prompt, options.secrets);
   let query = redactSecrets(options.source.text, options.secrets).trim();
   const previous = (options.previousMessages ?? [])
     .flatMap((message) => {
@@ -312,6 +313,66 @@ export function semanticMemorySaveArguments(
   };
 }
 
+/** Only runs already authorized by readHistory may expose their original tool receipts. */
+export async function readHistoryToolEvidence(
+  prisma: PrismaClient,
+  spaceId: string,
+  runs: readonly { id: string }[],
+  input: HistoryReadInput,
+  secrets: string[] = [],
+) {
+  const rows = runs.length
+    ? await prisma.externalEffect.findMany({
+        where: {
+          spaceId,
+          runId: { in: runs.map((run) => run.id) },
+          ...(input.toolEffectId
+            ? { id: input.toolEffectId }
+            : input.toolAfterId
+              ? { id: { gt: input.toolAfterId } }
+              : {}),
+        },
+        orderBy: { id: "asc" },
+        take: 6,
+        select: {
+          id: true,
+          runId: true,
+          kind: true,
+          status: true,
+          createdAt: true,
+          ...(input.toolEffectId ? { request: true, result: true } : {}),
+        },
+      })
+    : [];
+  const page = rows.slice(0, 5);
+  const selected = input.toolEffectId ? page[0] : undefined;
+  const full = selected
+    ? JSON.stringify(
+        redactConnectorPayload({ request: selected.request, result: selected.result }, secrets),
+      )
+    : "";
+  const offset = Math.min(input.toolTextOffset ?? 0, full.length);
+  const text = truncateUtf8(full.slice(offset), 4_000);
+  return {
+    toolCalls: page.map((row) => ({
+      id: row.id,
+      runId: row.runId,
+      name: row.kind,
+      status: row.status,
+      createdAt: row.createdAt,
+    })),
+    nextToolId: rows.length > 5 ? page.at(-1)!.id : null,
+    toolReceipt: selected
+      ? {
+          id: selected.id,
+          text,
+          textOffset: offset,
+          nextTextOffset: offset + text.length < full.length ? offset + text.length : null,
+        }
+      : null,
+  };
+}
+
 async function readHistoryTool(ctx: RunContext, call: ToolCall) {
   const { deps, run } = ctx;
   const { name, args } = call;
@@ -333,6 +394,7 @@ async function readHistoryTool(ctx: RunContext, call: ToolCall) {
   };
   const given = withoutBlankFields(args);
   let response: Awaited<ReturnType<typeof searchHistory | typeof readHistory>>;
+  let evidence: Awaited<ReturnType<typeof readHistoryToolEvidence>> | undefined;
   if (name === "search_history") {
     const parsed = HistorySearchInputSchema.safeParse(given);
     if (!parsed.success) return call.finish({ error: argsError(parsed.error) });
@@ -341,8 +403,21 @@ async function readHistoryTool(ctx: RunContext, call: ToolCall) {
     const parsed = HistoryReadInputSchema.safeParse(given);
     if (!parsed.success) return call.finish({ error: argsError(parsed.error) });
     response = await readHistory(deps.prisma, scope, parsed.data);
+    evidence = await readHistoryToolEvidence(
+      deps.prisma,
+      run.spaceId,
+      response.runs,
+      parsed.data,
+      ctx.secrets,
+    );
+    if (parsed.data.toolEffectId) {
+      response = { ...response, messages: [], runs: [], snapshots: [] };
+    }
   }
-  const redacted = redactConnectorPayload(response, ctx.secrets);
+  const redacted = redactConnectorPayload(
+    boundHistoryResponse({ ...response, ...evidence }),
+    ctx.secrets,
+  );
   // Redaction can expand short synthetic credentials; never let Pi clip the JSON.
   if (Buffer.byteLength(JSON.stringify(redacted), "utf8") > 11_000) {
     return call.finish({

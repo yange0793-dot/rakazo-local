@@ -241,6 +241,8 @@ describe.skipIf(!enabled)("history retrieval through executor", () => {
           throw new Error(`${procedure}: ${body.error?.message ?? response.status}`);
         return body.json;
       };
+      await rpc("spaceSettings/setOverride", { setting: "confirmations", enabled: true });
+      await rpc("autoReview/set", { mode: "bypermission" });
       await rpc("models/connect", {
         provider: model.model.provider,
         modelId: model.model.id,

@@ -6,7 +6,13 @@ import {
   MessagingTeamChatEmulator,
   messageBot,
 } from "@rakazo/adapters";
-import type { MessageBlock, ModelConnectInput, ReplyMode, RunStatus } from "@rakazo/contracts";
+import type {
+  ApprovalMode,
+  MessageBlock,
+  ModelConnectInput,
+  ReplyMode,
+  RunStatus,
+} from "@rakazo/contracts";
 import { ACTIVE_RUN_STATUSES, attachmentComputerPath, isTerminal } from "@rakazo/core";
 import type { createDb } from "@rakazo/db";
 import { createThreadEvents } from "@rakazo/db";
@@ -63,6 +69,7 @@ export type TrialOptions = {
   timeoutMs: number;
   judge?: EvalJudge;
   maxToolCalls: number;
+  approvalMode?: ApprovalMode;
   replyMode?: ReplyMode;
   createApp: (
     services: EvalServices,
@@ -298,8 +305,15 @@ export async function runTrial(
       messagingLinked = false;
       messagingAddress = `U-eval-${randomUUID()}`;
       messaging.resetWitnesses();
-      // Ask mode asks before any change, so the write stops at its approval card.
-      if (scenario.approvalTool) await rpc(app, scope, "autoReview/set", { mode: "ask" });
+      if (scenario.approvalTool) {
+        await rpc(app, scope, "autoReview/set", { mode: "ask" });
+      } else if (options.approvalMode) {
+        await rpc(app, scope, "spaceSettings/setOverride", {
+          setting: "confirmations",
+          enabled: true,
+        });
+        await rpc(app, scope, "autoReview/set", { mode: options.approvalMode });
+      }
     };
     await setupActor();
     if (scenario.computerFiles?.length) {

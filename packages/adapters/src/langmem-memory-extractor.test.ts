@@ -1,5 +1,6 @@
 import { once } from "node:events";
 import { chmodSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import type { IncomingHttpHeaders } from "node:http";
 import { createServer } from "node:http";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -627,9 +628,13 @@ describe("runtime memory completion", () => {
     }
   }, 30_000);
 
-  it("uses automatic tool choice for Responses memory calls", async () => {
+  it("uses the resolved API key and automatic tool choice for Responses memory calls", async () => {
     const bodies: Array<Record<string, unknown>> = [];
+    let receivedAuthorization: string | undefined;
+    let receivedOriginator: IncomingHttpHeaders["originator"];
     const server = createServer((incoming, response) => {
+      receivedAuthorization = incoming.headers.authorization;
+      receivedOriginator = incoming.headers.originator;
       void (async () => {
         const chunks: Buffer[] = [];
         for await (const chunk of incoming) chunks.push(Buffer.from(chunk));
@@ -667,6 +672,7 @@ describe("runtime memory completion", () => {
           provider: "openai-compatible",
           id: "fixture-model",
           apiKey: "fixture-key",
+          headers: { Originator: "fixture-client" },
           baseUrl: `http://127.0.0.1:${address.port}/v1`,
           apiProtocol: "responses",
           allowPrivateEndpoint: true,
@@ -676,6 +682,8 @@ describe("runtime memory completion", () => {
         content: "",
         toolCalls: [],
       });
+      expect(receivedAuthorization).toBe("Bearer fixture-key");
+      expect(receivedOriginator).toBe("fixture-client");
       expect(bodies[0]?.tool_choice).toBe("auto");
     } finally {
       await new Promise<void>((resolve, reject) => {

@@ -179,8 +179,9 @@ export async function runThreadSubscription(options: {
             }
             if (
               recovery.current.phase !== "snapshot" &&
-              snapshot?.threadId === event.threadId &&
-              (!replay || event.seq > replay.projectionFloor)
+              snapshot &&
+              snapshot.threadId === event.threadId &&
+              event.seq > (replay?.projectionFloor ?? snapshot.cursor)
             ) {
               options.applyEvent(event);
             }

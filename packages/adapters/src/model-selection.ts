@@ -6,6 +6,7 @@ import {
   selectCompatibleModelCredential,
   usableModelId,
 } from "@rakazo/contracts";
+import { canSelectThinkingLevel } from "@rakazo/core";
 import type { PrismaClient } from "@rakazo/db";
 import {
   chooseModelCredential,
@@ -35,6 +36,10 @@ import { listPiCatalog, offeredCatalog, scriptedCatalogEntry } from "./pi-models
 import { OPENAI_COMPATIBLE_PROVIDER_ID } from "./pi-openai-compatible-provider.js";
 
 export type ModelCredential = Awaited<ReturnType<typeof findModelCredential>>;
+type ModelSelectionClient = Pick<
+  PrismaClient,
+  "userModelCredential" | "userModelPreference" | "secret"
+>;
 
 export function isCatalogModelChoice(provider: string, modelId: string) {
   return [...listPiCatalog(), scriptedCatalogEntry].some(
@@ -535,7 +540,7 @@ export type ConnectedModelResolution = {
 
 /** Keep space/model ownership first, then use another connection that explicitly enables the id. */
 export async function findConnectedModelCredential(
-  prisma: PrismaClient,
+  prisma: ModelSelectionClient,
   secretStore: Pick<SecretStore, "load">,
   actor: Pick<Actor, "userId" | "spaceId">,
   provider: string,
@@ -614,31 +619,29 @@ export async function validateBotModelChange(
     spaceId: string;
     provider: string | null;
     model: string | null;
+    credentialId?: string | null;
     thinkingLevel?: string | null;
-    current?: { provider: string | null; model: string | null };
+    current?: { provider: string | null; model: string | null; credentialId?: string | null };
   },
 ): Promise<BotModelChangeResult> {
   const scope = { userId: input.userId, spaceId: input.spaceId };
   const { provider, model } = input;
-  const changing = provider !== input.current?.provider || model !== input.current?.model;
+  const changing =
+    provider !== input.current?.provider ||
+    model !== input.current?.model ||
+    (input.credentialId ?? null) !== (input.current?.credentialId ?? null);
   if (changing && provider && model) {
     const hosted =
+      !input.credentialId &&
       deps.hostedProvider === provider &&
       (await hasHostedModelCredits(deps.prisma, scope, provider));
     const credential = hosted
       ? null
-      : await findConnectedModelCredential(deps.prisma, deps.secretStore, scope, provider, model);
+      : await findConnectedModelCredential(deps.prisma, deps.secretStore, scope, provider, model, {
+          credentialId: input.credentialId,
+        });
     if (!credential) {
       if (hosted && isCatalogModelChoice(provider, model)) {
-        const allowed = listPiCatalog().find(
-          (entry) => entry.provider === provider && entry.id === model,
-        )?.thinkingLevels;
-        if (
-          input.thinkingLevel &&
-          allowed &&
-          !allowed.some((level) => level === input.thinkingLevel)
-        )
-          return { ok: false, error: "Unsupported thinking level" };
         return { ok: true, provider, model, thinkingLevel: input.thinkingLevel ?? null };
       }
       return { ok: false, error: PINNED_PROVIDER_NOT_CONNECTED };
@@ -661,6 +664,7 @@ export async function validateBotModelChange(
         scope,
         provider,
         model,
+        { credentialId: input.credentialId },
       );
       if (error) return { ok: false, error };
     } else if (!inCatalog && credential.defaultModel !== model) {
@@ -684,31 +688,15 @@ export async function validateBotModelChange(
   }
   const thinkingLevel = input.thinkingLevel ?? null;
   if (thinkingLevel) {
-    const defaults = provider && model ? null : await deps.defaultModel();
-    const effectiveProvider = provider ?? defaults?.provider;
-    const effectiveModelId = model ?? defaults?.model;
-    if (effectiveProvider && effectiveModelId) {
-      const { allowed } = await prepareAllowedThinkingLevels(
-        deps,
-        scope,
-        effectiveProvider,
-        effectiveModelId,
-      );
-      if (allowed && !allowed.includes(thinkingLevel)) {
-        return { ok: false, error: `Thinking level must be one of: ${allowed.join(", ")}` };
-      }
-    }
+    if (!canSelectThinkingLevel(thinkingLevel))
+      return { ok: false, error: "Unsupported thinking level" };
   }
   return { ok: true, provider, model, thinkingLevel };
 }
 
-/**
- * Thinking levels a caller may set for a provider/model. Catalog models answer from
- * `thinkingLevels`; unknown catalog ids return undefined (no check). OpenAI-compatible
- * connections advertise the endpoint's levels for every enabled model id.
- */
+/** Catalog and endpoint metadata for display/transport; user-selected levels remain shared. */
 export async function prepareAllowedThinkingLevels(
-  deps: Pick<BotModelChangeDeps, "prisma" | "secretStore">,
+  deps: { prisma: ModelSelectionClient; secretStore: Pick<SecretStore, "load"> },
   actor: Pick<Actor, "userId" | "spaceId">,
   provider: string,
   modelId: string,
@@ -795,6 +783,7 @@ export async function validateConnectedModelChoice(
   resolution: ConnectedModelResolution = {},
 ) {
   if (
+    !resolution.credentialId &&
     resolution.hostedProvider === provider &&
     (await hasHostedModelCredits(prisma, actor, provider))
   ) {
@@ -826,12 +815,43 @@ export async function validateConnectedModelChoice(
       ? undefined
       : "Unknown model for that provider";
   }
+  return compatibleModelChoiceError(prisma, secretStore, actor, modelId, credential);
+}
+
+/** Check a compatible connection and its current model list using the caller's transaction. */
+export async function validateCompatibleModelChoice(
+  tx: ModelSelectionClient,
+  secrets: Pick<SecretStore, "load">,
+  actor: Pick<Actor, "userId" | "spaceId">,
+  modelId: string,
+  resolution: Pick<ConnectedModelResolution, "credentialId"> = {},
+) {
+  const credential = await findConnectedModelCredential(
+    tx,
+    secrets,
+    actor,
+    OPENAI_COMPATIBLE_PROVIDER_ID,
+    modelId,
+    resolution,
+  );
+  if (!credential) return PINNED_PROVIDER_NOT_CONNECTED;
+  return compatibleModelChoiceError(tx, secrets, actor, modelId, credential);
+}
+
+async function compatibleModelChoiceError(
+  prisma: ModelSelectionClient,
+  secretStore: Pick<SecretStore, "load">,
+  actor: Pick<Actor, "userId">,
+  modelId: string,
+  credential: NonNullable<ModelCredential>,
+) {
+  if (!usableModelId(modelId)) return "Unknown model for that provider";
   const savedChoice = await prisma.userModelPreference.findFirst({
     where: {
       userId: actor.userId,
       modelId,
-      credential: { userId: actor.userId, provider },
-      ...(resolution.credentialId ? { credentialId: resolution.credentialId } : {}),
+      credential: { userId: actor.userId, provider: OPENAI_COMPATIBLE_PROVIDER_ID },
+      credentialId: credential.id,
     },
     select: { credentialId: true },
   });
@@ -852,6 +872,7 @@ export async function validateConnectedModelChoice(
 export type ModelChoice = {
   modelProvider: string | null;
   modelId: string | null;
+  modelCredentialId?: string | null;
   thinkingLevel: string | null;
 };
 
@@ -874,6 +895,7 @@ export function runModelChoice(
   return {
     modelProvider: bot.modelProvider,
     modelId: bot.modelId,
+    ...(bot.modelCredentialId ? { modelCredentialId: bot.modelCredentialId } : {}),
     thinkingLevel: bot.thinkingLevel,
   };
 }

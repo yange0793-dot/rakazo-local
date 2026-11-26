@@ -84,6 +84,28 @@ describe("shared model role settings lifecycle", () => {
     expect(transport.save).toHaveBeenCalledTimes(2);
     expect(reopened.snapshot().settings).toEqual(saved);
   });
+
+  it("reconciles the saved view without overwriting a newer optimistic edit", async () => {
+    const { transport, controller } = setup();
+    const choice = saved.primary!;
+    const canonical = {
+      primary: { ...choice, thinkingLevel: "low" as const },
+      backups: [],
+      seesImages: true,
+    };
+    await controller.load();
+    const first = deferred<ModelRoleSettings>();
+    const second = deferred<ModelRoleSettings>();
+    transport.save.mockReturnValueOnce(first.promise).mockReturnValueOnce(second.promise);
+    const settingPrimary = controller.save({ primary: choice });
+    const addingBackup = controller.save({ backups: [choice] });
+    first.resolve(canonical);
+    await settingPrimary;
+    expect(controller.snapshot().settings?.backups).toEqual([choice]);
+    second.resolve(canonical);
+    await addingBackup;
+    expect(controller.snapshot().settings).toEqual(canonical);
+  });
   it("applies a save issued during a load once the load settles, against the loaded settings", async () => {
     const { transport, controller } = setup();
     const loaded: ModelRoleSettings = {

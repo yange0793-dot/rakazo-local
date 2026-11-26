@@ -13,20 +13,12 @@ import type {
   SettingsScope,
   ThinkingLevel,
 } from "@rakazo/contracts";
+import { MAX_MODEL_BACKUPS, modelRoleChoiceKey, withConnectionName } from "@rakazo/contracts";
 import {
-  backupChoiceKey,
-  canonicalPiProviderId,
-  connectedBackupOptions,
-  connectionDisplayName,
-  MAX_MODEL_BACKUPS,
-  modelRoleChoiceKey,
-  withConnectionName,
-} from "@rakazo/contracts";
-import {
-  clampCatalogThinkingLevel,
   createModelRoleSettings,
-  credentialForModel,
   modelRoleListPatch,
+  modelRolePickerData,
+  THINKING_LEVEL_OPTIONS,
 } from "@rakazo/core";
 import type { Href } from "expo-router";
 import type { ReactNode } from "react";
@@ -131,71 +123,22 @@ export function ModelRoleSettings({
   const backups = settings?.backups ?? [];
   const rows = primary ? [primary, ...backups] : backups;
   const busy = state.busy || state.stale || !settings;
-  const entryFor = (choice: ModelRoleChoice) =>
-    state.catalog.find(
-      (entry) =>
-        canonicalPiProviderId(entry.provider) === canonicalPiProviderId(choice.provider) &&
-        entry.id === choice.modelId,
-    );
-  const connectionFor = (choice: ModelRoleChoice) =>
-    choice.credentialId
-      ? credentials.find((entry) => entry.id === choice.credentialId)
-      : (credentialForModel(credentials, choice.provider, choice.modelId) ??
-        credentials.find(
-          (entry) =>
-            entry.provider === choice.provider &&
-            (entry.modelId === choice.modelId ||
-              entry.catalogSource?.unavailableModelIds.includes(choice.modelId)),
-        ) ??
-        credentials.find(
-          (entry) =>
-            canonicalPiProviderId(entry.provider) === canonicalPiProviderId(choice.provider) &&
-            !entry.catalogSource,
-        ));
-  const unavailable = (choice: ModelRoleChoice) => {
-    const source = connectionFor(choice)?.catalogSource;
-    return Boolean(
-      source && (!source.available || source.unavailableModelIds.includes(choice.modelId)),
-    );
-  };
-  const options = connectedBackupOptions(state.catalog, credentials, role === "computer")
-    .filter((choice) => !unavailable(choice))
-    .map((choice) => ({
-      ...choice,
-      connectionName: connectionFor(choice)?.catalogSource
-        ? connectionFor(choice)!.label
-        : choice.connectionName,
-    }));
-  const optionFor = (choice: ModelRoleChoice) =>
-    options.find((option) => backupChoiceKey(option) === backupChoiceKey(choice));
-  const modelLabel = (choice: ModelRoleChoice) =>
-    entryFor(choice)?.label ?? optionFor(choice)?.label ?? choice.modelId;
+  const picker = modelRolePickerData(state.catalog, credentials, role);
+  const { entryFor, connectionFor, keyFor, unavailable } = picker;
+  const modelLabel = (choice: ModelRoleChoice) => entryFor(choice)?.label ?? choice.modelId;
   const providerName = (choice: ModelRoleChoice) =>
     entryFor(choice)?.providerName ??
-    optionFor(choice)?.providerName ??
     providers.find((provider) => provider.id === choice.provider)?.name ??
     choice.provider;
   // What runs when the member chose no first model; named in the empty row.
   const deployment = state.settings?.deploymentPrimary ?? null;
   const deploymentName = deployment ? modelLabel(deployment) : null;
-  const connectionName = (choice: ModelRoleChoice) => {
-    const connection = connectionFor(choice);
-    return connection
-      ? connection.catalogSource
-        ? connection.label
-        : connectionDisplayName(connection, providerName(choice))
-      : providerName(choice);
-  };
+  const connectionName = (choice: ModelRoleChoice) =>
+    picker.connectionName(choice) ?? providerName(choice);
   const isPrimarySlot = (slot: Slot) => slot === "empty" || (slot === 0 && primary !== null);
 
-  const thinkingLevels =
-    role === "main" && primary
-      ? (entryFor(primary)?.thinkingLevels ?? []).filter((level) => level !== "off")
-      : [];
-  const thinking = clampCatalogThinkingLevel(
-    primary?.thinkingLevel,
-    thinkingLevels,
-  ) as ThinkingLevel | null;
+  const thinkingLevels = role === "main" && primary ? THINKING_LEVEL_OPTIONS : [];
+  const thinking = primary?.thinkingLevel ?? null;
 
   async function save(update: (current: Settings) => Partial<Settings>) {
     let primaryChanged = false;
@@ -210,22 +153,21 @@ export function ModelRoleSettings({
     save((current) => ({
       primary: choice,
       backups: choice
-        ? current.backups.filter((item) => !sameChoice(item, choice))
+        ? current.backups.filter((item) => keyFor(item) !== keyFor(choice))
         : current.backups,
     }));
   const place = (slot: number | "add", choice: ModelRoleChoice) =>
     save((current) => {
       const list = current.primary ? [current.primary, ...current.backups] : current.backups;
       if (slot === "add")
-        return modelRoleListPatch(current, [
-          ...list.filter((item) => !sameChoice(item, choice)),
-          choice,
-        ]);
+        return list.some((item) => keyFor(item) === keyFor(choice))
+          ? {}
+          : modelRoleListPatch(current, [...list, choice]);
       return modelRoleListPatch(
         current,
         list
           .map((item, index) => (index === slot ? choice : item))
-          .filter((item, index) => index === slot || !sameChoice(item, choice)),
+          .filter((item, index) => index === slot || keyFor(item) !== keyFor(choice)),
       );
     });
   // The first entry becomes the primary; with none, the deployment's default runs.
@@ -249,10 +191,10 @@ export function ModelRoleSettings({
 
   function pickerRequest(slot: Slot, narrowed?: Narrowed): ModelPickerRequest {
     const primarySlot = isPrimarySlot(slot);
-    const all = narrowed
-      ? connectedBackupOptions(narrowed.catalog, narrowed.credentials, role === "computer")
-      : options;
-    const pool = all.filter(
+    const data = narrowed
+      ? modelRolePickerData(narrowed.catalog, narrowed.credentials, role)
+      : picker;
+    const pool = data.options.filter(
       (option) => !narrowed || option.credentialId === narrowed.choice.credentialId,
     );
     const current = narrowed
@@ -262,20 +204,9 @@ export function ModelRoleSettings({
       : typeof slot === "number"
         ? rows[slot]
         : undefined;
-    // A row that names no connection runs on its provider's, so its model is taken too.
-    const taken = new Set(
-      rows.map((row) => (row.credentialId ? modelRoleChoiceKey(row) : backupChoiceKey(row))),
-    );
+    const taken = new Set(rows.map(data.keyFor));
     const offerDefault = primarySlot && role !== "main" && !narrowed && deployment !== null;
-    // A row that names no connection is checked on its provider's first connection.
-    const currentKey = current
-      ? modelRoleChoiceKey(
-          current.credentialId
-            ? current
-            : (pool.find((option) => backupChoiceKey(option) === backupChoiceKey(current)) ??
-                current),
-        )
-      : undefined;
+    const currentKey = current ? data.keyFor(current) : undefined;
     const picks = new Map(pool.map((option) => [modelRoleChoiceKey(option), option]));
     return {
       title: slot === "add" ? t`Add fallback` : title,
@@ -291,11 +222,7 @@ export function ModelRoleSettings({
             ]
           : []),
         ...pool
-          .filter(
-            (option) =>
-              slot !== "add" ||
-              !(taken.has(modelRoleChoiceKey(option)) || taken.has(backupChoiceKey(option))),
-          )
+          .filter((option) => slot !== "add" || !taken.has(modelRoleChoiceKey(option)))
           .map((option) => ({
             key: modelRoleChoiceKey(option),
             label: withConnectionName(option.label, option.connectionName),

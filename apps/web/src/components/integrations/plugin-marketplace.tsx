@@ -13,7 +13,7 @@ import { Button, Spinner } from "@rakazo/ui-web";
 import { ArrowUpRight, Check, ChevronLeft, FileText, Plug } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
 import { connectMcpOauth } from "../../lib/mcp-connect";
-import { rpc } from "../../lib/rpc";
+import { useSpaceRpc } from "../../lib/space-rpc";
 import type { ErrorDetails } from "../../lib/user-error";
 import { errorDetails } from "../../lib/user-error";
 import { ErrorNotice } from "../ErrorNotice";
@@ -180,6 +180,7 @@ export function PluginDetail({
   const [attempt, setAttempt] = useState(0);
   const live = useRef(true);
   const spaceCount = useOwnSpaces().length;
+  const rpc = useSpaceRpc();
   useEffect(() => {
     live.current = true;
     return () => {
@@ -222,7 +223,7 @@ export function PluginDetail({
     return () => {
       cancelled = true;
     };
-  }, [selection.source, installed, attempt]);
+  }, [rpc, selection.source, installed, attempt]);
 
   async function run(key: string, action: () => Promise<unknown>, failure: string) {
     setPending(key);
@@ -265,7 +266,7 @@ export function PluginDetail({
     run(
       server.id,
       async () => {
-        const result = await connectMcpOauth(server.id);
+        const result = await connectMcpOauth(server.id, rpc);
         if (!live.current) return;
         if (result === "authorization_not_requested")
           setNoAuth((current) => new Set([...current, server.id]));

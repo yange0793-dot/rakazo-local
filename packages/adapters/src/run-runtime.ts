@@ -28,6 +28,7 @@ import { deploymentModelUsageLookup, resolveDeploymentModel } from "./deployment
 import { createRunExecutor } from "./executor.js";
 import type { ExecutorDeps } from "./executor-deps.js";
 import { ExpoPushProvider } from "./expo-push.js";
+import { reconcileExternalExecutions } from "./external-execution.js";
 import type { RemoteConnectorDependencies } from "./installed-connectors.js";
 import { InstalledConnectorProvider } from "./installed-connectors.js";
 import { IntegrationProviderSettings } from "./integration-provider-settings.js";
@@ -36,6 +37,7 @@ import {
   createLangMemExtractor,
   createRuntimeMemoryCompletion,
 } from "./langmem-memory-extractor.js";
+import { reconcileManagedWorkEvents } from "./managed-work-events.js";
 import { McpConnector, mcpStdioOptionsFromEnv } from "./mcp-connector.js";
 import { McpOAuthBroker } from "./mcp-oauth.js";
 import { reconcileMediaVideos } from "./media-video-poll.js";
@@ -319,7 +321,14 @@ type JobReconcilerDeps = Parameters<typeof createJobReconciler>[0];
 export function createRunReconciler(
   deps: Pick<
     ExecutorDeps,
-    "prisma" | "jobs" | "events" | "notifications" | "billingEnabled" | "mediaGeneration"
+    | "prisma"
+    | "jobs"
+    | "events"
+    | "notifications"
+    | "billingEnabled"
+    | "mediaGeneration"
+    | "connector"
+    | "shutdownSignal"
   > & {
     cloudAgent: NonNullable<ExecutorDeps["cloudAgent"]> | null;
     paymentWallet: NonNullable<ExecutorDeps["paymentWallet"]> | null;
@@ -346,6 +355,10 @@ export function createRunReconciler(
       billingEnabled: deps.billingEnabled,
     }),
     reconcileCloudAgents: () => reconcileCloudAgents({ prisma, jobs, cloudAgent }),
+    reconcileManagedWork: async () => {
+      await reconcileManagedWorkEvents(deps);
+    },
+    reconcileExternalExecutions: () => reconcileExternalExecutions(deps),
     reconcilePurchases: () => reconcilePurchases({ prisma, jobs, paymentWallet }),
     reconcileMediaVideos: () => reconcileMediaVideos({ prisma, jobs, mediaGeneration }),
     reconcileComputerUpdates: () => reconcileComputerUpdates({ prisma, jobs }),

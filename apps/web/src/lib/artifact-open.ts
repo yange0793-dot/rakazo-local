@@ -1,4 +1,4 @@
-import { rpc } from "./rpc";
+import type { RpcClient } from "./rpc";
 
 export type ArtifactTarget = { botId: string } | { groupId: string };
 
@@ -14,8 +14,9 @@ export function decodeArtifactBase64(contentBase64: string): Uint8Array {
 export async function fetchArtifactBytes(
   target: ArtifactTarget,
   artifactId: string,
+  client: RpcClient,
 ): Promise<Uint8Array> {
-  const artifact = await rpc.artifacts.get({ ...target, artifactId });
+  const artifact = await client.artifacts.get({ ...target, artifactId });
   return decodeArtifactBase64(artifact.contentBase64);
 }
 
@@ -34,7 +35,8 @@ export async function downloadArtifact(
   artifactId: string,
   name: string,
   mimeType: string,
+  client: RpcClient,
 ): Promise<void> {
-  const bytes = await fetchArtifactBytes(target, artifactId);
+  const bytes = await fetchArtifactBytes(target, artifactId, client);
   downloadArtifactBytes(name, mimeType, bytes);
 }

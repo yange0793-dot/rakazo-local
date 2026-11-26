@@ -45,7 +45,6 @@ async function runAfterFill(
     spaceId: "space-1",
     userId: "user-1",
     status: "queued",
-    // A run the owner started, so a shell command needs no approval between the tools under test.
     trigger: "user",
     routineId: "routine-1",
     retryOfRunId: null,
@@ -166,6 +165,7 @@ async function runAfterFill(
       })),
     },
     vaultCredential: { findMany: vi.fn(async () => botSecrets) },
+    userActionAutoReviewPreference: { findUnique: vi.fn(async () => ({ mode: "bypermission" })) },
     externalEffect: {
       findMany: vi.fn(async () => []),
       findFirst: vi.fn(async () => null),

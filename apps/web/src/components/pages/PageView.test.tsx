@@ -29,6 +29,7 @@ function mount(props: {
   document: string;
   onOpenChange?: (open: boolean) => void;
   compact?: boolean;
+  liveFrame?: ReactNode;
 }) {
   vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
   const root = createRoot(document.body.appendChild(document.createElement("div")));
@@ -41,6 +42,7 @@ function mount(props: {
           compact={next.compact}
           title="Plan"
           document={next.document}
+          liveFrame={next.liveFrame}
           share={<button type="button">Share</button>}
         />,
       ),
@@ -58,6 +60,20 @@ it("waits for an updated page to draw, and offers a retry when it never does", a
   await view.render({ document: "<p>v2</p>" });
   await act(async () => vi.advanceTimersByTime(16_000));
   expect(document.body.textContent).toContain("This page couldn't load");
+  await view.unmount();
+});
+
+it("renders a trusted live frame instead of page-supplied HTML when provided", async () => {
+  const view = mount({
+    document: "<p>page document</p>",
+    liveFrame: <img alt="Live Gemini tab" src="blob:frame" />,
+  });
+  await view.render({
+    document: "<p>page document</p>",
+    liveFrame: <img alt="Live Gemini tab" src="blob:frame" />,
+  });
+  expect(document.querySelector('[alt="Live Gemini tab"]')).not.toBeNull();
+  expect(document.querySelector("iframe[title=page]")).toBeNull();
   await view.unmount();
 });
 

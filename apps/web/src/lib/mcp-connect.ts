@@ -1,4 +1,5 @@
 import { MCP_OAUTH_CHANNEL } from "./mcp-oauth-channel";
+import type { RpcClient } from "./rpc";
 import { rpc } from "./rpc";
 
 export { MCP_OAUTH_CHANNEL } from "./mcp-oauth-channel";
@@ -22,8 +23,11 @@ export function mcpOAuthRedirectUri(): string {
   return `${window.location.origin}/mcp/oauth/callback`;
 }
 
-export async function connectMcpOauth(serverId: string): Promise<McpOauthResult> {
-  const started = await rpc.mcp.oauth.begin({ serverId, redirectUri: mcpOAuthRedirectUri() });
+export async function connectMcpOauth(
+  serverId: string,
+  client: RpcClient = rpc,
+): Promise<McpOauthResult> {
+  const started = await client.mcp.oauth.begin({ serverId, redirectUri: mcpOAuthRedirectUri() });
   if (started.status !== "authorization_required") return started.status;
   const popup = window.open(
     started.authorizationUrl,
@@ -58,7 +62,8 @@ export async function connectMcpOauth(serverId: string): Promise<McpOauthResult>
       finish("cancelled");
     }, MCP_OAUTH_TIMEOUT_MS);
     channel.onmessage = (event: MessageEvent) => {
-      if ((event.data as { type?: string } | null)?.type !== "mcp-oauth-complete") return;
+      const message = event.data as { type?: string; sessionId?: string } | null;
+      if (message?.type !== "mcp-oauth-complete" || message.sessionId !== started.sessionId) return;
       finish("connected");
     };
   });

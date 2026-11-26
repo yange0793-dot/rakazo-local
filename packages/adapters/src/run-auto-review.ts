@@ -83,18 +83,20 @@ export async function autoReviewCheckerProvider(
         llm: {
           onUsage,
           runtime: deps.runtime,
-          checker,
+          checker: { ...checker, model: judgeKey.routingModelId ?? checker.model },
           apiKey: judgeKey.oauth ? undefined : judgeKey.apiKey,
           callObserver: judgeKey.callObserver,
           accountId: judgeKey.accountId,
           gatewayId: judgeKey.gatewayId,
           baseUrl: judgeKey.baseUrl,
+          apiProtocol: judgeKey.apiProtocol,
           headers: judgeKey.headers,
           allowPrivateEndpoint: judgeKey.allowPrivateEndpoint,
           cacheCapabilities: judgeKey.cacheCapabilities,
           contextWindow: judgeKey.contextWindow,
           maxTokens: judgeKey.maxTokens,
           reasoning: judgeKey.reasoning,
+          reasoningCapabilities: judgeKey.reasoningCapabilities,
           oauth: judgeKey.oauth
             ? {
                 credential: judgeKey.oauth,

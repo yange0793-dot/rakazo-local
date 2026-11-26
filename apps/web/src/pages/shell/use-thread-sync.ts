@@ -353,7 +353,14 @@ export function useThreadSync({
       updateSnapshot((prev) => prependThreadMessagePage(prev, page));
       window.requestAnimationFrame(() => {
         const element = messageScroll.current;
-        if (!element) return;
+        if (
+          !element ||
+          element !== scrollElement ||
+          epoch !== historyEpoch.current ||
+          activeBotId.current !== targetBotId ||
+          activeGroupId.current !== targetGroupId
+        )
+          return;
         element.scrollTop +=
           anchorRow?.isConnected && anchorTop !== null
             ? anchorRow.offsetTop - anchorTop

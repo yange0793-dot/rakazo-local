@@ -42,7 +42,7 @@ import { createAgentImportServices } from "../agent-import-services.js";
 import { createAgentSkillsService } from "../agent-skills.js";
 import { createBotRemoval } from "../bot-removal.js";
 import { createMcpServers } from "../mcp-servers.js";
-import { createModelConnector, prepareAllowedThinkingLevels } from "../model-credentials.js";
+import { createModelConnector } from "../model-credentials.js";
 import { rosterChangeFor } from "../roster-procedures.js";
 import type { RouterDeps } from "../router.js";
 import { createRoutineAnnouncer } from "../routines.js";
@@ -372,26 +372,6 @@ export function createRouterContext(deps: RouterDeps) {
         ))
       )
         throw new ORPCError("BAD_REQUEST", { message: "Choose a model that can see images" });
-      if (choice.thinkingLevel) {
-        const { allowed } = await prepareAllowedThinkingLevels(
-          deps,
-          actor,
-          choice.provider,
-          choice.modelId,
-          resolution,
-        );
-        // A unified-effort build offers the whole six-stop scale for every model; a
-        // protocol whose budget tops out lower clamps the level when the run starts.
-        if (
-          allowed &&
-          !allowed.includes(choice.thinkingLevel) &&
-          choice.thinkingLevel !== "xhigh" &&
-          choice.thinkingLevel !== "max"
-        )
-          throw new ORPCError("BAD_REQUEST", {
-            message: `Thinking level must be one of: ${allowed.join(", ")}`,
-          });
-      }
       if (entry && !entry.placeholder && choice.provider !== OPENAI_COMPATIBLE_PROVIDER_ID)
         continue;
       const error = await validateConnectedModelChoice(

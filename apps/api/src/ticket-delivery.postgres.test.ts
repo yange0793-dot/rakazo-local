@@ -32,6 +32,7 @@ import {
 } from "@rakazo/db";
 import { MarkdownMemoryStore } from "@rakazo/memory";
 import { describe, expect, it, vi } from "vitest";
+import { messageBot } from "../../../packages/adapters/src/bot-messages.js";
 import type { ExecutorDeps } from "../../../packages/adapters/src/executor-deps.js";
 import { claimRun } from "../../../packages/adapters/src/run-lifecycle.js";
 import { attachWorkspaceFileToThread } from "../../../packages/adapters/src/thread-artifacts.js";
@@ -109,6 +110,169 @@ async function ticketFixture() {
 }
 
 pg("chat ticket work delivery", () => {
+  it("keeps child receipts internal and forwards the finished bytes once, including revisions", async () => {
+    const f = await ticketFixture();
+    try {
+      await runAsTenant(f.actor, async () => {
+        const sent = await sendThreadMessage(f.base, f.actor, f.target, {
+          text: "Deliver the editor's finished article.",
+          clientNonce: randomUUID(),
+        });
+        let parentRun = await f.prisma.run.update({
+          where: { id: sent.runId },
+          data: { status: "running" },
+        });
+        const editor = await f.prisma.bot.create({
+          data: {
+            spaceId: f.actor.spaceId,
+            userId: f.actor.userId,
+            name: "Editor",
+            color: "blue",
+          },
+        });
+        await f.prisma.thread.create({
+          data: { spaceId: f.actor.spaceId, userId: f.actor.userId, botId: editor.id },
+        });
+        const dispatch = await messageBot(
+          f.base,
+          parentRun,
+          { id: f.identity.botId, name: "Coordinator" },
+          {
+            bot_id: editor.id,
+            message: "Write the finished article and attach it.",
+            deliveryKey: `${parentRun.id}:article`,
+          },
+        );
+        expect(dispatch).toMatchObject({ ok: true, managed: true });
+        parentRun = await f.prisma.run.findUniqueOrThrow({ where: { id: parentRun.id } });
+        const child = await f.prisma.ticket.findFirstOrThrow({
+          where: { parentTicketId: parentRun.ticketId!, assigneeBotId: editor.id },
+        });
+        const assigned = await f.prisma.run.findFirstOrThrow({ where: { ticketId: child.id } });
+        const editorRun = await f.prisma.run.update({
+          where: { id: assigned.id },
+          data: { status: "running" },
+        });
+        const findings = [
+          { outcome: "pass", conclusion: "Article checked.", evidence: "Read the finished file." },
+        ];
+        await attachWorkspaceFileToThread(f.base, {
+          spaceId: f.actor.spaceId,
+          userId: f.actor.userId,
+          botId: editor.id,
+          runId: editorRun.id,
+          filePath: "article.md",
+          bytes: Buffer.from("A private draft that was never delivered."),
+          operationId: `${editorRun.id}:private-draft`,
+        });
+        let firstDeliveredArtifactId: string | undefined;
+        for (const previousVersion of [0, 1]) {
+          const text = `# Finished article ${previousVersion + 1}\n\nThe editor owns this exact text.\n`;
+          const attached = await attachWorkspaceFileToThread(f.base, {
+            spaceId: f.actor.spaceId,
+            userId: f.actor.userId,
+            botId: editor.id,
+            runId: editorRun.id,
+            filePath: "article.md",
+            bytes: Buffer.from(text),
+            operationId: `${editorRun.id}:article:${previousVersion}`,
+          });
+          const delivered = await deliverTicketWork(f.base, editorRun, {
+            id: child.id,
+            ownerAuthored: false,
+            secrets: [],
+            result: {
+              previousVersion,
+              summary: "Editor finished.",
+              findings,
+              artifactIds: [attached.artifactId],
+              finalArtifactId: attached.artifactId,
+            },
+          });
+          expect(delivered).toMatchObject({ ok: true, status: "done", managed: true });
+          if (!("messageId" in delivered)) throw new Error("Missing child receipt");
+          const receipt = await f.prisma.message.findUniqueOrThrow({
+            where: { id: delivered.messageId },
+          });
+          expect(
+            userVisibleMessages([
+              {
+                ...receipt,
+                runId: receipt.runId ?? undefined,
+                blocks: receipt.blocks as MessageBlock[],
+              },
+            ]),
+          ).toEqual([]);
+          const file = (receipt.blocks as MessageBlock[]).find(
+            (block) => block.kind === "file" && block.name === "article.md",
+          );
+          if (file?.kind !== "file") throw new Error("Missing forwarded file");
+          const event = await f.prisma.workEvent.findFirstOrThrow({
+            where: { sourceTicketId: child.id, kind: "child_outcome" },
+          });
+          expect(event.payload).toMatchObject({
+            finalArtifactId: file.artifactId,
+            artifactIds: [file.artifactId],
+          });
+          const input = {
+            id: parentRun.ticketId!,
+            ownerAuthored: true,
+            secrets: [],
+            result: {
+              previousVersion,
+              summary: "Reviewed the editor's finished article.",
+              findings,
+              artifactIds: [file.artifactId],
+              finalArtifactId: file.artifactId,
+            },
+          };
+          const forwarded = await deliverTicketWork(f.base, parentRun, input);
+          expect(forwarded).toMatchObject({
+            ok: true,
+            status: "done",
+            version: previousVersion + 1,
+          });
+          expect(await deliverTicketWork(f.base, parentRun, input)).toEqual(forwarded);
+          if (!("messageId" in forwarded)) throw new Error("Missing parent delivery");
+          const shown = await f.prisma.message.findUniqueOrThrow({
+            where: { id: forwarded.messageId },
+          });
+          expect(shown.blocks).toEqual([{ kind: "text", text }, file]);
+          expect(
+            await f.prisma.message.count({
+              where: {
+                threadId: f.target.threadId,
+                clientNonce: {
+                  startsWith: `work-receipt:${parentRun.ticketId}:${previousVersion + 1}:`,
+                },
+              },
+            }),
+          ).toBe(1);
+          const artifact = await f.prisma.artifact.findUniqueOrThrow({
+            where: { id: file.artifactId },
+          });
+          expect(artifact.version).toBe(previousVersion + 1);
+          expect(artifact.rootArtifactId).toBe(firstDeliveredArtifactId ?? null);
+          firstDeliveredArtifactId ??= artifact.id;
+          expect(
+            Buffer.from(
+              await f.base.artifacts.get(artifact.storageKey, {
+                operationId: "read-delivery",
+                traceId: "read-delivery",
+                spaceId: f.actor.spaceId,
+                userId: f.actor.userId,
+                botId: f.identity.botId,
+                signal: new AbortController().signal,
+              }),
+            ).toString(),
+          ).toBe(text);
+        }
+      });
+    } finally {
+      await f.close();
+    }
+  });
+
   it.each([
     { allFiles: true, revise: false },
     { allFiles: false, revise: false },
@@ -739,7 +903,11 @@ pg("chat ticket work delivery", () => {
                     },
                     "deliver",
                   ),
-                ).toHaveProperty("ok", true);
+                ).toMatchObject({
+                  kind: "agent_tool_result",
+                  terminate: true,
+                  details: { ok: true, messageId: expect.any(String) },
+                });
               }
               yield { type: "done" as const, text: "A draft has been prepared." };
             },
@@ -750,7 +918,9 @@ pg("chat ticket work delivery", () => {
           );
           expect(turns).toBe(2);
           const completed = await f.prisma.run.findUniqueOrThrow({ where: { id: sent.runId } });
-          expect(completed.status).toBe(deliver ? "completed" : "failed");
+          expect(completed.status, completed.error ?? undefined).toBe(
+            deliver ? "completed" : "failed",
+          );
           if (!deliver) expect(completed.error).toContain("without delivering");
           expect(
             await f.prisma.message.count({
@@ -826,14 +996,7 @@ pg("chat ticket work delivery", () => {
             ticketBoardEnabled: true,
           }),
         };
-        await prisma.$transaction((tx) =>
-          saveAutoReviewPreference(
-            tx,
-            actor,
-            { enabled: false },
-            { enabled: false, skipApprovals: false },
-          ),
-        );
+        await prisma.$transaction((tx) => saveAutoReviewPreference(tx, actor, { mode: "ask" }));
         const send = (text: string, replyToMessageId?: string) =>
           sendThreadMessage(base, actor, target, {
             text,

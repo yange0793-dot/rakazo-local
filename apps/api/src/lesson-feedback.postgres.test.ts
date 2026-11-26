@@ -90,7 +90,8 @@ pg("lesson feedback through the worker and owner API (PostgreSQL)", () => {
             trigger: "user",
             status: "running",
             tainted: true,
-            learningSourceChecked: true,
+            // An unchecked historical run requires the person's approval for a lesson edit.
+            learningSourceChecked: false,
           },
         });
         const reply = await createThreadMessage(prisma, {

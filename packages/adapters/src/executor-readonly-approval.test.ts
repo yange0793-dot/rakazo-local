@@ -92,7 +92,7 @@ function fixture({
   approvalRole,
   nativeReview = false,
   checkerConnected = true,
-  skipApprovals = false,
+  bypassPermissions = false,
   trigger = "user",
   secrets = [] as string[],
   prompt = "Read the item",
@@ -119,6 +119,7 @@ function fixture({
   browser,
   graphical = Boolean(browser),
   spendingLimit = null,
+  sandboxProvider,
 }: {
   /** A page browser on a graphical computer, so browser_act and computer_act are offered. */
   browser?: BrowserProvider;
@@ -126,6 +127,8 @@ function fixture({
   graphical?: boolean;
   /** The user's spending limit for payments. */
   spendingLimit?: SpendingLimit | null;
+  /** The deployment's computer provider, when the test exercises provider-specific behavior. */
+  sandboxProvider?: string;
 
   /** The tool runs the actions its arguments name; see ConnectorTool.batch. */
   batch?: ConnectorTool["batch"];
@@ -163,7 +166,7 @@ function fixture({
   approvalRole?: ModelRoleSettings;
   nativeReview?: boolean;
   checkerConnected?: boolean;
-  skipApprovals?: boolean;
+  bypassPermissions?: boolean;
   trigger?: string;
   secrets?: string[];
   prompt?: string;
@@ -525,12 +528,16 @@ function fixture({
     routine: { findMany: vi.fn(async () => routines) },
     actionAutoReviewPreference: {
       findUnique: vi.fn(async () =>
-        confirmationsOverride && savedPreference ? { enabled: autoReview, skipApprovals } : null,
+        confirmationsOverride && savedPreference
+          ? { mode: bypassPermissions ? "bypermission" : autoReview ? "auto" : "ask" }
+          : null,
       ),
     },
     userActionAutoReviewPreference: {
       findUnique: vi.fn(async () =>
-        confirmationsOverride || !savedPreference ? null : { enabled: autoReview, skipApprovals },
+        confirmationsOverride || !savedPreference
+          ? null
+          : { mode: bypassPermissions ? "bypermission" : autoReview ? "auto" : "ask" },
       ),
     },
     steeringMessage: {
@@ -643,7 +650,9 @@ function fixture({
       },
       execute,
     },
-    sandbox: { describe: () => ({ capabilities: { graphical } }) },
+    sandbox: {
+      describe: () => ({ id: sandboxProvider ?? "fixture", capabilities: { graphical } }),
+    },
     browser,
     memory: {
       read: async (request: { scope: string; path?: string }) => {
@@ -683,6 +692,7 @@ function fixture({
     shutdownSignal,
     web,
     userDevices,
+    ...(sandboxProvider ? { env: { sandboxProvider } } : {}),
   } as unknown as Parameters<typeof createRunExecutor>[0]);
   return {
     prisma: transactionalPrisma,
@@ -1127,7 +1137,7 @@ describe("connector read-only metadata and approval enforcement", () => {
         catalog,
         name: "demo_send_message",
         autoReview: true,
-        skipApprovals: true,
+        bypassPermissions: true,
       });
       await f.run();
       expect(f.execute).toHaveBeenCalledOnce();
@@ -1135,11 +1145,11 @@ describe("connector read-only metadata and approval enforcement", () => {
       expect(reviewMock).not.toHaveBeenCalled();
     });
 
-    it("runs past an older ask rule in Never ask, which never waits", async () => {
+    it("skips an explicit Ask rule in bypermission mode", async () => {
       const f = fixture({
         catalog,
         name: "demo_send_message",
-        skipApprovals: true,
+        bypassPermissions: true,
         rules: [{ effect: "require_approval", matchKind: "tool", matchValue: "demo_send_message" }],
       });
       await f.run();
@@ -1152,7 +1162,7 @@ describe("connector read-only metadata and approval enforcement", () => {
         catalog,
         name: "demo_send_message",
         trigger: "webhook",
-        skipApprovals: true,
+        bypassPermissions: true,
       });
       await f.run();
       expect(f.execute).toHaveBeenCalledOnce();
@@ -1178,11 +1188,11 @@ describe("connector read-only metadata and approval enforcement", () => {
       expect(JSON.stringify(f.results[0])).toContain("blocked");
     });
 
-    it("refuses a blocked tool in Never ask without asking or running it", async () => {
+    it("keeps an explicit Deny rule in bypermission mode", async () => {
       const f = fixture({
         catalog,
         name: "demo_send_message",
-        skipApprovals: true,
+        bypassPermissions: true,
         rules: [{ effect: "deny", matchKind: "tool", matchValue: "demo_send_message" }],
       });
       await f.run();
@@ -1261,13 +1271,12 @@ describe("connector read-only metadata and approval enforcement", () => {
       },
     );
 
-    it("reviews automatically when no approval mode was ever saved", async () => {
-      reviewMock.mockResolvedValue({ decision: "pass", model: "scripted/checker" });
+    it("asks by default when no approval mode was ever saved", async () => {
       const f = fixture({ catalog, name: "demo_send_message", savedPreference: false });
       await f.run();
-      expect(reviewMock).toHaveBeenCalledOnce();
-      expect(f.execute).toHaveBeenCalledOnce();
-      expect(f.pauseRunForInput).not.toHaveBeenCalled();
+      expect(reviewMock).not.toHaveBeenCalled();
+      expect(f.execute).not.toHaveBeenCalled();
+      expect(f.pauseRunForInput).toHaveBeenCalledOnce();
     });
 
     it("redacts run secrets from automatic review task and bot context", async () => {
@@ -1461,9 +1470,9 @@ describe("Composio batches", () => {
     expect(f.pauseRunForInput).toHaveBeenCalledOnce();
   });
 
-  it("refuses the whole batch when one action is blocked, even in Never ask", async () => {
+  it("refuses the whole batch when one action is blocked in bypermission mode", async () => {
     const f = batchFixture({
-      skipApprovals: true,
+      bypassPermissions: true,
       rules: [{ effect: "deny", matchKind: "tool", matchValue: "hubspot_delete_contact" }],
     });
     f.setCalls([
@@ -1534,7 +1543,7 @@ describe("create_space", () => {
     await asked.run();
     expect(asked.pauseRunForInput).toHaveBeenCalledOnce();
 
-    const skipped = fixture({ name: "create_space", builtin: true, skipApprovals: true });
+    const skipped = fixture({ name: "create_space", builtin: true, bypassPermissions: true });
     skipped.setCalls([{ args: { name: "Support" }, executionId: "call-1" }]);
     // Past the gate, creation needs space tables this fixture does not mock.
     await skipped.run(true);
@@ -1543,7 +1552,7 @@ describe("create_space", () => {
   });
 
   it("creates it in Never ask after outside content", async () => {
-    const f = fixture({ name: "create_space", builtin: true, skipApprovals: true });
+    const f = fixture({ name: "create_space", builtin: true, bypassPermissions: true });
     f.claimedOutsideSteering(true);
     f.setCalls([{ args: { name: "Support" }, executionId: "call-1" }]);
     await f.run(true);
@@ -1677,7 +1686,7 @@ describe("own instructions through update_bot", () => {
     expect(f.effects[0]!.status).toBe("completed");
   });
   it("applies a change directly when the owner skips approvals", async () => {
-    const f = fixture({ name: "update_bot", builtin: true, skipApprovals: true });
+    const f = fixture({ name: "update_bot", builtin: true, bypassPermissions: true });
     f.setCalls([{ args: { instructions: first }, executionId: "call-1" }]);
     await f.run();
     expect(f.pauseRunForInput).not.toHaveBeenCalled();
@@ -1686,7 +1695,7 @@ describe("own instructions through update_bot", () => {
   it.each(["user", "bot_message"])(
     "applies a change in Never ask after outside content in a %s run",
     async (trigger) => {
-      const f = fixture({ name: "update_bot", builtin: true, skipApprovals: true, trigger });
+      const f = fixture({ name: "update_bot", builtin: true, bypassPermissions: true, trigger });
       f.claimedOutsideSteering(true);
       f.setCalls([{ args: { instructions: first }, executionId: "call-1" }]);
       await f.run();
@@ -1709,7 +1718,7 @@ describe("own instructions through update_bot", () => {
     expect(f.instructionState.instructionHistory).toHaveLength(0);
   });
   it("refuses to overwrite instructions changed after the attempt started", async () => {
-    const f = fixture({ name: "update_bot", builtin: true, skipApprovals: true });
+    const f = fixture({ name: "update_bot", builtin: true, bypassPermissions: true });
     f.setCalls([{ args: { instructions: first }, executionId: "call-1" }]);
     f.overwriteInstructionsAfterAttemptStart("Imported profile");
     await f.run();
@@ -1724,7 +1733,7 @@ describe("own instructions through update_bot", () => {
     expect(f.instructionState.instructionHistory).toHaveLength(0);
   });
   it("refuses a rewrite after re-reading the changed instructions in the same run", async () => {
-    const f = fixture({ name: "update_bot", builtin: true, skipApprovals: true });
+    const f = fixture({ name: "update_bot", builtin: true, bypassPermissions: true });
     f.setCalls([
       { args: { instructions: first }, executionId: "call-1" },
       { args: {}, executionId: "call-2" },
@@ -1741,7 +1750,7 @@ describe("own instructions through update_bot", () => {
     expect(f.instructionState.instructionHistory).toHaveLength(0);
   });
   it("does not rebase a write on a read no model generation has seen yet", async () => {
-    const f = fixture({ name: "update_bot", builtin: true, skipApprovals: true });
+    const f = fixture({ name: "update_bot", builtin: true, bypassPermissions: true });
     f.setCalls([
       { args: {}, executionId: "call-1" },
       { args: { instructions: "Rewritten from the draft" }, executionId: "call-2" },
@@ -1754,7 +1763,7 @@ describe("own instructions through update_bot", () => {
     expect(f.instructionState.instructionHistory).toHaveLength(0);
   });
   it("does not rebase the parent's write on a helper's settings read", async () => {
-    const f = fixture({ name: "update_bot", builtin: true, skipApprovals: true });
+    const f = fixture({ name: "update_bot", builtin: true, bypassPermissions: true });
     f.setCalls([
       { args: {}, executionId: JSON.stringify(["pi-tool", "helper-1", "call-1"]) },
       { args: { instructions: "Rewritten from the draft" }, executionId: "call-2" },
@@ -1820,7 +1829,7 @@ describe("own instructions through update_bot", () => {
     expect(f.instructionState.instructions).toBe(long);
   });
   it("applies a second instruction change later in the same run", async () => {
-    const f = fixture({ name: "update_bot", builtin: true, skipApprovals: true });
+    const f = fixture({ name: "update_bot", builtin: true, bypassPermissions: true });
     f.setCalls([
       { args: { instructions: "First rewrite" }, executionId: "call-1" },
       { args: { instructions: "Second rewrite" }, executionId: "call-2" },
@@ -2449,7 +2458,7 @@ describe("bot management approvals", () => {
       name: "create_group",
       builtin: true,
       fleetManagement: true,
-      skipApprovals: true,
+      bypassPermissions: true,
       fleetBots: [
         { id: "bot-a", name: "Alpha" },
         { id: "bot-b", name: "Beta" },
@@ -2733,7 +2742,7 @@ describe("command watch creation approval", () => {
   });
 
   it("saves a command watch in Never ask after outside content", async () => {
-    const f = fixture({ name: "schedule_create", builtin: true, skipApprovals: true });
+    const f = fixture({ name: "schedule_create", builtin: true, bypassPermissions: true });
     f.setCalls([
       { name: "web_search", args: { query: "news" }, executionId: "call-1" },
       {
@@ -3212,7 +3221,7 @@ describe("Auto Review of new sites", () => {
     it("saves it in Never ask, where the bot can already fetch any site", async () => {
       const f = fixture({
         builtin: true,
-        skipApprovals: true,
+        bypassPermissions: true,
         sourceRole: "user",
         prompt: "Find news daily",
       });
@@ -3619,6 +3628,20 @@ describe("user_computer_shell", () => {
     expect(f.instructions()).not.toContain(line);
   });
 
+  it("does not describe the bot's local desktop computer as an offline paired computer", async () => {
+    const { gateway } = devices(false, false);
+    const f = fixture({
+      ...ownRun,
+      userDevices: gateway,
+      sandboxProvider: "desktop",
+    });
+    await f.run();
+    expect(gateway.connected).not.toHaveBeenCalled();
+    expect(f.offeredTools()).toContain("shell");
+    expect(f.offeredTools()).not.toContain("user_computer_shell");
+    expect(f.instructions()).not.toContain(offlineLine);
+  });
+
   it.each<[string, Parameters<typeof fixture>[0]]>([
     ["a webhook run", { userDevices: devices(false, true).gateway, trigger: "webhook" }],
     ["another member's bot", { userDevices: devices(false, true).gateway, botUserId: "user-2" }],
@@ -3678,12 +3701,11 @@ describe("user_computer_shell", () => {
     expect(requests).toEqual([]);
   });
 
-  it("asks first, even in never-ask mode with an allow rule, then runs without asking again in this space", async () => {
+  it("asks before using a separate computer in Ask mode, even with an allow rule", async () => {
     const { gateway, requests } = devices();
     const f = fixture({
       ...ownRun,
       userDevices: gateway,
-      skipApprovals: true,
       rules: [{ effect: "always_allow", matchKind: "tool", matchValue: "user_computer_shell" }],
     });
     f.setCalls([call("ssh pi.local hostname")]);
@@ -3875,7 +3897,6 @@ describe("user computer screen control", () => {
     const f = fixture({
       ...ownRun,
       userDevices: gateway,
-      skipApprovals: true,
       secrets: ["sk-fake-secret"],
     });
     f.setCalls([observe("TextEdit")]);
@@ -3960,7 +3981,7 @@ describe("background helpers and approval", () => {
     ["remember", { content: "Must not be saved" }],
     ["update_bot", { instructions: "Never ask" }],
   ])("refuses %s, which it was not offered, before anything is written", async (name, args) => {
-    const f = fixture({ name, builtin: true, trigger: "helper", skipApprovals: true });
+    const f = fixture({ name, builtin: true, trigger: "helper", bypassPermissions: true });
     f.setCalls([{ args, executionId: "call-1" }]);
     await f.run();
     expect(f.commit).not.toHaveBeenCalled();
@@ -3970,7 +3991,7 @@ describe("background helpers and approval", () => {
   });
 
   it("refuses a read-only connector tool that a local tool's handler would run", async () => {
-    const f = fixture({ name: "message_agent", trigger: "helper", skipApprovals: true });
+    const f = fixture({ name: "message_agent", trigger: "helper", bypassPermissions: true });
     f.setCalls([{ args: { connection_id: "c1", text: "hi" }, executionId: "call-1" }]);
     await f.run();
     expect(f.execute).not.toHaveBeenCalled();
@@ -3979,7 +4000,7 @@ describe("background helpers and approval", () => {
   });
 
   it("runs a declared read without asking", async () => {
-    for (const options of [{}, { skipApprovals: true }] as Parameters<typeof fixture>[0][]) {
+    for (const options of [{}, { bypassPermissions: true }] as Parameters<typeof fixture>[0][]) {
       const f = fixture({ trigger: "helper", helperSource, ...options });
       await f.run();
       expect(f.execute).toHaveBeenCalledOnce();
@@ -4041,7 +4062,7 @@ describe("background helpers and approval", () => {
     const f = fixture({
       trigger: "helper",
       readOnly: false,
-      skipApprovals: true,
+      bypassPermissions: true,
       helperSource,
     });
     await f.run();
@@ -4093,11 +4114,13 @@ describe("background helpers and approval", () => {
     await undeclared.run();
     expect(undeclared.execute).not.toHaveBeenCalled();
     expect(undeclared.pauseRunForInput).toHaveBeenCalledOnce();
-    // Never ask is the owner's policy for their own turns too, so it runs them here as well.
-    const never = helperBatch({ skipApprovals: true });
+    // An unnamed batch entry cannot run because its action is unknown, even in bypermission.
+    const never = helperBatch({ bypassPermissions: true });
     never.setCalls([{ args: batchOf("demo_get_other", undefined), executionId: "call-1" }]);
     await never.run();
-    expect(never.execute).toHaveBeenCalledOnce();
+    expect(never.execute).not.toHaveBeenCalled();
+    expect(never.pauseRunForInput).not.toHaveBeenCalled();
+    expect(JSON.stringify(never.results[0])).toContain("not permitted");
   });
 
   /** A page browser whose actions enter the normal approval policy. */
@@ -4253,9 +4276,8 @@ describe("a click that completes a purchase on a website", () => {
     executionId,
   });
 
-  it("asks before pressing it, in every mode, and never lets Auto Review pass it", async () => {
+  it("asks before pressing it except in bypermission mode", async () => {
     for (const options of [
-      { skipApprovals: true, trigger: "user" },
       { autoReview: true, approvalRole: { primary: undefined, backups: [] } },
       { savedPreference: false },
       {
@@ -4289,6 +4311,25 @@ describe("a click that completes a purchase on a website", () => {
         request: { actions: pay, purchaseApproval: approval },
       });
     }
+
+    const page = pageBrowser();
+    const bypassed = fixture({ builtin: true, browser: page.provider, bypassPermissions: true });
+    bypassed.setCalls([payCall()]);
+    await bypassed.run();
+    expect(page.acts).toHaveLength(1);
+    expect(bypassed.pauseRunForInput).not.toHaveBeenCalled();
+
+    const askedPage = pageBrowser();
+    const explicitlyAsked = fixture({
+      builtin: true,
+      browser: askedPage.provider,
+      bypassPermissions: true,
+      rules: [{ effect: "require_approval", matchKind: "tool", matchValue: "browser_act" }],
+    });
+    explicitlyAsked.setCalls([payCall()]);
+    await explicitlyAsked.run();
+    expect(askedPage.acts).toHaveLength(1);
+    expect(explicitlyAsked.pauseRunForInput).not.toHaveBeenCalled();
   });
 
   it("presses it after Allow once, and only the click that was approved", async () => {
@@ -4697,7 +4738,7 @@ describe("a native page browser without a desktop", () => {
     async (kind) => {
       const actions = actionsFor[kind];
       for (const options of [
-        { skipApprovals: true },
+        { bypassPermissions: true },
         { autoReview: true },
         {
           rules: [{ effect: "always_allow", matchKind: "tool", matchValue: "browser_act" }],
@@ -4834,6 +4875,33 @@ describe("a native page browser without a desktop", () => {
     expect(JSON.stringify(f.results)).not.toContain("browserState");
   });
 
+  it("persists browser state when the computer is provisioned for the first time in this run", async () => {
+    const page = nativeBrowser();
+    page.provider.checkpoint = vi.fn(() => ({ session: "new-browser" }));
+    page.provider.restore = vi.fn();
+    const f = fixture({ builtin: true, browser: page.provider, graphical: false });
+    const bot = await f.prisma.bot.findUniqueOrThrow();
+    f.prisma.bot.findUniqueOrThrow.mockResolvedValue({
+      ...bot,
+      computer: { ...bot.computer, providerRef: null },
+    } as never);
+    f.setCalls([{ name: "browser_snapshot", args: {}, executionId: "first-observation" }]);
+
+    await f.run();
+
+    expect(f.effects[0]).toMatchObject({
+      kind: "browser_snapshot",
+      status: "completed",
+      result: {
+        browserState: { computerId: "computer-1", provider: { session: "new-browser" } },
+      },
+    });
+    expect(page.provider.checkpoint).toHaveBeenCalledWith(
+      expect.objectContaining({ id: "computer-1", kind: "desktop" }),
+      expect.anything(),
+    );
+  });
+
   it("does not run an action after Deny, and takes no reworded one instead", async () => {
     const page = nativeBrowser();
     const f = fixture({ builtin: true, browser: page.provider, graphical: false });
@@ -4890,7 +4958,11 @@ describe("a native page browser without a desktop", () => {
     });
 
     const silentPage = pageBrowser();
-    const silent = fixture({ builtin: true, browser: silentPage.provider, skipApprovals: true });
+    const silent = fixture({
+      builtin: true,
+      browser: silentPage.provider,
+      bypassPermissions: true,
+    });
     silent.setCalls([actCall(fill)]);
     await silent.run();
     expect(silent.pauseRunForInput).not.toHaveBeenCalled();

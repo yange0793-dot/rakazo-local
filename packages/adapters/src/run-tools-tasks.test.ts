@@ -110,8 +110,13 @@ function reflectionRun(
 ) {
   const findFirst = vi.fn(async ({ where }: { where: Record<string, unknown> }) => {
     const id = where.id;
-    if (typeof id === "string") return finishedRunIds.includes(id) ? { id } : null;
-    return finishedRunIds.length ? { id: finishedRunIds[finishedRunIds.length - 1] } : null;
+    const found = typeof id === "string" ? finishedRunIds.find((runId) => runId === id) : finishedRunIds.at(-1);
+    return found ? {
+      id: found,
+      threadId: "thread-1",
+      thread: { historyCompactionGeneration: 0 },
+      sourceMessageId: "message-source",
+    } : null;
   });
   const skillFindFirst = vi.fn(async () => skills[0] ?? null);
   const enqueue = vi.fn(async () => undefined);
@@ -156,7 +161,10 @@ describe("reflect_on_run", () => {
     expect(enqueue).toHaveBeenCalledTimes(1);
     expect(enqueue).toHaveBeenCalledWith({
       name: "harness.reflect",
-      payload: { runId: "run-finished" },
+      payload: {
+        runId: "run-finished",
+        source: { threadId: "thread-1", generation: 0, messageId: "message-source" },
+      },
       replaceKey: "harness.reflect:run-finished",
       maxAttempts: 2,
     });
@@ -167,7 +175,10 @@ describe("reflect_on_run", () => {
     await taskTools.reflect_on_run!(ctx, call({ runId: "run-finished" }));
     expect(enqueue).toHaveBeenCalledWith(
       expect.objectContaining({
-        payload: { runId: "run-finished", exceptMessageId: "message-that-asked" },
+        payload: expect.objectContaining({
+          runId: "run-finished",
+          exceptMessageId: "message-that-asked",
+        }),
       }),
     );
   });
@@ -228,6 +239,7 @@ describe("reflect_on_run", () => {
         botId: "bot-1",
         threadId: "thread-1",
         status: { in: ["completed", "failed", "cancelled"] },
+        OR: [{ sourceMessageId: { not: null } }, { trigger: { in: ["routine", "tickets"] } }],
         id: { not: "run-current" },
       },
       orderBy: { createdAt: "desc" },

@@ -203,8 +203,10 @@ async function main() {
       .flatMap((file) => (JSON.parse(readFileSync(file, "utf8")) as { runs: DriverRun[] }).runs);
     return console.log(comparisonTable(runs));
   }
-  const known = ["--driver=", "--image=", "--exec=", "--repeat=", "--out=", "--live-sites"];
-  const unknown = args.filter((arg) => !known.some((prefix) => arg.startsWith(prefix)));
+  const known = ["--driver=", "--image=", "--exec=", "--repeat=", "--out="];
+  const unknown = args.filter(
+    (arg) => arg !== "--live-sites" && !known.some((prefix) => arg.startsWith(prefix)),
+  );
   if (unknown.length) throw new Error(`Unknown option ${unknown[0]}\n${USAGE}`);
   const drivers = args.filter((arg) => arg.startsWith("--driver=")).map((arg) => arg.slice(9));
   const repeat = Number(option("repeat") ?? 3);

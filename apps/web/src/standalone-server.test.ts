@@ -26,9 +26,10 @@ async function listen(server: http.Server) {
   return (server.address() as AddressInfo).port;
 }
 
-async function start() {
+async function start(handler?: http.RequestListener) {
   const api = http.createServer((req, res) => {
     apiRequests.push(req.url ?? "");
+    if (handler) return handler(req, res);
     res.end(JSON.stringify({ url: req.url, headers: req.headers }));
   });
   api.on("upgrade", (_req, socket) => {
@@ -49,6 +50,28 @@ async function start() {
     SCREEN_PROXY_SECRET: "test-screen-proxy-secret-0123456789abcdef",
   });
   return listen(web);
+}
+
+async function startEventStream() {
+  let upstream: http.ServerResponse | undefined;
+  const port = await start((_req, res) => {
+    res.writeHead(200, { "content-type": "text/event-stream" });
+    res.write("data: first\n\n");
+    upstream = res;
+  });
+  const response = await fetch(`http://127.0.0.1:${port}/rpc/events`);
+  expect(response.status).toBe(200);
+  expect(response.headers.get("content-type")).toBe("text/event-stream");
+  if (!upstream || !response.body) throw new Error("SSE fixture did not start");
+  const reader = response.body.getReader();
+  let first = "";
+  while (first.length < "data: first\n\n".length) {
+    const chunk = await reader.read();
+    if (chunk.done) throw new Error("SSE ended before the first event");
+    first += Buffer.from(chunk.value).toString("utf8");
+  }
+  expect(first).toBe("data: first\n\n");
+  return { upstream, reader };
 }
 
 function get(port: number, pathname: string, headers: http.OutgoingHttpHeaders = {}) {
@@ -119,6 +142,33 @@ describe("standalone web server", () => {
     expect(JSON.parse((await get(port, "/api/local-identity")).body).url).toBe(
       "/api/local-identity",
     );
+  });
+
+  it("forwards SSE events and a normal end after the request body has finished", async () => {
+    const { upstream, reader } = await startEventStream();
+    upstream.end("data: last\n\n");
+    let rest = "";
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      rest += Buffer.from(value).toString("utf8");
+    }
+    expect(rest).toBe("data: last\n\n");
+  });
+
+  it("terminates a downstream SSE response when the API disconnects after a partial response", async () => {
+    const { upstream, reader } = await startEventStream();
+    upstream.destroy();
+    await expect(reader.read()).rejects.toThrow();
+  });
+
+  it("closes the upstream response when the downstream client cancels SSE", async () => {
+    const { upstream, reader } = await startEventStream();
+    const closed = new Promise<boolean>((resolve) => {
+      upstream.once("close", () => resolve(upstream.writableFinished));
+    });
+    await reader.cancel();
+    await expect(closed).resolves.toBe(false);
   });
 
   it("rejects a remote forwarding chain before asking the API", async () => {

@@ -1,27 +1,44 @@
-import type { TicketFileDeliveryRequirements, TicketStatus } from "@rakazo/contracts";
+import { createHash } from "node:crypto";
+import type { ArtifactStore } from "@rakazo/adapter-kit";
+import type {
+  ManagedWorkDependency,
+  MessageBlock,
+  TicketFileDeliveryRequirements,
+  TicketStatus,
+} from "@rakazo/contracts";
 import {
   CommentTicketInput,
   CreateTicketInput,
   isTicketCompletedStatus,
   TicketFileDeliveryRequirementsSchema,
   TicketStatusSchema,
+  TicketWorkResult,
   UpdateTicketInput,
 } from "@rakazo/contracts";
+import { blocksToAgentHistoryText } from "@rakazo/core";
 import type { PrismaClient } from "@rakazo/db";
 import {
   allocateTicketNumber,
   ensureBoard,
   findTicket,
   listTicketComments,
+  ManagedWorkError,
+  managedWorkOriginAvailable,
+  recordManagedDependencyChangeInTransaction,
+  recordWorkEventInTransaction,
+  setManagedWorkDependenciesInTransaction,
   toTicketCommentDto,
   toTicketDto,
 } from "@rakazo/db";
+import * as z from "zod";
+import { managedReceiptReplyTicketId } from "./managed-work.js";
 import type { TicketChangeNotifier } from "./ticket-changes.js";
 import { ticketReceiptsEnabled } from "./ticket-receipt-config.js";
 import { prepareTicketRun } from "./ticket-wake.js";
 
 type TicketToolDeps = {
   prisma: PrismaClient;
+  artifacts?: ArtifactStore;
   ticketBoardEnabled?: boolean;
   onTicketChange?: TicketChangeNotifier;
 };
@@ -60,6 +77,9 @@ async function ownBotInSpace(
 }
 const LIST_TICKETS_LIMIT = 50;
 const LIST_DESCRIPTION_CHARS = 200;
+const ManagedReceiptArtifacts = TicketWorkResult.pick({ artifactIds: true, finalArtifactId: true })
+  .required({ artifactIds: true })
+  .refine((value) => !value.finalArtifactId || value.artifactIds.includes(value.finalArtifactId));
 
 /**
  * The page key is the ticket's `createdAt` with `id` as the tiebreaker, because
@@ -157,13 +177,114 @@ export async function getTicket(deps: TicketToolDeps, input: { spaceId: string; 
     (await findTicket(deps.prisma, input.spaceId, board, { id: ref }));
   if (!row) return { error: `Ticket ${ref} not found.` };
   const comments = await listTicketComments(deps.prisma, input.spaceId, row.id);
+  let receiptArtifacts: { artifactIds: string[]; finalArtifactId?: string } | undefined;
+  if (row.managedVersion && row.receiptVersion > 0 && ticketReceiptsEnabled()) {
+    const evidence = row.parentTicketId
+      ? await deps.prisma.workEvent.findMany({
+          where: {
+            spaceId: input.spaceId,
+            ticketId: row.parentTicketId,
+            sourceTicketId: row.id,
+            kind: "child_outcome",
+          },
+          select: { payload: true },
+        })
+      : [];
+    for (const event of evidence) {
+      const parsed = ManagedReceiptArtifacts.and(
+        z.object({ receiptVersion: z.literal(row.receiptVersion) }),
+      ).safeParse(event.payload);
+      if (!parsed.success) continue;
+      receiptArtifacts = {
+        artifactIds: parsed.data.artifactIds,
+        ...(parsed.data.finalArtifactId ? { finalArtifactId: parsed.data.finalArtifactId } : {}),
+      };
+      break;
+    }
+    if (
+      !receiptArtifacts &&
+      deps.artifacts &&
+      row.originThreadId &&
+      row.createdByUserId &&
+      row.createdByBotId
+    ) {
+      const receipt = await deps.prisma.message.findFirst({
+        where: {
+          threadId: row.originThreadId,
+          role: "bot",
+          botId: row.createdByBotId,
+          clientNonce: { startsWith: `work-receipt:${row.id}:${row.receiptVersion}:` },
+        },
+        select: { clientNonce: true },
+      });
+      const artifact = receipt?.clientNonce
+        ? await deps.prisma.artifact.findFirst({
+            where: {
+              spaceId: input.spaceId,
+              userId: row.createdByUserId,
+              botId: row.createdByBotId,
+              clientNonce: receipt.clientNonce,
+              mimeType: "application/json",
+            },
+          })
+        : null;
+      if (artifact) {
+        const bytes = await deps.artifacts.get(artifact.storageKey, {
+          operationId: receipt!.clientNonce!,
+          traceId: receipt!.clientNonce!,
+          spaceId: input.spaceId,
+          userId: row.createdByUserId,
+          botId: row.createdByBotId,
+          signal: new AbortController().signal,
+        });
+        if (createHash("sha256").update(bytes).digest("hex") !== artifact.hash)
+          return { error: "Saved managed receipt hash mismatch." };
+        const parsed = ManagedReceiptArtifacts.and(
+          z.object({
+            schema: z.literal(1),
+            ticketId: z.literal(row.id),
+            version: z.literal(row.receiptVersion),
+          }),
+        ).safeParse(JSON.parse(new TextDecoder().decode(bytes)));
+        if (!parsed.success) return { error: "Saved managed receipt does not match this ticket." };
+        receiptArtifacts = {
+          artifactIds: parsed.data.artifactIds,
+          ...(parsed.data.finalArtifactId ? { finalArtifactId: parsed.data.finalArtifactId } : {}),
+        };
+      }
+    }
+  }
   return {
-    ticket: toTicketDto(row, board.ticketPrefix),
+    ticket: {
+      ...toTicketDto(row, board.ticketPrefix),
+      ...(row.managedVersion
+        ? {
+            managedWork: {
+              ticketId: row.id,
+              parentTicketId: row.parentTicketId,
+              controlEpoch: row.controlEpoch,
+              requirementsVersion: row.requirementsVersion,
+              acceptedRequirementsVersion: row.acceptedRequirementsVersion,
+              acceptedReceiptVersion: row.acceptedReceiptVersion,
+              stopped: Boolean(row.stopRequestedAt),
+            },
+          }
+        : {}),
+    },
+    ...(row.managedVersion
+      ? {
+          dependencies: await deps.prisma.ticketDependency.findMany({
+            where: { spaceId: input.spaceId, ticketId: row.id },
+            select: { prerequisiteTicketId: true, requirementsVersion: true, receiptVersion: true },
+          }),
+        }
+      : {}),
     comments: comments.map(toTicketCommentDto),
     ...(row.originKey && ticketReceiptsEnabled()
       ? {
           delivery: {
             previousVersion: row.receiptVersion,
+            ...receiptArtifacts,
             ...(row.fileDeliveryRequirements ? { requirements: row.fileDeliveryRequirements } : {}),
           },
         }
@@ -331,6 +452,7 @@ export async function updateTicket(
     ownerAuthored?: boolean;
     expectedRequirementsVersion?: unknown;
     fileDeliveryRequirements?: unknown;
+    dependencies?: ManagedWorkDependency[];
   },
 ) {
   if (!deps.ticketBoardEnabled) return { error: "Board unavailable." };
@@ -342,177 +464,435 @@ export async function updateTicket(
   if (data.assigneeBotId && !(await ownBotInSpace(deps, input, data.assigneeBotId)))
     return { error: "Unknown bot." };
   const board = await ensureBoard(deps.prisma, input.spaceId);
-  const result = await deps.prisma.$transaction(async (tx) => {
-    await tx.$queryRaw`SELECT id FROM tickets WHERE id = ${data.id} AND "spaceId" = ${input.spaceId} FOR UPDATE`;
-    const current = await tx.ticket.findFirst({
-      where: { id: data.id, spaceId: input.spaceId, boardId: board.id },
-    });
-    if (!current) return null;
-    let requirements: TicketFileDeliveryRequirements | undefined;
-    if (data.fileDeliveryRequirements) {
-      if (
-        !current.originKey ||
-        !current.originThreadId ||
-        !current.originMessageId ||
-        !current.createdByBotId ||
-        current.fileDeliveryRequirements == null
-      ) {
-        return { error: "Only tickets created with file-delivery requirements can revise them." };
-      }
-      if (
-        current.createdByUserId !== input.userId ||
-        (input.botId &&
-          (!input.ownerAuthored ||
-            !input.runId ||
-            input.threadId !== current.originThreadId ||
-            input.botId !== current.createdByBotId))
-      ) {
-        return {
-          error: "Only the ticket creator or its original owner chat can change requirements.",
-        };
-      }
-      const source = await tx.message.findFirst({
-        where: {
-          id: current.originMessageId,
-          threadId: current.originThreadId,
-          role: "user",
-          authorUserId: input.userId,
-          thread: {
-            spaceId: input.spaceId,
-            externalConversationId: null,
-            OR: [
-              {
-                botId: current.createdByBotId,
-                bot: { userId: input.userId, archivedAt: null },
-              },
-              {
-                group: {
-                  spaceId: input.spaceId,
-                  archivedAt: null,
-                  members: {
-                    some: {
-                      botId: current.createdByBotId,
-                      bot: { userId: input.userId, archivedAt: null },
-                    },
-                  },
-                },
-              },
-            ],
-          },
-        },
-        select: { id: true },
+  const result = await deps.prisma
+    .$transaction(async (tx) => {
+      await tx.$queryRaw`SELECT id FROM tickets WHERE id = ${data.id} AND "spaceId" = ${input.spaceId} FOR UPDATE`;
+      const current = await tx.ticket.findFirst({
+        where: { id: data.id, spaceId: input.spaceId, boardId: board.id },
       });
-      if (!source) return { error: "Original request is unavailable." };
-      if (input.botId) {
+      if (!current) return null;
+      const resuming = Boolean(current.managedVersion && current.stopRequestedAt);
+      if (resuming) {
+        if (
+          !ticketReceiptsEnabled() ||
+          data.status !== "doing" ||
+          !input.botId ||
+          data.assigneeBotId !== input.botId ||
+          !input.runId ||
+          current.parentTicketId ||
+          current.createdByUserId !== input.userId ||
+          current.createdByBotId !== input.botId ||
+          current.assigneeBotId !== input.botId ||
+          input.threadId !== current.originThreadId
+        )
+          throw new ManagedWorkError(
+            "Only a new request from the original owner chat can resume this root work.",
+          );
         const ownerRun = await tx.run.findFirst({
           where: {
             id: input.runId,
             spaceId: input.spaceId,
             userId: input.userId,
             botId: input.botId,
-            threadId: current.originThreadId,
+            threadId: current.originThreadId!,
+            status: "running",
+            trigger: { in: ["user", "follow_up"] },
+            createdAt: { gte: current.stopRequestedAt! },
             OR: [{ ticketId: null }, { ticketId: current.id }],
             sourceMessage: {
-              threadId: current.originThreadId,
+              threadId: current.originThreadId!,
               role: "user",
               authorUserId: input.userId,
+              createdAt: { gte: current.stopRequestedAt! },
             },
           },
           select: { id: true },
         });
-        if (!ownerRun) return { error: "Requirements change does not match its owner execution." };
+        if (!ownerRun || !(await managedWorkOriginAvailable(tx, current)))
+          throw new ManagedWorkError("Resuming work requires a new owner message after the stop.");
       }
-      const saved = TicketFileDeliveryRequirementsSchema.safeParse(
-        current.fileDeliveryRequirements,
-      );
-      if (!saved.success) return { error: "Saved file-delivery requirements are unavailable." };
-      if (saved.data.version !== data.expectedRequirementsVersion)
-        return { error: "Requirements changed. Read ticket_get before revising them." };
-      requirements = {
-        version: saved.data.version + 1,
-        items: data.fileDeliveryRequirements.items,
-      };
-    }
-    if (
-      input.botId &&
-      current.originKey &&
-      ticketReceiptsEnabled() &&
-      data.status &&
-      isTicketCompletedStatus(data.status) &&
-      data.status !== current.status
-    ) {
-      return {
-        error: "Use ticket_update with result to deliver this work in its original chat.",
-      } as const;
-    }
-    if (input.runId && input.botId && data.assigneeBotId === input.botId) {
-      const run = await tx.run.findFirst({
-        where: {
-          id: input.runId,
-          spaceId: input.spaceId,
-          botId: input.botId,
-          userId: input.userId,
-        },
-        select: { ticketId: true },
-      });
-      if (!run || (run.ticketId && run.ticketId !== current.id)) {
+      if (data.dependencies !== undefined) {
+        if (
+          !current.managedVersion ||
+          current.createdByUserId !== input.userId ||
+          (input.botId &&
+            input.botId !== current.assigneeBotId &&
+            input.botId !== current.createdByBotId)
+        )
+          throw new ManagedWorkError("Only the work owner or coordinator can change dependencies.");
+      }
+      let requirements: TicketFileDeliveryRequirements | undefined;
+      if (data.fileDeliveryRequirements) {
+        if (
+          !current.originKey ||
+          !current.originThreadId ||
+          !current.originMessageId ||
+          !current.createdByBotId ||
+          current.fileDeliveryRequirements == null
+        ) {
+          return { error: "Only tickets created with file-delivery requirements can revise them." };
+        }
+        if (
+          current.createdByUserId !== input.userId ||
+          (input.botId &&
+            (!input.ownerAuthored ||
+              !input.runId ||
+              input.threadId !== current.originThreadId ||
+              input.botId !== current.createdByBotId))
+        ) {
+          return {
+            error: "Only the ticket creator or its original owner chat can change requirements.",
+          };
+        }
+        const source = await tx.message.findFirst({
+          where: {
+            id: current.originMessageId,
+            threadId: current.originThreadId,
+            role: "user",
+            authorUserId: input.userId,
+            thread: {
+              spaceId: input.spaceId,
+              externalConversationId: null,
+              OR: [
+                {
+                  botId: current.createdByBotId,
+                  bot: { userId: input.userId, archivedAt: null },
+                },
+                {
+                  group: {
+                    spaceId: input.spaceId,
+                    archivedAt: null,
+                    members: {
+                      some: {
+                        botId: current.createdByBotId,
+                        bot: { userId: input.userId, archivedAt: null },
+                      },
+                    },
+                  },
+                },
+              ],
+            },
+          },
+          select: { id: true },
+        });
+        if (!source) return { error: "Original request is unavailable." };
+        if (input.botId) {
+          const ownerRun = await tx.run.findFirst({
+            where: {
+              id: input.runId,
+              spaceId: input.spaceId,
+              userId: input.userId,
+              botId: input.botId,
+              threadId: current.originThreadId,
+              OR: [{ ticketId: null }, { ticketId: current.id }],
+              sourceMessage: {
+                threadId: current.originThreadId,
+                role: "user",
+                authorUserId: input.userId,
+              },
+            },
+            select: { id: true },
+          });
+          if (!ownerRun)
+            return { error: "Requirements change does not match its owner execution." };
+        }
+        const saved = TicketFileDeliveryRequirementsSchema.safeParse(
+          current.fileDeliveryRequirements,
+        );
+        if (!saved.success) return { error: "Saved file-delivery requirements are unavailable." };
+        if (saved.data.version !== data.expectedRequirementsVersion)
+          return { error: "Requirements changed. Read ticket_get before revising them." };
+        requirements = {
+          version: saved.data.version + 1,
+          items: data.fileDeliveryRequirements.items,
+        };
+      }
+      if (
+        input.botId &&
+        current.originKey &&
+        ticketReceiptsEnabled() &&
+        data.status &&
+        isTicketCompletedStatus(data.status) &&
+        data.status !== current.status
+      ) {
         return {
-          error: "This execution already belongs to another ticket or is unavailable.",
+          error: "Use ticket_update with result to deliver this work in its original chat.",
         } as const;
       }
-      await tx.run.update({ where: { id: input.runId }, data: { ticketId: current.id } });
-    }
-    const row = await tx.ticket.update({
-      where: {
-        id: current.id,
-        ...(requirements
-          ? {
-              fileDeliveryRequirements: {
-                path: ["version"],
-                equals: data.expectedRequirementsVersion,
-              },
-            }
-          : {}),
-      },
-      data: {
-        ...(data.title !== undefined ? { title: data.title } : {}),
-        ...(data.description !== undefined ? { description: data.description } : {}),
-        ...(data.priority !== undefined ? { priority: data.priority ?? "normal" } : {}),
-        ...(data.assigneeBotId !== undefined ? { assigneeBotId: data.assigneeBotId } : {}),
-        ...(data.status !== undefined
-          ? {
-              status: data.status,
-              completedAt: isTicketCompletedStatus(data.status)
-                ? (current.completedAt ?? new Date())
-                : null,
-            }
-          : {}),
-        ...(requirements
-          ? { fileDeliveryRequirements: requirements, status: "review", completedAt: null }
-          : {}),
-      },
-    });
-    const reassigned =
-      data.assigneeBotId !== undefined && data.assigneeBotId !== current.assigneeBotId;
-    const next =
-      current.originKey &&
-      ticketReceiptsEnabled() &&
-      (reassigned || requirements) &&
-      row.assigneeBotId &&
-      row.assigneeBotId !== input.botId
-        ? await prepareTicketRun(tx, {
+      const continuingDependencies = Boolean(
+        current.managedVersion &&
+          !resuming &&
+          data.dependencies !== undefined &&
+          !requirements &&
+          data.description === undefined &&
+          input.runId &&
+          input.botId === current.assigneeBotId &&
+          (data.assigneeBotId === undefined || data.assigneeBotId === input.botId),
+      );
+      const bindingRun = Boolean(
+        input.runId &&
+          input.botId &&
+          (data.assigneeBotId === input.botId || continuingDependencies),
+      );
+      let adoptingReceiptReply = false;
+      if (bindingRun) {
+        const run = await tx.run.findFirst({
+          where: {
+            id: input.runId,
             spaceId: input.spaceId,
+            botId: input.botId,
+            userId: input.userId,
+            status: "running",
+          },
+          select: {
+            id: true,
+            spaceId: true,
+            userId: true,
+            botId: true,
+            threadId: true,
+            ticketId: true,
+            workControlEpoch: true,
+            workRequirementsVersion: true,
+            sourceMessage: true,
+          },
+        });
+        if (
+          !run ||
+          (run.ticketId && run.ticketId !== current.id) ||
+          (continuingDependencies && run.ticketId !== current.id)
+        ) {
+          return {
+            error: "This execution already belongs to another ticket or is unavailable.",
+          } as const;
+        }
+        // Reply routing can prelink a new owner run before its managed
+        // version is initialized. Only the actual receipt reply may adopt it.
+        adoptingReceiptReply = Boolean(
+          current.managedVersion &&
+            !resuming &&
+            !current.parentTicketId &&
+            current.createdByUserId === input.userId &&
+            current.createdByBotId === input.botId &&
+            current.assigneeBotId === input.botId &&
+            run.threadId === current.originThreadId &&
+            run.ticketId === current.id &&
+            run.workControlEpoch === null &&
+            run.workRequirementsVersion === null &&
+            (await managedReceiptReplyTicketId(tx, run, run.sourceMessage)) === current.id &&
+            (await managedWorkOriginAvailable(tx, current)),
+        );
+        if (
+          current.managedVersion &&
+          !resuming &&
+          !adoptingReceiptReply &&
+          run.ticketId === current.id &&
+          run.workControlEpoch !== current.controlEpoch
+        )
+          throw new ManagedWorkError("This execution belongs to an earlier work control epoch.");
+        if (
+          current.managedVersion &&
+          !resuming &&
+          !adoptingReceiptReply &&
+          run.ticketId === current.id &&
+          run.workRequirementsVersion !== current.requirementsVersion
+        )
+          throw new ManagedWorkError("This execution belongs to an earlier requirements version.");
+        if (adoptingReceiptReply)
+          await tx.ticketComment.create({
+            data: {
+              spaceId: input.spaceId,
+              ticketId: current.id,
+              authorUserId: input.userId,
+              body: blocksToAgentHistoryText(run.sourceMessage!.blocks as MessageBlock[]),
+            },
+          });
+      }
+      if (data.dependencies !== undefined)
+        await setManagedWorkDependenciesInTransaction(tx, {
+          spaceId: input.spaceId,
+          ticketId: current.id,
+          dependencies: data.dependencies,
+        });
+      const row = await tx.ticket.update({
+        where: {
+          id: current.id,
+          ...(requirements
+            ? {
+                fileDeliveryRequirements: {
+                  path: ["version"],
+                  equals: data.expectedRequirementsVersion,
+                },
+              }
+            : {}),
+        },
+        data: {
+          ...(data.title !== undefined ? { title: data.title } : {}),
+          ...(data.description !== undefined ? { description: data.description } : {}),
+          ...(data.priority !== undefined ? { priority: data.priority ?? "normal" } : {}),
+          ...(data.assigneeBotId !== undefined ? { assigneeBotId: data.assigneeBotId } : {}),
+          ...(data.status !== undefined
+            ? {
+                status: data.status,
+                completedAt: isTicketCompletedStatus(data.status)
+                  ? (current.completedAt ?? new Date())
+                  : null,
+              }
+            : {}),
+          ...(resuming
+            ? {
+                stopRequestedAt: null,
+                controlEpoch: { increment: 1 },
+                acceptedRequirementsVersion: null,
+                acceptedReceiptVersion: null,
+              }
+            : {}),
+          ...(requirements
+            ? { fileDeliveryRequirements: requirements, status: "review", completedAt: null }
+            : {}),
+          ...(current.managedVersion &&
+          (requirements ||
+            data.description !== undefined ||
+            data.dependencies !== undefined ||
+            adoptingReceiptReply)
+            ? {
+                requirementsVersion: { increment: 1 },
+                acceptedRequirementsVersion: null,
+                acceptedReceiptVersion: null,
+                status: adoptingReceiptReply ? "doing" : "review",
+                completedAt: null,
+              }
+            : {}),
+        },
+      });
+      if (bindingRun)
+        await tx.run.update({
+          where: { id: input.runId! },
+          data: {
             ticketId: row.id,
-            botId: row.assigneeBotId,
-          })
-        : null;
-    return {
-      row,
-      reassigned,
-      requirementsChanged: Boolean(requirements),
-      preparedRunId: next?.id,
-    };
-  });
+            ...(row.managedVersion
+              ? {
+                  workControlEpoch: row.controlEpoch,
+                  workRequirementsVersion: row.requirementsVersion,
+                }
+              : {}),
+          },
+        });
+      const reassigned =
+        data.assigneeBotId !== undefined && data.assigneeBotId !== current.assigneeBotId;
+      if (
+        row.managedVersion &&
+        (requirements ||
+          data.description !== undefined ||
+          data.dependencies !== undefined ||
+          adoptingReceiptReply)
+      )
+        await recordManagedDependencyChangeInTransaction(tx, {
+          spaceId: row.spaceId,
+          ticketId: row.id,
+          sourceRunId: input.runId,
+        });
+      if (
+        row.managedVersion &&
+        data.status === "blocked" &&
+        input.runId &&
+        input.botId &&
+        input.threadId
+      ) {
+        const actor = await tx.run.findFirst({
+          where: {
+            id: input.runId,
+            spaceId: row.spaceId,
+            userId: input.userId,
+            botId: input.botId,
+            ticketId: row.id,
+            workControlEpoch: row.controlEpoch,
+            workRequirementsVersion: row.requirementsVersion,
+          },
+          select: { id: true },
+        });
+        if (!actor)
+          throw new ManagedWorkError("Blocking work requires its current owner execution.");
+        const decision = await recordWorkEventInTransaction(tx, {
+          spaceId: row.spaceId,
+          userId: input.userId,
+          ticketId: row.id,
+          eventKey: `managed:blocked:${row.id}:${row.controlEpoch}:${input.runId}`,
+          kind: "decision",
+          controlEpoch: row.controlEpoch,
+          targetBotId: input.botId,
+          targetThreadId: input.threadId,
+          sourceRunId: input.runId,
+          payload: { status: "blocked", requirementsVersion: row.requirementsVersion },
+        });
+        await tx.workEvent.update({
+          where: { id: decision.id },
+          data: { status: "handled", handledAt: new Date() },
+        });
+      }
+      if (
+        row.managedVersion &&
+        (reassigned ||
+          requirements ||
+          data.description !== undefined ||
+          data.dependencies !== undefined ||
+          adoptingReceiptReply)
+      ) {
+        const owner = row.assigneeBotId
+          ? await tx.bot.findFirst({
+              where: {
+                id: row.assigneeBotId,
+                spaceId: row.spaceId,
+                userId: input.userId,
+                archivedAt: null,
+              },
+              select: { thread: { select: { id: true } } },
+            })
+          : null;
+        if (owner?.thread && row.assigneeBotId) {
+          const event = await recordWorkEventInTransaction(tx, {
+            spaceId: row.spaceId,
+            userId: input.userId,
+            ticketId: row.id,
+            eventKey: `managed:requirements:${row.id}:${row.controlEpoch}:${row.requirementsVersion}:${row.assigneeBotId}`,
+            kind: "requirements_changed",
+            controlEpoch: row.controlEpoch,
+            targetBotId: row.assigneeBotId,
+            targetThreadId: owner.thread.id,
+            sourceRunId: input.runId,
+            payload: { requirementsVersion: row.requirementsVersion, reassigned },
+          });
+          // The authoring execution already knows this change and holds the
+          // new version. A second wake would repeat the same assignment.
+          if (bindingRun)
+            await tx.workEvent.update({
+              where: { id: event.id },
+              data: { status: "handled", wakeRunId: input.runId!, handledAt: new Date() },
+            });
+        }
+      }
+      const next =
+        current.originKey &&
+        ticketReceiptsEnabled() &&
+        (reassigned || requirements) &&
+        row.assigneeBotId &&
+        row.assigneeBotId !== input.botId
+          ? await prepareTicketRun(tx, {
+              spaceId: input.spaceId,
+              ticketId: row.id,
+              botId: row.assigneeBotId,
+            })
+          : null;
+      return {
+        row,
+        reassigned,
+        requirementsChanged: Boolean(requirements),
+        preparedRunId: next?.id,
+      };
+    })
+    .catch((error: unknown) => {
+      if (error instanceof ManagedWorkError) return { error: error.message };
+      throw error;
+    });
   if (!result) return { error: "Ticket not found." };
   if (result.error !== undefined) return { error: result.error };
   await deps.onTicketChange?.({

@@ -318,12 +318,10 @@ export function CompatibleModelFields({
           setThinkingLevel(value as ThinkingLevel | null);
           setNotice(null);
         }}
-        thinkingLevelOptions={compatibleEffortLevels
-          .filter((level) => level !== "off")
-          .map((level) => ({
-            value: level,
-            label: thinkingLevelLabels[level],
-          }))}
+        thinkingLevelOptions={compatibleEffortLevels.map((level) => ({
+          value: level,
+          label: thinkingLevelLabels[level],
+        }))}
         thinkingLevelLabel={t`Reasoning effort`}
         thinkingLevelDefaultLabel={t`Default`}
         maxTokens={maxTokens}

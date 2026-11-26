@@ -7,7 +7,6 @@ import {
   CALL_CLIENT_NONCE_PREFIX,
   callClientNonce,
   expandSkillReferencesInPrompt,
-  MODEL_REQUIRED_SEND_ERROR,
   QUEUE_HOLDING_RUN_STATUSES,
 } from "@rakazo/core";
 import type { ClearThreadInput, Prisma } from "@rakazo/db";
@@ -22,11 +21,14 @@ import {
   lockSpaceGroup,
   MemoryArchiveStore,
   THREAD_LOCK_TRANSACTION_OPTIONS,
+  ThreadArchiveCoverageError,
   ThreadClearConflictError,
+  ThreadClearStorageError,
   touchGroupUpdatedAt,
   withTransactionRetry,
 } from "@rakazo/db";
 import { getLogger } from "@rakazo/logging";
+import { removeArtifactBlob } from "../artifacts.js";
 import { releaseComputerControl } from "../computer-control.js";
 import type { RouterDeps } from "../router.js";
 import { createRoutineTestRun, routineTestRunNonce, routineTestTarget } from "../routines.js";
@@ -46,7 +48,7 @@ import {
   setThreadUnreadState,
 } from "../thread-read-state.js";
 import { threadSnapshot } from "../thread-snapshot.js";
-import { isStopMessage, stopThreadRuns } from "../thread-stop.js";
+import { stopThreadRuns } from "../thread-stop.js";
 import type { ThreadTarget } from "../thread-target.js";
 import {
   replyParentBotId,
@@ -115,15 +117,13 @@ export function threadsRoutes(ctx: RouterContext) {
   ) => {
     const setup = await modelSetup(deps, actor);
     const target = await resolveThreadTarget(deps.prisma, actor, input);
-    // A bot with its own runnable model needs no main model, and stopping work needs none.
+    // A bot with its own runnable model needs no main model. The transaction also admits
+    // stops and answers to managed work without a model.
     const replied =
       target.kind === "group" ? await replyParentBotId(deps.prisma, target, input) : undefined;
     const noModel =
       setup.needsModel &&
       !(await botsRunOwnModels(deps, actor, sendTargetBotIds(target, input, replied)));
-    if (noModel && !isStopMessage(input)) {
-      throw new ORPCError("BAD_REQUEST", { message: MODEL_REQUIRED_SEND_ERROR });
-    }
     if (target.kind === "bot") {
       await assertTeachingSendAllowed(deps.prisma, actor.spaceId, target.botId);
     }
@@ -184,35 +184,37 @@ export function threadsRoutes(ctx: RouterContext) {
           input.includePeerReceipts,
         );
       }),
-      subscribe: authed.threads.subscribe.handler(async function* ({ context, input }) {
+      subscribe: authed.threads.subscribe.handler(async ({ context, input }) => {
         const target = await resolveThreadTarget(deps.prisma, context.actor, input);
-        const peerRunCache = new Map<string, Promise<boolean>>();
-        const backgroundRunCache = new Map<string, Promise<boolean>>();
-        const events = withHeartbeats(context, (signal) =>
-          deps.events.follow(target.threadId, input.cursor, signal),
-        );
-        for await (const event of events) {
-          if (event === HEARTBEAT) {
-            yield {
-              id: "heartbeat",
-              spaceId: context.actor.spaceId,
-              threadId: target.threadId,
-              // A bot thread's id is not the bot. Groups have no single bot, so the thread id stands in.
-              botId: target.kind === "bot" ? target.botId : target.threadId,
-              seq: 0,
-              type: "heartbeat",
-              createdAt: new Date().toISOString(),
-              payload: {},
-            };
-            continue;
+        return (async function* () {
+          const peerRunCache = new Map<string, Promise<boolean>>();
+          const backgroundRunCache = new Map<string, Promise<boolean>>();
+          const events = withHeartbeats(context, (signal) =>
+            deps.events.follow(target.threadId, input.cursor, signal),
+          );
+          for await (const event of events) {
+            if (event === HEARTBEAT) {
+              yield {
+                id: "heartbeat",
+                spaceId: context.actor.spaceId,
+                threadId: target.threadId,
+                // A bot thread's id is not the bot. Groups have no single bot, so the thread id stands in.
+                botId: target.kind === "bot" ? target.botId : target.threadId,
+                seq: 0,
+                type: "heartbeat",
+                createdAt: new Date().toISOString(),
+                payload: {},
+              };
+              continue;
+            }
+            if (await isPeerRun(deps.prisma, event.runId, peerRunCache)) {
+              if (!shouldForwardPeerThreadEvent(event)) continue;
+            } else if (await isBackgroundRun(deps.prisma, event.runId, backgroundRunCache)) {
+              if (!shouldForwardBackgroundThreadEvent(event)) continue;
+            }
+            yield event;
           }
-          if (await isPeerRun(deps.prisma, event.runId, peerRunCache)) {
-            if (!shouldForwardPeerThreadEvent(event)) continue;
-          } else if (await isBackgroundRun(deps.prisma, event.runId, backgroundRunCache)) {
-            if (!shouldForwardBackgroundThreadEvent(event)) continue;
-          }
-          yield event;
-        }
+        })();
       }),
       send: authed.threads.send.handler(({ context, input }) => send(context.actor, input)),
       sendWithRoutines: authed.threads.sendWithRoutines.handler(async ({ context, input }) => {
@@ -320,8 +322,10 @@ export function threadsRoutes(ctx: RouterContext) {
         const target = await resolveThreadTarget(deps.prisma, context.actor, input);
         const contextBotId = target.kind === "bot" ? target.botId : target.memberBotIds[0];
         if (!contextBotId) throw new IsolationError();
-        let clearFence: Pick<ClearThreadInput, "expectedGeneration" | "expectedNextMessageSeq"> =
-          {};
+        let clearFence: Pick<
+          ClearThreadInput,
+          "expectedGeneration" | "expectedNextMessageSeq" | "archiveCoverage"
+        > = {};
         if (
           target.kind === "bot" &&
           target.bot.userId === context.actor.userId &&
@@ -340,9 +344,10 @@ export function threadsRoutes(ctx: RouterContext) {
             ]),
           };
           const archive = new MemoryArchiveStore(deps.prisma);
+          let observed: { generation: number; nextMessageSeq: number };
           if (deps.archiveConversationMemory) {
             await stopThreadRuns(deps, context.actor, target);
-            const prepared = await archive.prepareClear(archiveInput, archiveContext);
+            observed = await archive.prepareClear(archiveInput, archiveContext);
             try {
               await deps.archiveConversationMemory(archiveInput, archiveContext, { force: true });
             } catch (error) {
@@ -352,15 +357,19 @@ export function threadsRoutes(ctx: RouterContext) {
                 cause: error,
               });
             }
-            clearFence = {
-              expectedGeneration: prepared.generation,
-              expectedNextMessageSeq: prepared.nextMessageSeq,
-            };
-          } else if (await archive.hasPending(archiveInput, archiveContext)) {
-            throw new ORPCError("SERVICE_UNAVAILABLE", {
-              message: "Memory archiving is unavailable. No messages were deleted.",
-            });
+          } else {
+            observed = await archive.observeClear(archiveInput, archiveContext);
           }
+          clearFence = {
+            expectedGeneration: observed.generation,
+            expectedNextMessageSeq: observed.nextMessageSeq,
+            archiveCoverage:
+              deps.archiveConversationMemory ||
+              process.env.RAKAZO_MEMORY_EXTRACTOR_PYTHON?.trim() ||
+              process.env.RAKAZO_MEMORY_EXTRACTOR_SCRIPT?.trim()
+                ? "required"
+                : "if-activated",
+          };
         }
         const { cancelledRunIds, historyCompactionGeneration } = await deps.events
           .clearThread({
@@ -369,27 +378,21 @@ export function threadsRoutes(ctx: RouterContext) {
             botId: contextBotId,
             ...(target.kind === "group" ? { groupId: target.groupId } : {}),
             ...clearFence,
+            removeTicketImprovementFile: (file) =>
+              removeArtifactBlob(deps.artifacts, context.actor, file),
           })
           .catch((error) => {
             if (error instanceof ThreadClearConflictError) {
               throw new ORPCError("CONFLICT", { message: error.message, cause: error });
             }
+            if (
+              error instanceof ThreadArchiveCoverageError ||
+              error instanceof ThreadClearStorageError
+            ) {
+              throw new ORPCError("SERVICE_UNAVAILABLE", { message: error.message, cause: error });
+            }
             throw error;
           });
-        // clearThread returns the retired generation. The store validates each
-        // history save against the thread row, so no late write can revive it.
-        const semanticFacts = deps.semanticFacts;
-        if (semanticFacts) {
-          const botIds = target.kind === "bot" ? [target.botId] : target.memberBotIds;
-          await Promise.all(
-            botIds.map((botId) =>
-              semanticFacts.purgeHistory(
-                { botId, threadId: target.threadId, generations: [historyCompactionGeneration] },
-                computerContext(context.actor, botId, `thread-clear:${target.threadId}`),
-              ),
-            ),
-          );
-        }
         const [configuredMemory] = await Promise.all([
           target.kind === "bot"
             ? deps.memoryProviders.resolve(context.actor.spaceId).catch((error) => {
@@ -405,12 +408,10 @@ export function threadsRoutes(ctx: RouterContext) {
         ]);
         // Managed facts were fenced above. Legacy providers keep their best-effort
         // purge of the cleared and preceding summary generations; never purge the new one.
-        if (
-          configuredMemory &&
-          target.kind === "bot" &&
-          !configuredMemory.provider.describe().capabilities.managedFacts
-        ) {
+        if (configuredMemory && target.kind === "bot") {
           try {
+            if (configuredMemory.provider.describe().capabilities.managedFacts)
+              return { ok: true as const };
             const purged = await configuredMemory.provider.purgeHistory(
               {
                 botId: target.botId,
@@ -716,10 +717,15 @@ export function threadsRoutes(ctx: RouterContext) {
             message: "This prompt is no longer awaiting an answer",
           });
         }
-        await deps.jobs.enqueue(runContinueJob(input.runId)).catch((error) => {
-          // The answer and queued run are durable; the reconciler repairs a missed immediate wake.
-          getLogger().error("thread answer enqueue", error);
+        const ready = await deps.prisma.run.findFirst({
+          where: { id: input.runId, spaceId: context.actor.spaceId, status: "queued" },
+          select: { id: true },
         });
+        if (ready)
+          await deps.jobs.enqueue(runContinueJob(input.runId)).catch((error) => {
+            // The answer and queued run are durable; the reconciler repairs a missed immediate wake.
+            getLogger().error("thread answer enqueue", error);
+          });
         return { ok: true as const };
       }),
       markRead: authed.threads.markRead.handler(async ({ context, input }) => {

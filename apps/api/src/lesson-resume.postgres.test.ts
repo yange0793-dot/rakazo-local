@@ -13,7 +13,6 @@ import {
   LocalArtifactStore,
   ScriptedAgentRuntime,
 } from "@rakazo/adapters";
-import type { MessageBlock } from "@rakazo/contracts";
 import {
   createDb,
   createThreadEvents,
@@ -22,6 +21,7 @@ import {
   runAsSystem,
   runAsTenant,
   saveAutoReviewPreference,
+  SemanticFactStore,
 } from "@rakazo/db";
 import { MarkdownMemoryStore } from "@rakazo/memory";
 import { describe, expect, it, vi } from "vitest";
@@ -31,7 +31,7 @@ const pg =
   process.env.VERIFY_DATABASE === "1" && process.env.DATABASE_URL ? describe : describe.skip;
 
 pg("learning after an approval (PostgreSQL)", () => {
-  it.each([true, false])("recovers only a claimed correction (corrected=%s)", async (corrected) => {
+  it.each([true, false])("saves only a claimed correction (corrected=%s)", async (corrected) => {
     const db = createDb(process.env.DATABASE_URL!);
     const { prisma } = db;
     const dataDir = await mkdtemp(join(tmpdir(), "rakazo-lesson-resume-"));
@@ -40,22 +40,12 @@ pg("learning after an approval (PostgreSQL)", () => {
     let identity: Awaited<ReturnType<typeof provisionMessagingIdentity>> | undefined;
     try {
       identity = await runAsSystem("lesson resume fixture", () =>
-        provisionMessagingIdentity(
-          prisma,
-          { provider: "email", address },
-        ),
+        provisionMessagingIdentity(prisma, { provider: "email", address }),
       );
       const { spaceId, userId, botId, threadId } = identity;
       const actor = { spaceId, userId, email: address, isDeploymentOwner: false };
       await runAsTenant(actor, async () => {
-        await prisma.$transaction((tx) =>
-          saveAutoReviewPreference(
-            tx,
-            actor,
-            { enabled: false },
-            { enabled: false, skipApprovals: false },
-          ),
-        );
+        await prisma.$transaction((tx) => saveAutoReviewPreference(tx, actor, { mode: "ask" }));
         const queued: BackgroundJob[] = [];
         const jobs: JobPublisher = {
           enqueue: async (job) => {
@@ -174,7 +164,11 @@ pg("learning after an approval (PostgreSQL)", () => {
           blocks: [{ kind: "text", text: unrelated }],
         });
         await executor.continueRun(runId, "after-approval");
-        expect(await status()).toMatchObject({ status: "completed", tainted: true });
+        expect(await status()).toMatchObject({
+          status: "completed",
+          tainted: true,
+          learningSourceChecked: true,
+        });
         expect(turn).toBe(2);
         expect(web.lastFetch?.url).toBe("https://example.test/ledger");
         expect(await prisma.steeringMessage.count({ where: { runId } })).toBe(0);
@@ -196,17 +190,37 @@ pg("learning after an approval (PostgreSQL)", () => {
         expect(prompts).toHaveLength(1);
         expect(prompts[0]).toContain(`<user_steering>\n${fix}\n</user_steering>`);
         expect(prompts[0]).not.toContain(unrelated);
-        const draft = await prisma.message.findUniqueOrThrow({
-          where: { threadId_clientNonce: { threadId, clientNonce: `reflect-lesson:${runId}` } },
-        });
-        expect(draft.blocks as unknown as MessageBlock[]).toMatchObject([
+        const { items } = await new SemanticFactStore(prisma).list(
+          { botId, scope: "isolated", kind: "lesson" },
           {
-            kind: "lesson_draft",
-            status: "draft",
-            signals: ["user_steering"],
-            evidence: { kind: "user_steering", quote: fix, messageId: correctionId },
+            spaceId,
+            userId,
+            botId,
+            operationId: runId,
+            traceId: runId,
+            signal: new AbortController().signal,
+          },
+        );
+        expect(items).toMatchObject([
+          {
+            content: `cue: Project net total\nlesson: ${fix}`,
+            provenance: {
+              kind: "run",
+              runId,
+              threadId,
+              harness: {
+                autoApplied: true,
+                signals: ["user_steering"],
+                evidence: { kind: "user_steering", quote: fix, messageId: correctionId },
+              },
+            },
           },
         ]);
+        expect(
+          await prisma.message.findUnique({
+            where: { threadId_clientNonce: { threadId, clientNonce: `reflect-lesson:${runId}` } },
+          }),
+        ).toBeNull();
       });
     } finally {
       vi.unstubAllEnvs();

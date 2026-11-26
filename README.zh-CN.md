@@ -1,5 +1,7 @@
 # Rakazo
 
+本仓库是基于 [上游 Rakazo](https://github.com/elie222/rakazo) 持续开发的本地版本。改动范围和本地运行脚本见 [本地版本说明](LOCAL_VERSION.md)。保留原项目署名与许可。
+
 [English](./README.md) | [简体中文](./README.zh-CN.md) | [日本語](./README.ja.md)
 
 [![GitHub stars](https://img.shields.io/github/stars/elie222/rakazo?labelColor=black&style=for-the-badge&color=2563EB)](https://github.com/elie222/rakazo/stargazers)
@@ -292,7 +294,7 @@ infra/      本地服务和计算机镜像
 docs/       架构、运维和发布指南
 ```
 
-常用检查命令：
+可用检查命令（按改动选择，无需每次全部运行）：
 
 ```bash
 pnpm lint

@@ -181,6 +181,51 @@ describe("current image send admission", () => {
       });
   });
 
+  it("accepts a compatible model whose managed catalog declares image input", async () => {
+    const { tx, send } = fixture();
+    tx.bot.findFirst.mockResolvedValue({
+      id: "bot-1",
+      modelProvider: "openai-compatible",
+      modelId: "custom-model",
+    });
+    tx.userModelCredential.findFirst.mockResolvedValue({
+      id: "credential-1",
+      provider: "openai-compatible",
+      secretId: "secret-1",
+      supportsImages: false,
+    });
+    await expect(
+      send({
+        deployment: null,
+        secrets: {
+          load: vi.fn(async () =>
+            JSON.stringify({
+              kind: "openai_compatible",
+              baseUrl: "https://model.example.test/v1",
+              enabledModelIds: ["custom-model"],
+              managedCatalog: {
+                sourceId: "mixrouter",
+                sourceLabel: "MixRouter",
+                group: "default",
+                providerId: "router-channel",
+                providerLabel: "Router channel",
+                availableModelIds: ["router-channel/gpt-6-astra"],
+                unavailableModelIds: [],
+                aliases: { "custom-model": "router-channel/gpt-6-astra" },
+                capabilities: {
+                  "router-channel/gpt-6-astra": {
+                    source: "declared",
+                    supportsImages: true,
+                  },
+                },
+              },
+            }),
+          ),
+        },
+      }),
+    ).resolves.toMatchObject({ runId: "run-1" });
+  });
+
   it.each([true, false])(
     "uses the Codex account catalog for a live-only model's image input (%s)",
     async (supportsImages) => {

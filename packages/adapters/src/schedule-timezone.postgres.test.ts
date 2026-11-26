@@ -342,10 +342,12 @@ describePostgres("moving routines with the account timezone (PostgreSQL)", () =>
         const moving = ops.track(save(userId, "Europe/London", spaces[0]!));
         // Only once the save provably waits on the claimed row does the claim advance it.
         await waitForBlockedOn(monitor, own[0]!.pid, "the zone save", deadline);
-        await client.query('UPDATE routines SET "nextRunAt" = $2 WHERE id = $1', [
-          routine.id,
-          claimed,
-        ]);
+        // The column stores UTC wall time without an offset. The raw pg client would
+        // otherwise serialize Date in the test process's local timezone.
+        await client.query(
+          `UPDATE routines SET "nextRunAt" = $2::timestamptz AT TIME ZONE 'UTC' WHERE id = $1`,
+          [routine.id, claimed.toISOString()],
+        );
         await client.query("COMMIT");
         await moving;
       } finally {

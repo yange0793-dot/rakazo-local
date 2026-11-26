@@ -17,9 +17,10 @@ import {
   appendEventInTransaction,
   clearEndedRunState,
   createThreadMessageInTransaction,
+  deleteTransientRunEvents,
   expireComputerExecutionLeases,
+  requestManagedWorkStopInTransaction,
   THREAD_LOCK_TRANSACTION_OPTIONS,
-  transientRunEventsWhere,
 } from "@rakazo/db";
 import { getLogger } from "@rakazo/logging";
 import type { ThreadTarget } from "./thread-target.js";
@@ -75,11 +76,21 @@ export function cancelThreadRuns(
   };
   return async (tx: Prisma.TransactionClient) => {
     await tx.$queryRaw`SELECT id FROM threads WHERE id = ${target.threadId} FOR UPDATE`;
+    const owner = !helperMessageId
+      ? await tx.thread.findUnique({ where: { id: target.threadId }, select: { userId: true } })
+      : null;
+    const managed = owner
+      ? await requestManagedWorkStopInTransaction(tx, {
+          spaceId: actor.spaceId,
+          userId: owner.userId,
+          threadId: target.threadId,
+        })
+      : { ticketIds: [], runIds: [], executionIds: [] };
     const cancelled = await tx.run.updateManyAndReturn({
       where: {
         ...(helperMessageId
           ? { ...helpers, sourceMessageId: helperMessageId }
-          : { OR: [{ threadId: target.threadId }, helpers] }),
+          : { OR: [{ threadId: target.threadId }, helpers, { id: { in: managed.runIds } }] }),
         status: { in: [...ACTIVE_RUN_STATUSES] },
       },
       data: { status: "cancelled", completedAt: new Date() },
@@ -168,8 +179,15 @@ export function cancelThreadRuns(
     ];
     const notes = [
       ...routineNotes,
-      ...(note && cancelled.some((run) => !named(run))
-        ? [{ botId: note.botId, text: STOPPED_BY_MESSAGE_NOTE }]
+      ...(note && (cancelled.some((run) => !named(run)) || managed.executionIds.length)
+        ? [
+            {
+              botId: note.botId,
+              text: managed.executionIds.length
+                ? "Stopping linked work. Waiting for execution confirmation."
+                : STOPPED_BY_MESSAGE_NOTE,
+            },
+          ]
         : []),
     ];
     for (const { botId, text } of notes) {
@@ -190,12 +208,7 @@ export function cancelThreadRuns(
       eventSeq = event.seq;
     }
     if (ids.length) {
-      await tx.event.deleteMany({
-        where: {
-          ...transientRunEventsWhere(),
-          runId: { in: ids },
-        },
-      });
+      await deleteTransientRunEvents(tx, { in: ids });
     }
     return {
       runIds: ids,

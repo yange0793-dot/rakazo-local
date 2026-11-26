@@ -154,6 +154,8 @@ describeAttachments("chat attachments", () => {
 
   it("attaches a workspace file into the thread", async () => {
     const scope = await testSpace(app, "Attach Thread User");
+    await rpc(app, scope, "spaceSettings/setOverride", { setting: "confirmations", enabled: true });
+    await rpc(app, scope, "autoReview/set", { mode: "bypermission" });
     const bot = await rpc<{ id: string }>(app, scope, "bots/create", {
       name: "Attacher",
       title: "Attacher",

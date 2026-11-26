@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 import type { AdapterContext, AgentRunRequest, SandboxProvider } from "@rakazo/adapter-kit";
-import type { ImprovementComponentSet } from "@rakazo/contracts";
+import type { ApprovalMode, ImprovementComponentSet } from "@rakazo/contracts";
 import type { ActionApprovalRule } from "@rakazo/core";
 import type { DataKey, PrismaClient, ThreadEvents } from "@rakazo/db";
 import { isCiphertext, isSealedArtifact, loadRunTurnCheckpoint } from "@rakazo/db";
@@ -89,7 +89,7 @@ function fixture(
     runtimeFallback?: boolean;
     ticketTools?: "create" | "claim";
     approvalRules?: ActionApprovalRule[];
-    skipApprovals?: boolean;
+    approvalMode?: ApprovalMode;
     encryptReadEffects?: boolean;
     modelTools?: readonly { name: string; args: Row }[];
     onRuntime?: (request: AgentRunRequest) => Promise<void>;
@@ -124,7 +124,7 @@ function fixture(
     createdAt: now,
     updatedAt: now,
   };
-  const ticketDefaults = {
+  const ticketAsks = {
     id: "fixture-ticket",
     spaceId: run.spaceId,
     boardId: board.id,
@@ -145,7 +145,7 @@ function fixture(
     options.ticketTools === "claim"
       ? [
           {
-            ...ticketDefaults,
+            ...ticketAsks,
             createdByUserId: run.userId,
             createdByBotId: run.botId,
             assigneeBotId: "fixture-peer",
@@ -156,7 +156,7 @@ function fixture(
           },
         ]
       : run.ticketId
-        ? [{ ...ticketDefaults }]
+        ? [{ ...ticketAsks }]
         : [];
   const key: DataKey = {
     id: "fixture-artifact-key",
@@ -197,6 +197,7 @@ function fixture(
     return row;
   });
   const lessonUsage = vi.fn(async () => ({ count: 1 }));
+  let lessonRevision = 3;
   const revision = {
     id: "fixture-skill-revision",
     skillId: "fixture-skill",
@@ -413,8 +414,7 @@ function fixture(
     },
     userActionAutoReviewPreference: {
       ...empty,
-      findUnique: async () =>
-        options.skipApprovals ? { enabled: false, skipApprovals: true } : null,
+      findUnique: async () => (options.approvalMode ? { mode: options.approvalMode } : null),
     },
     chatGroup: empty,
     message: {
@@ -457,7 +457,7 @@ function fixture(
       findFirst: async ({ where }: Query) =>
         tickets.find((ticket) => matches(ticket, where)) ?? null,
       create: async ({ data }: { data: Row }) => {
-        const ticket = { ...ticketDefaults, ...data };
+        const ticket = { ...ticketAsks, ...data };
         tickets.push(ticket);
         return ticket;
       },
@@ -602,8 +602,8 @@ function fixture(
                       ? [
                           {
                             id: "fixture-lesson",
-                            revision: 3,
-                            memory: "cue: Private lesson cue\nlesson: Private lesson text",
+                            revision: lessonRevision,
+                            memory: `cue: Private lesson cue\nlesson: Private lesson text r${lessonRevision}`,
                           },
                         ]
                       : [],
@@ -649,6 +649,9 @@ function fixture(
     listFiles,
     finalizeRun,
     lessonUsage,
+    setLessonRevision: (revision: number) => {
+      lessonRevision = revision;
+    },
     events,
     read,
   };
@@ -796,6 +799,29 @@ describe("executor configuration receipts", () => {
       if (kind === "lesson") expect(state.lessonUsage).toHaveBeenCalledOnce();
     },
   );
+
+  it("does not record a lesson when runtime setup fails before calling Pi", async () => {
+    const state = fixture({
+      ticket: false,
+      lesson: true,
+      onRuntime: async (request) => {
+        expect(request.prompt).toContain("Private lesson text r3");
+        await request.onUsage!({
+          type: "usage",
+          provider: request.model.provider,
+          model: request.model.id,
+          inputTokens: null,
+          outputTokens: null,
+        });
+        throw new Error("Fixture runtime setup failed");
+      },
+    });
+    await state.execute();
+    expect(state.runtimeRun).toHaveBeenCalledOnce();
+    expect(state.modelFetch).not.toHaveBeenCalled();
+    expect(state.lessonUsage).not.toHaveBeenCalled();
+    expect(state.put).not.toHaveBeenCalled();
+  });
 
   it("executes the pinned script before the first Pi request and only once across repeated skill reads", async () => {
     const capabilityId = "isolated.snapshot.read_file";
@@ -1010,6 +1036,7 @@ describe("executor configuration receipts", () => {
       const state = fixture({
         ticket: false,
         pin: true,
+        lesson: true,
         encryptReadEffects: name === "read_file",
         components: {
           schemaVersion: "improvement-components.v1",
@@ -1034,6 +1061,7 @@ describe("executor configuration receipts", () => {
 
       expect(io).not.toHaveBeenCalled();
       expect(state.modelFetch).not.toHaveBeenCalled();
+      expect(state.lessonUsage).not.toHaveBeenCalled();
       expect(state.run.status).toBe("waiting_input");
       const pending = await effects();
       expect(pending).toEqual([expect.objectContaining({ status: "intended", request: { path } })]);
@@ -1052,6 +1080,7 @@ describe("executor configuration receipts", () => {
       await state.execute();
 
       expect(state.run.status).toBe("completed");
+      expect(state.lessonUsage).toHaveBeenCalledOnce();
       expect(io).toHaveBeenCalledOnce();
       expect(io.mock.calls[0]?.[1]).toBe(path);
       const completed = await effects();
@@ -1083,6 +1112,7 @@ describe("executor configuration receipts", () => {
     const state = fixture({
       ticket: false,
       pin: true,
+      lesson: true,
       encryptReadEffects: true,
       components: {
         schemaVersion: "improvement-components.v1",
@@ -1111,6 +1141,10 @@ describe("executor configuration receipts", () => {
     expect(state.readFile).toHaveBeenCalledOnce();
     expect(state.listFiles).not.toHaveBeenCalled();
     expect(state.modelFetch).toHaveBeenCalledOnce();
+    expect(state.lessonUsage).toHaveBeenCalledExactlyOnceWith({
+      data: [expect.objectContaining({ lessonId: "fixture-lesson", firstRevision: 3 })],
+      skipDuplicates: true,
+    });
     const checkpoint = (await loadRunTurnCheckpoint(state.prisma, state.run))!;
     expect(JSON.parse(checkpoint)).toMatchObject({
       systemPrompt: expect.stringContaining(observation),
@@ -1138,6 +1172,7 @@ describe("executor configuration receipts", () => {
       data: { status: "approved" },
     });
     state.run.status = "queued";
+    state.setLessonRevision(4);
     await state.execute("replacement-worker");
 
     expect(state.run.status).toBe("completed");
@@ -1153,6 +1188,9 @@ describe("executor configuration receipts", () => {
     ]);
     expect(state.modelFetch).toHaveBeenCalledTimes(2);
     const wire = JSON.parse(String(state.modelFetch.mock.calls[1]?.[1]?.body));
+    expect(JSON.stringify(wire)).toContain("Private lesson text r3");
+    expect(JSON.stringify(wire)).not.toContain("Private lesson text r4");
+    expect(state.lessonUsage).toHaveBeenCalledOnce();
     expect(wire.messages).toEqual(
       expect.arrayContaining([
         expect.objectContaining({ role: "system", content: expect.stringContaining(observation) }),
@@ -1193,18 +1231,26 @@ describe("executor configuration receipts", () => {
     ]);
   });
 
-  it.each(["require_approval", "deny"] as const)(
-    "honors Never ask for workspace reads under a %s rule",
-    async (effect) => {
+  it.each([
+    ["require_approval", "ask"],
+    ["require_approval", "bypermission"],
+    ["deny", "bypermission"],
+  ] as const)(
+    "honors explicit %s rules for workspace reads under %s approval mode",
+    async (effect, approvalMode) => {
       const names = ["read_file", "list_files"];
       const blocked = effect === "deny";
       const state = fixture({
         ticket: false,
-        skipApprovals: true,
+        approvalMode,
         approvalRules: names.map((matchValue) => ({ effect, matchKind: "tool", matchValue })),
         onRuntime: async (request) => {
           for (const name of names) {
             const result = await request.executeTool!(name, { path: "notes" }, name);
+            if (approvalMode === "ask") {
+              expect(result).toMatchObject({ details: { approval: "paused" } });
+              return;
+            }
             expect(result).toMatchObject(
               blocked ? { error: expect.stringContaining("blocked") } : { path: "notes" },
             );
@@ -1212,6 +1258,12 @@ describe("executor configuration receipts", () => {
         },
       });
       await state.execute();
+      if (approvalMode === "ask") {
+        expect(state.run.status).toBe("waiting_input");
+        expect(state.readFile).not.toHaveBeenCalled();
+        expect(state.listFiles).not.toHaveBeenCalled();
+        return;
+      }
       expect(state.run.status).toBe("completed");
       expect(state.readFile).toHaveBeenCalledTimes(blocked ? 0 : 1);
       expect(state.listFiles).toHaveBeenCalledTimes(blocked ? 0 : 1);

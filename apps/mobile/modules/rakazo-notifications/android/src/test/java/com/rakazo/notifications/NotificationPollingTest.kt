@@ -232,29 +232,38 @@ class NotificationPollingTest {
     val load = { reads++; "token-$reads" }
     val commit: (() -> Unit) -> Boolean = { it(); true }
 
-    assertEquals("token-1", cache.getOrLoad(load, commit))
-    repeat(5) { assertEquals("token-1", cache.getOrLoad(load, commit)) }
+    assertEquals("token-1", cache.getOrLoad("stored", load, commit))
+    repeat(5) { assertEquals("token-1", cache.getOrLoad("stored", load, commit)) }
     assertEquals(1, reads)
     cache.reset()
-    assertEquals("token-2", cache.getOrLoad(load, commit))
+    assertEquals("token-2", cache.getOrLoad("stored", load, commit))
     assertEquals(2, reads)
   }
 
   @Test
   fun `obsolete generation cannot cache a token loaded during reset`() {
     val cache = PollTokenCache()
-    assertNull(cache.getOrLoad({ cache.reset(); "obsolete" }) { false })
-    assertEquals("current", cache.getOrLoad({ "current" }) { it(); true })
-    assertEquals("current", cache.getOrLoad({ error("must reuse token") }) { it(); true })
+    assertNull(cache.getOrLoad("stored", { cache.reset(); "obsolete" }) { false })
+    assertEquals("current", cache.getOrLoad("stored", { "current" }) { it(); true })
+    assertEquals("current", cache.getOrLoad("stored", { error("must reuse token") }) { it(); true })
   }
 
   @Test
   fun `blank tokens remain cached until reset`() {
     val cache = PollTokenCache()
-    assertEquals("", cache.getOrLoad({ "" }) { it(); true })
-    assertEquals("", cache.getOrLoad({ error("must reuse blank token") }) { it(); true })
+    assertEquals("", cache.getOrLoad(null, { "" }) { it(); true })
+    assertEquals("", cache.getOrLoad(null, { error("must reuse blank token") }) { it(); true })
     cache.reset()
-    assertEquals("new", cache.getOrLoad({ "new" }) { it(); true })
+    assertEquals("new", cache.getOrLoad("stored", { "new" }) { it(); true })
+  }
+
+  @Test
+  fun `changing the stored token invalidates the cached token`() {
+    val cache = PollTokenCache()
+    val commit: (() -> Unit) -> Boolean = { it(); true }
+    assertEquals("first", cache.getOrLoad("stored-1", { "first" }, commit))
+    assertEquals("second", cache.getOrLoad("stored-2", { "second" }, commit))
+    assertEquals("", cache.getOrLoad(null, { "" }, commit))
   }
 
   @Test

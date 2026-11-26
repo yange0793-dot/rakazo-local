@@ -22,6 +22,7 @@ import { appliedModelRole, findModelCredential, findModelCredentialById } from "
 type ModelChoice = {
   modelProvider: string | null;
   modelId: string | null;
+  modelCredentialId?: string | null;
   thinkingLevel: string | null;
 };
 export type ImageAdmissionRun = ModelChoice & {
@@ -47,7 +48,7 @@ export async function assertThreadImageInput(
   if (!blocks.some((block) => block.kind === "image")) return;
   const bot = await prisma.bot.findFirst({
     where: { id: botId, spaceId: actor.spaceId },
-    select: { modelProvider: true, modelId: true, thinkingLevel: true },
+    select: { modelProvider: true, modelId: true, modelCredentialId: true, thinkingLevel: true },
   });
   if (!bot) return;
   // A running turn has already selected its model, including any backup switch.
@@ -62,9 +63,19 @@ export async function assertThreadImageInput(
             actor,
             override.modelProvider,
             override.modelId,
+            { credentialId: override.modelCredentialId },
           )
-        : await findModelCredential(prisma, actor, override.modelProvider, override.modelId)
+        : override.modelCredentialId
+          ? await findModelCredentialById(
+              prisma,
+              actor,
+              override.modelCredentialId,
+              override.modelProvider,
+            )
+          : await findModelCredential(prisma, actor, override.modelProvider, override.modelId)
       : null;
+  if (override.modelCredentialId && !overrideCredential)
+    throw new ORPCError("CONFLICT", { message: "Connect that model provider first" });
   const selected = selectConfiguredModel({
     override,
     overrideCredential,
@@ -96,13 +107,19 @@ export async function assertThreadImageInput(
         if (secret.kind === "openai_compatible") {
           // A custom endpoint is never known to be text-only: without image input turned on,
           // its capability is unknown, so the user is asked to configure it.
-          supportsImages =
-            modelAcceptsImageInput(provider, id) ||
-            modelIdSupportsImages(secret.visionModelIds, id) ||
-            (secret.visionModelIds === undefined &&
-              credential.defaultModel?.trim() === id.trim() &&
-              legacy?.supportsImages === true) ||
-            undefined;
+          if (secret.visionModelIds !== undefined) {
+            supportsImages = modelIdSupportsImages(secret.visionModelIds, id) || undefined;
+          } else {
+            const catalogModelId = secret.managedCatalog?.aliases[id] ?? id;
+            const catalogCapability =
+              secret.managedCatalog?.capabilities[catalogModelId]?.supportsImages;
+            supportsImages =
+              catalogCapability ??
+              (modelAcceptsImageInput(provider, id) ||
+                (credential.defaultModel?.trim() === id.trim() &&
+                  legacy?.supportsImages === true) ||
+                undefined);
+          }
         }
       }
     }

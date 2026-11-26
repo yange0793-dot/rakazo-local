@@ -2,8 +2,6 @@ import { describe, expect, it } from "vitest";
 import type { ActionApprovalRule, ApprovalMode } from "./action-approval.js";
 import {
   applyJudgeDecision,
-  approvalModeFromPreference,
-  approvalPreferenceFromMode,
   approvalRuleApplies,
   approvalRuleChoices,
   approvalRuleEffectChoices,
@@ -80,13 +78,13 @@ describe("toolRequiresApproval", () => {
     expect(toolRequiresExplicitApproval("archive_bot")).toBe(false);
   });
 
-  it("does not gate read-only or local work", () => {
+  it("gates shell and file writes while leaving reads and local state helpers ungated", () => {
+    expect(toolRequiresApproval("shell", false)).toBe(true);
+    expect(toolRequiresApproval("write_file", false)).toBe(true);
     for (const name of [
       "list_files",
       "computer_observe",
       "read_file",
-      "write_file",
-      "shell",
       "remember",
       "save_shared_memory",
       "spawn_bot",
@@ -458,7 +456,7 @@ describe("resolveActionApproval", () => {
     ).toBe("allow");
   });
 
-  it("lets a tool exception override a broader category rule", () => {
+  it("keeps a broader ask even when the tool has a narrower allow", () => {
     expect(
       resolveActionApproval({
         toolName: "gmail_send_email",
@@ -467,7 +465,7 @@ describe("resolveActionApproval", () => {
           { effect: "always_allow", matchKind: "tool", matchValue: "gmail_send_email" },
         ],
       }),
-    ).toBe("allow");
+    ).toBe("ask");
   });
 
   it("labels always-allow vs default allow", () => {
@@ -523,59 +521,27 @@ describe("planActionGate", () => {
       ...overrides,
     });
 
-  it("runs an unlisted change in Never ask, judges it in Auto and asks in Ask", () => {
-    expect(gate("never")).toBe("allow");
-    expect(gate("auto")).toBe("judge");
+  it("asks for unlisted changes in Ask and reviews them in Auto", () => {
     expect(gate("ask")).toBe("ask");
+    expect(gate("auto")).toBe("judge");
   });
 
   it("asks in Auto when no approval model is set up", () => {
     expect(gate("auto", { checkerConfigured: false })).toBe("ask");
   });
 
-  it("runs an allowlisted change in every mode without judging", () => {
-    for (const mode of ["never", "auto", "ask"] as const) {
-      expect(gate(mode, { resolved: allowed })).toBe("allow");
-    }
+  it("does not ask for any permission in bypermission", () => {
+    expect(gate("bypermission")).toBe("allow");
+    expect(gate("bypermission", { mandatory: true, purchase: true })).toBe("allow");
   });
 
-  it("refuses a blocked action in every mode, even one a person must approve", () => {
-    for (const mode of ["never", "auto", "ask"] as const) {
-      expect(gate(mode, { resolved: blocked })).toBe("deny");
-      expect(gate(mode, { resolved: blocked, mandatory: true })).toBe("deny");
-      expect(gate(mode, { resolved: blocked, consequential: false })).toBe("deny");
-    }
+  it("honors deny rules in Auto and Ask", () => {
+    expect(gate("auto", { resolved: blocked })).toBe("deny");
+    expect(gate("ask", { resolved: blocked })).toBe("deny");
   });
 
-  it("asks for a purchase in every mode, past an allow rule, and still refuses a block", () => {
-    for (const mode of ["never", "auto", "ask"] as const) {
-      expect(gate(mode, { purchase: true, consequential: false })).toBe("ask");
-      expect(gate(mode, { purchase: true, resolved: allowed })).toBe("ask");
-      expect(gate(mode, { purchase: true, mandatory: true, steerable: true })).toBe("ask");
-      expect(gate(mode, { purchase: true, resolved: blocked })).toBe("deny");
-    }
-  });
-
-  it("runs reads in every mode", () => {
-    for (const mode of ["never", "auto", "ask"] as const) {
-      expect(gate(mode, { consequential: false })).toBe("allow");
-    }
-  });
-
-  it("keeps an older ask rule asking, except in Never ask, which never waits", () => {
-    expect(gate("never", { resolved: asked })).toBe("allow");
-    expect(gate("auto", { resolved: asked })).toBe("ask");
-    expect(gate("ask", { resolved: asked })).toBe("ask");
-  });
-
-  it("asks a person for an approval nothing else may give, in Auto and Ask", () => {
-    expect(gate("auto", { mandatory: true, resolved: allowed })).toBe("ask");
-    expect(gate("ask", { mandatory: true, resolved: allowed })).toBe("ask");
-  });
-
-  it("in Never ask runs it for the owner's own run and refuses it when outside text could steer it", () => {
-    expect(gate("never", { mandatory: true, steerable: false })).toBe("allow");
-    expect(gate("never", { mandatory: true, steerable: true })).toBe("deny");
+  it("does not ask for saved Ask rules in bypermission", () => {
+    expect(gate("bypermission", { resolved: asked })).toBe("allow");
   });
 
   it("only lets the approval model check a read outside content may have chosen", () => {
@@ -583,24 +549,14 @@ describe("planActionGate", () => {
     expect(gate("auto", read)).toBe("judge");
     expect(gate("auto", { ...read, checkerConfigured: false })).toBe("allow");
     expect(gate("ask", read)).toBe("allow");
-    expect(gate("never", read)).toBe("allow");
+    expect(gate("bypermission", read)).toBe("allow");
   });
 
-  it("judges a new site in Auto even with a rule for the whole tool, and asks in Ask", () => {
+  it("judges a new site in Auto and asks in Ask", () => {
     expect(gate("auto", { resolved: allowed, newDestination: true })).toBe("judge");
     expect(gate("auto", { newDestination: true, checkerConfigured: false })).toBe("ask");
     expect(gate("ask", { resolved: allowed, newDestination: true })).toBe("ask");
-    expect(gate("never", { newDestination: true })).toBe("allow");
-  });
-});
-
-describe("approval modes from stored preferences", () => {
-  it("maps both ways", () => {
-    for (const mode of ["never", "auto", "ask"] as const) {
-      expect(approvalModeFromPreference(approvalPreferenceFromMode(mode))).toBe(mode);
-    }
-    expect(approvalModeFromPreference({ enabled: true, skipApprovals: true })).toBe("never");
-    expect(approvalModeFromPreference({ enabled: false, skipApprovals: false })).toBe("ask");
+    expect(gate("bypermission", { newDestination: true })).toBe("allow");
   });
 });
 
@@ -840,7 +796,7 @@ describe("batches", () => {
     ).toMatchObject({ decision: "allow", source: "default" });
   });
 
-  it("attributes a batch ask only to the action whose rule required it", () => {
+  it("attributes a batch ask to both matching ask rules", () => {
     const gmailAsk: ActionApprovalRule = {
       effect: "require_approval",
       matchKind: "connector",
@@ -867,7 +823,7 @@ describe("batches", () => {
 
     expect(resolved).toMatchObject({ decision: "ask", source: "require_approval" });
     expect(resolved.matchingRules).toEqual(expect.arrayContaining([gmailAsk, purchaseAsk]));
-    expect(decisiveActionApprovalRules(resolved)).toEqual([purchaseAsk]);
+    expect(decisiveActionApprovalRules(resolved)).toEqual([gmailAsk, purchaseAsk]);
   });
 });
 
@@ -978,7 +934,7 @@ describe("outboundSiteGate", () => {
     ).toBe("allow");
   });
 
-  it("matches site rules ahead of tool rules", () => {
+  it("keeps a tool ask even on an allowed site", () => {
     expect(
       resolveActionApprovalDetail({
         toolName: "web_fetch",
@@ -988,7 +944,7 @@ describe("outboundSiteGate", () => {
           siteRule,
         ],
       }).decision,
-    ).toBe("allow");
+    ).toBe("ask");
     expect(
       resolveActionApprovalDetail({ toolName: "web_fetch", site: "other.com", rules: [siteRule] })
         .source,
@@ -1146,10 +1102,10 @@ describe("approvalRuleChoices", () => {
 });
 
 describe("approvalRuleApplies", () => {
-  it("keeps only blocks in Never ask and every rule otherwise", () => {
-    expect(approvalRuleApplies("never", "deny")).toBe(true);
-    expect(approvalRuleApplies("never", "require_approval")).toBe(false);
-    expect(approvalRuleApplies("never", "always_allow")).toBe(false);
+  it("keeps Deny rules but skips Ask and Allow rules in bypermission", () => {
+    expect(approvalRuleApplies("bypermission", "deny")).toBe(true);
+    expect(approvalRuleApplies("bypermission", "require_approval")).toBe(false);
+    expect(approvalRuleApplies("bypermission", "always_allow")).toBe(false);
     expect(approvalRuleApplies("ask", "always_allow")).toBe(true);
     expect(approvalRuleApplies(null, "require_approval")).toBe(true);
   });

@@ -12,6 +12,7 @@ import { builtinModels } from "@earendil-works/pi-ai/providers/all";
 import { ModelConnectInputSchema, OPENAI_COMPATIBLE_PROVIDER_ID } from "@rakazo/contracts";
 import { fetch as undiciFetch } from "undici";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { builtinAgentTools } from "./builtin-tools.js";
 import { buildModelConnectPlaintext } from "./model-connect.js";
 import { parseModelSecret, secretValuesToRedact, serializeModelSecret } from "./model-secret.js";
 import {
@@ -30,6 +31,7 @@ import {
   registerOpenAiCompatibleRuntime,
   verifyOpenAiCompatibleApiKey,
 } from "./pi-openai-compatible-provider.js";
+import { parametersFor } from "./pi-runtime-tool-parameters.js";
 
 const savedPrivateHosts = process.env.RAKAZO_OPENAI_COMPAT_PRIVATE_HOSTS;
 
@@ -1216,7 +1218,7 @@ describe("per-connection wire protocol", () => {
     ).toThrow();
   });
   it.each(["stream", "streamSimple"] as const)(
-    "sends Responses through %s with the existing fetch guard",
+    "sends explicit non-strict Responses tools through %s with the existing fetch guard",
     async (method) => {
       const models = registerOpenAiCompatibleRuntime(createModels(), {
         ...input,
@@ -1227,9 +1229,15 @@ describe("per-connection wire protocol", () => {
       const provider = models.getProvider(OPENAI_COMPATIBLE_PROVIDER_ID)!;
       const model = models.getModel(OPENAI_COMPATIBLE_PROVIDER_ID, input.modelId)!;
       expect(model.api).toBe("openai-responses");
+      const tool = builtinAgentTools.find((entry) => entry.name === "ticket_update")!;
+      const parameters = parametersFor(tool);
       let requestUrl = "";
       let body: Record<string, unknown> = {};
-      const result = await provider[method](model, normalizeContext({ messages: [] }), {
+      const context = normalizeContext({
+        messages: [],
+        tools: [{ name: tool.name, description: tool.description, parameters }],
+      });
+      const result = await provider[method](model, context, {
         apiKey: "fake-api-key",
         fetch: async (url, init) => {
           requestUrl = String(url);
@@ -1259,6 +1267,16 @@ describe("per-connection wire protocol", () => {
       expect(requestUrl).toBe(`${input.baseUrl}/responses`);
       expect(body).toHaveProperty("input");
       expect(body).not.toHaveProperty("messages");
+      expect(body.tools).toEqual([
+        {
+          type: "function",
+          name: tool.name,
+          description: tool.description,
+          parameters: JSON.parse(JSON.stringify(parameters)),
+          strict: false,
+        },
+      ]);
+      expect(body.tools).toMatchObject([{ parameters: { required: ["id"] } }]);
       expect(result.stopReason, JSON.stringify(result)).not.toBe("error");
     },
   );

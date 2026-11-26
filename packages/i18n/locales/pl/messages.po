@@ -906,6 +906,10 @@ msgstr "Około {kb} KB pamięci nie dociera już do bota."
 msgid "About {label}"
 msgstr "O {label}"
 
+#: apps/web/src/pages/shell/bot-settings-sections.tsx
+msgid "Accept edits"
+msgstr "Akceptuj zmiany"
+
 #: apps/web/src/components/ComputerProviderSettings.tsx
 msgid "Access key ID"
 msgstr "Identyfikator klucza dostępu"
@@ -1962,6 +1966,10 @@ msgstr "Wbudowane"
 #: apps/web/src/components/AskCard.tsx
 msgid "Button “{button}” · read from the page, not checked"
 msgstr "Przycisk „{button}” · odczytane ze strony, niesprawdzone"
+
+#: apps/web/src/pages/shell/bot-settings-sections.tsx
+msgid "Bypass permissions"
+msgstr "Pomiń uprawnienia"
 
 #: apps/mobile/components/thread-composer.tsx
 #: apps/web/src/pages/shell/chat-header.tsx
@@ -4732,6 +4740,10 @@ msgstr "Dokumentacja"
 #: apps/web/src/pages/KnowledgeSection.tsx
 msgid "Document changed. Reopen to edit the latest version."
 msgstr "Dokument się zmienił. Otwórz go ponownie, aby edytować najnowszą wersję."
+
+#: apps/web/src/pages/shell/bot-settings-sections.tsx
+msgid "Don't ask"
+msgstr "Nie pytaj"
 
 #: apps/mobile/app/sign-in.tsx
 #: apps/web/src/pages/Auth.tsx
@@ -7942,6 +7954,10 @@ msgstr "Przypięte"
 msgid "Plan"
 msgstr "Plan"
 
+#: apps/web/src/pages/shell/bot-settings-sections.tsx
+msgid "Plan only"
+msgstr "Tylko planuj"
+
 #: apps/mobile/components/audio-attachment.tsx
 #: apps/mobile/components/voice-player-bar.tsx
 msgid "Play"
@@ -10642,6 +10658,10 @@ msgstr "Ten serwer jest już połączony. Rozłącz go przed ponowną autoryzacj
 #: packages/i18n/src/run-error.ts
 msgid "This server's tool result does not fit the model. Turn off Keep tool results whole for that server, or choose another model."
 msgstr "Wynik narzędzia tego serwera nie mieści się w modelu. Wyłącz dla tego serwera opcję Zachowuj pełne wyniki narzędzi lub wybierz inny model."
+
+#: apps/web/src/pages/shell/bot-settings-sections.tsx
+msgid "This space only"
+msgstr "Tylko ta przestrzeń"
 
 #: apps/mobile/app/(settings)/model-connection.tsx
 #: apps/web/src/pages/model-settings/connection-controls.tsx

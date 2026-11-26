@@ -80,6 +80,7 @@ async function resolvePublicHost(
   resolve: ResolveHostname,
   signal?: AbortSignal,
 ): Promise<ResolvedAddress[]> {
+  if (signal?.aborted) throw abortError(signal);
   const hostname = host.replace(/^\[|\]$/g, "");
   if (isBlockedHostname(hostname)) {
     throw egressRefused(hostname, new Error("URL targets a private or internal host"));
@@ -356,7 +357,10 @@ function abortError(signal: AbortSignal): Error {
 /** Race a promise against an AbortSignal so stalled work cannot outlive the deadline. */
 export function withAbort<T>(promise: Promise<T>, signal?: AbortSignal): Promise<T> {
   if (!signal) return promise;
-  if (signal.aborted) return Promise.reject(abortError(signal));
+  if (signal.aborted) {
+    void promise.catch(() => undefined);
+    return Promise.reject(abortError(signal));
+  }
   return new Promise<T>((resolve, reject) => {
     const onAbort = () => reject(abortError(signal));
     signal.addEventListener("abort", onAbort, { once: true });

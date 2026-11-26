@@ -160,8 +160,7 @@ beforeEach(async () => {
           : state.overrides.filter((entry) => entry !== setting);
         return state.overrides;
       }
-      if (proc === "autoReview/get")
-        return { mode: "never", enabled: false, skipApprovals: true, checkerAvailable: false };
+      if (proc === "autoReview/get") return { mode: "bypermission", checkerAvailable: false };
       if (proc === "approvalRules/list") return state.rules;
       throw new Error(`Unexpected RPC: ${proc}`);
     });
@@ -234,7 +233,7 @@ it("shows the Space's approval mode and rules right here once approvals are cust
     "Voice",
     "Approvals",
     "Vault",
-    "Approvals: Never ask",
+    "Approvals: Bypass permissions",
     "Rules: 1",
   ]);
 

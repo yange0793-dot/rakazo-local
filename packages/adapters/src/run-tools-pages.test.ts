@@ -16,7 +16,7 @@ function context(
   tx: Record<string, unknown>,
   existing?: { currentVersion: number; visibility?: "private" | "link" },
   secrets: string[] = [],
-  skipApprovals = false,
+  bypassApprovals = false,
 ) {
   const prisma = {
     page: {
@@ -41,7 +41,11 @@ function context(
     thread: { groupId: null },
     secrets,
     state: { tainted: false },
-    trust: { loadAutoReviewPreference: async () => ({ skipApprovals }) },
+    trust: {
+      loadAutoReviewPreference: async () => ({
+        mode: bypassApprovals ? "bypermission" : "ask",
+      }),
+    },
   } as never;
 }
 

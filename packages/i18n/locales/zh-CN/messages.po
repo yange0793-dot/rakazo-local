@@ -906,6 +906,10 @@ msgstr "约 {kb} KB 的记忆不再提供给 Bot。"
 msgid "About {label}"
 msgstr "关于{label}"
 
+#: apps/web/src/pages/shell/bot-settings-sections.tsx
+msgid "Accept edits"
+msgstr "接受编辑"
+
 #: apps/web/src/components/ComputerProviderSettings.tsx
 msgid "Access key ID"
 msgstr "访问密钥 ID"
@@ -1962,6 +1966,10 @@ msgstr "内置"
 #: apps/web/src/components/AskCard.tsx
 msgid "Button “{button}” · read from the page, not checked"
 msgstr "按钮“{button}”· 读取自页面，未核实"
+
+#: apps/web/src/pages/shell/bot-settings-sections.tsx
+msgid "Bypass permissions"
+msgstr "绕过权限"
 
 #: apps/mobile/components/thread-composer.tsx
 #: apps/web/src/pages/shell/chat-header.tsx
@@ -4732,6 +4740,10 @@ msgstr "文档"
 #: apps/web/src/pages/KnowledgeSection.tsx
 msgid "Document changed. Reopen to edit the latest version."
 msgstr "文档已更改。请重新打开以编辑最新版本。"
+
+#: apps/web/src/pages/shell/bot-settings-sections.tsx
+msgid "Don't ask"
+msgstr "不询问"
 
 #: apps/mobile/app/sign-in.tsx
 #: apps/web/src/pages/Auth.tsx
@@ -7942,6 +7954,10 @@ msgstr "置顶"
 msgid "Plan"
 msgstr "方案"
 
+#: apps/web/src/pages/shell/bot-settings-sections.tsx
+msgid "Plan only"
+msgstr "仅规划"
+
 #: apps/mobile/components/audio-attachment.tsx
 #: apps/mobile/components/voice-player-bar.tsx
 msgid "Play"
@@ -10642,6 +10658,10 @@ msgstr "此服务器已连接。请先断开再重新授权。"
 #: packages/i18n/src/run-error.ts
 msgid "This server's tool result does not fit the model. Turn off Keep tool results whole for that server, or choose another model."
 msgstr "此服务器的工具结果超出模型容量。请关闭该服务器的“保留完整工具结果”，或选择其他模型。"
+
+#: apps/web/src/pages/shell/bot-settings-sections.tsx
+msgid "This space only"
+msgstr "仅当前空间"
 
 #: apps/mobile/app/(settings)/model-connection.tsx
 #: apps/web/src/pages/model-settings/connection-controls.tsx

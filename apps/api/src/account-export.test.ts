@@ -244,6 +244,20 @@ describe("account export archive", () => {
     ).rejects.toThrow("zip size limit");
   });
 
+  it("closes the file source when the archive hits its size limit", async () => {
+    const closed = vi.fn();
+    async function* files() {
+      try {
+        yield { path: "file.txt", data: [new Uint8Array(1024)] };
+      } finally {
+        closed();
+      }
+    }
+    const reader = zipStream(files(), { maxBytes: 1 }).getReader();
+    await expect(reader.read()).rejects.toThrow("zip size limit");
+    expect(closed).toHaveBeenCalledOnce();
+  });
+
   it("reports a size-limit failure as a failure even after the request aborts", async () => {
     const error = vi.spyOn(getLogger(), "error");
     const controller = new AbortController();

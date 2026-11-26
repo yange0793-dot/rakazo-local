@@ -1,6 +1,7 @@
 import { createHash, randomUUID } from "node:crypto";
 import type { MessageBlock, TicketFileDeliveryAcceptance } from "@rakazo/contracts";
 import {
+  THREAD_MESSAGE_TEXT_MAX_LENGTH,
   TicketFileDeliveryAcceptanceSchema,
   TicketFileDeliveryRequirementsSchema,
   TicketWorkResult,
@@ -10,9 +11,14 @@ import type { Artifact, Run } from "@rakazo/db";
 import {
   appendEventInTransaction,
   createThreadMessageInTransaction,
+  getManagedWorkCompletionBlockers,
   IsolationError,
   LISTED_ARTIFACT,
   lockSpaceGroup,
+  ManagedWorkError,
+  managedWorkOriginAvailable,
+  recordManagedDependencyChangeInTransaction,
+  THREAD_LOCK_TRANSACTION_OPTIONS,
   touchGroupUpdatedAt,
 } from "@rakazo/db";
 import { getLogger } from "@rakazo/logging";
@@ -21,6 +27,12 @@ import type { ExecutorDeps } from "./executor-deps.js";
 import type { FileDeliveryAcceptanceInput } from "./file-delivery-acceptance.js";
 import { evaluateFileDeliveryAcceptanceWithJudge } from "./file-delivery-acceptance.js";
 import type { FileDeliveryJudge } from "./file-delivery-judge.js";
+import { ensureRootManagedWorkInTransaction, managedReceiptReplyTicketId } from "./managed-work.js";
+import {
+  reconcileManagedWorkEvents,
+  recordManagedChildOutcomeInTransaction,
+  settleManagedWorkEventsInTransaction,
+} from "./managed-work-events.js";
 import { runLeaseFor } from "./run-messages.js";
 import { attachWorkspaceFileToThread } from "./thread-artifacts.js";
 import { ticketReceiptsEnabled } from "./ticket-receipt-config.js";
@@ -31,7 +43,8 @@ export async function deliverTicketWork(
   deps: Pick<
     ExecutorDeps,
     "artifacts" | "prisma" | "events" | "onTicketChange" | "runLease" | "ticketBoardEnabled"
-  > & { fileDeliveryJudge?: FileDeliveryJudge },
+  > &
+    Partial<Pick<ExecutorDeps, "jobs">> & { fileDeliveryJudge?: FileDeliveryJudge },
   run: Pick<Run, "id" | "spaceId" | "botId" | "threadId" | "ticketId" | "userId">,
   input: { id: string; result: unknown; ownerAuthored: boolean; secrets: string[] },
 ) {
@@ -47,7 +60,16 @@ export async function deliverTicketWork(
         .join("; "),
     };
   }
-  const { previousVersion, summary, findings, artifactIds = [], fileDelivery } = parsed.data;
+  const {
+    previousVersion,
+    summary,
+    findings,
+    artifactIds = [],
+    finalArtifactId,
+    fileDelivery,
+  } = parsed.data;
+  if (finalArtifactId && !artifactIds.includes(finalArtifactId))
+    return { error: "finalArtifactId must be one of artifactIds." };
   const ticket = await deps.prisma.ticket.findFirst({
     where: {
       id: input.id,
@@ -66,7 +88,7 @@ export async function deliverTicketWork(
   if (
     !ticket ||
     !origin ||
-    !ticket.originMessageId ||
+    (!ticket.originMessageId && !(ticket.managedVersion && ticket.originRoutineId)) ||
     !ticket.createdByBotId ||
     origin.externalConversationId
   ) {
@@ -81,7 +103,12 @@ export async function deliverTicketWork(
       botId: run.botId,
       threadId: run.threadId,
     },
-    select: { ticketId: true, thread: { select: { groupId: true } } },
+    select: {
+      ticketId: true,
+      workControlEpoch: true,
+      workRequirementsVersion: true,
+      thread: { select: { groupId: true } },
+    },
   });
   const assigned = currentRun?.ticketId === ticket.id && run.botId === ticket.assigneeBotId;
   const inOrigin =
@@ -93,6 +120,68 @@ export async function deliverTicketWork(
   ) {
     return { error: "Only this assignment or its original owner chat can deliver the result." };
   }
+  // Receipt replies can reach delivery before their managed identity is initialized.
+  if (
+    ticket.managedVersion &&
+    !ticket.parentTicketId &&
+    !ticket.stopRequestedAt &&
+    inOrigin &&
+    ticket.assigneeBotId === run.botId &&
+    currentRun.workControlEpoch === null &&
+    currentRun.workRequirementsVersion === null
+  ) {
+    try {
+      const adopted = await deps.prisma.$transaction(async (tx) => {
+        await tx.$queryRaw`SELECT id FROM threads WHERE id = ${run.threadId} FOR UPDATE`;
+        await tx.$queryRaw`SELECT id FROM tickets WHERE id = ${ticket.id} AND "spaceId" = ${run.spaceId} FOR UPDATE`;
+        const source = await tx.run.findFirst({
+          where: {
+            id: run.id,
+            spaceId: run.spaceId,
+            userId: run.userId,
+            botId: run.botId,
+            threadId: run.threadId,
+            status: "running",
+            OR: [{ ticketId: null }, { ticketId: ticket.id }],
+            workControlEpoch: null,
+            workRequirementsVersion: null,
+          },
+          select: { sourceMessage: true },
+        });
+        if (
+          !source ||
+          (await managedReceiptReplyTicketId(tx, run, source.sourceMessage)) !== ticket.id
+        )
+          return null;
+        const adopted = await ensureRootManagedWorkInTransaction(tx, run, {
+          brief: summary,
+          operationKey: `${run.id}:ticket_update:result`,
+        });
+        if (adopted.receiptVersion !== previousVersion)
+          throw new ManagedWorkError("Receipt changed. Read ticket_get before revising it.");
+        return adopted;
+      }, THREAD_LOCK_TRANSACTION_OPTIONS);
+      if (adopted) {
+        Object.assign(ticket, adopted);
+        currentRun.ticketId = adopted.id;
+        currentRun.workControlEpoch = adopted.controlEpoch;
+        currentRun.workRequirementsVersion = adopted.requirementsVersion;
+      }
+    } catch (error) {
+      if (error instanceof ManagedWorkError) return { error: error.message };
+      throw error;
+    }
+  }
+  if (
+    ticket.managedVersion &&
+    (ticket.stopRequestedAt ||
+      currentRun.workControlEpoch !== ticket.controlEpoch ||
+      currentRun.workRequirementsVersion !== ticket.requirementsVersion ||
+      !(await managedWorkOriginAvailable(deps.prisma, ticket)))
+  )
+    return {
+      error: "Work was stopped, requirements changed, or its original request is unavailable.",
+    };
   const savedRequirements =
     ticket.fileDeliveryRequirements == null
       ? undefined
@@ -103,6 +192,7 @@ export async function deliverTicketWork(
   if (fileDelivery && !requirements)
     return { error: "File-delivery requirements must be fixed when the ticket is created." };
   const author = ticket.createdByBotId;
+  const internal = Boolean(ticket.managedVersion && ticket.parentTicketId);
   const ref = `${ticket.board.ticketPrefix}-${ticket.number}`;
   const clean = (text: string) => redactSecrets(text, input.secrets);
   const result = {
@@ -113,6 +203,7 @@ export async function deliverTicketWork(
       evidence: clean(finding.evidence),
     })),
     artifactIds: [...new Set(artifactIds)].sort(),
+    ...(finalArtifactId ? { finalArtifactId } : {}),
     ...(fileDelivery ? { fileDelivery } : {}),
   };
   const reportedDone = result.findings.every((finding) => finding.outcome === "pass");
@@ -136,14 +227,22 @@ export async function deliverTicketWork(
     });
     if (!message) return null;
     if (!requirements)
-      return { ok: true, version, messageId: message.id, status: reportedDone ? "done" : "review" };
+      return {
+        ok: true,
+        version,
+        messageId: message.id,
+        status: reportedDone ? "done" : "review",
+        managed: Boolean(ticket.managedVersion),
+      };
     // Replay the immutable receipt, not today's artifact/effect observations or ticket status.
     const fileIds = (message.blocks as MessageBlock[]).flatMap((block) =>
       block.kind === "file" ? [block.artifactId] : [],
     );
     const artifact = await deps.prisma.artifact.findFirst({
       where: {
-        id: { in: fileIds },
+        ...(ticket.managedVersion
+          ? { OR: [{ clientNonce }, { id: { in: fileIds } }] }
+          : { id: { in: fileIds } }),
         spaceId: run.spaceId,
         userId: run.userId,
         botId: author,
@@ -172,6 +271,7 @@ export async function deliverTicketWork(
       requirementsVersion: saved.data.acceptance.requirementsVersion,
       status: reportedDone && saved.data.acceptance.status === "verified" ? "done" : "review",
       acceptance: saved.data.acceptance,
+      managed: Boolean(ticket.managedVersion),
     };
   };
   const previous = await previousDelivery();
@@ -181,6 +281,17 @@ export async function deliverTicketWork(
   }
   if (ticket.receiptVersion !== previousVersion) {
     return { error: "Receipt changed. Read ticket_get before revising it." };
+  }
+  if (ticket.managedVersion && reportedDone) {
+    const blockers = await getManagedWorkCompletionBlockers(deps.prisma, {
+      spaceId: run.spaceId,
+      ticketId: ticket.id,
+    });
+    if (blockers.ticketIds.length || blockers.executionIds.length)
+      return {
+        error:
+          "Delegated work or external execution remains unresolved. Deliver partial findings as issue or unknown.",
+      };
   }
   // An assignment can explicitly share its own user's private files. Other groups and bots
   // remain outside that authority; files already in the destination retain their identity.
@@ -207,6 +318,7 @@ export async function deliverTicketWork(
   const files: Array<{ source: Artifact; visible: Artifact }> = [];
   const observedArtifacts: FileDeliveryAcceptanceInput["artifacts"][number][] = [];
   let acceptance: TicketFileDeliveryAcceptance | undefined;
+  let finalText: string | undefined;
   let committed: { id: string; seq: number } | undefined;
   try {
     for (const id of result.artifactIds) {
@@ -214,7 +326,7 @@ export async function deliverTicketWork(
       const alreadyVisible =
         source.groupId === origin.groupId && (origin.groupId || source.botId === author);
       let sourceBytes: Uint8Array | undefined;
-      if (requirements || !alreadyVisible) {
+      if (requirements || !alreadyVisible || source.id === finalArtifactId) {
         try {
           sourceBytes = await store.get(source.storageKey, {
             ...context,
@@ -222,7 +334,19 @@ export async function deliverTicketWork(
           });
         } catch (error) {
           // A missing read is unknown evidence. A file still needing a copy cannot be delivered.
-          if (!alreadyVisible) throw error;
+          if (!alreadyVisible || source.id === finalArtifactId) throw error;
+        }
+      }
+      if (source.id === finalArtifactId) {
+        if (createHash("sha256").update(sourceBytes!).digest("hex") !== source.hash)
+          throw new WorkDeliveryConflict("The finished artifact hash no longer matches.");
+        if (source.mimeType === "text/markdown" || source.mimeType === "text/plain") {
+          const text = new TextDecoder("utf-8", { fatal: true }).decode(sourceBytes);
+          if (clean(text) !== text)
+            throw new WorkDeliveryConflict(
+              "Remove secrets from the finished artifact before delivery.",
+            );
+          if (text.length <= THREAD_MESSAGE_TEXT_MAX_LENGTH) finalText = text;
         }
       }
       if (requirements)
@@ -240,6 +364,31 @@ export async function deliverTicketWork(
         continue;
       }
       const bytes = sourceBytes!;
+      const priorFinal =
+        ticket.managedVersion && source.id === finalArtifactId && source.rootArtifactId
+          ? await deps.prisma.artifact.findFirst({
+              where: {
+                spaceId: run.spaceId,
+                botId: author,
+                groupId: origin.groupId,
+                userId: run.userId,
+                clientNonce: { startsWith: `work-receipt:${ticket.id}:` },
+                OR: [
+                  { clientNonce: { contains: `:family:${source.rootArtifactId}:` } },
+                  { clientNonce: { endsWith: `:artifact:${source.rootArtifactId}` } },
+                ],
+              },
+              select: { id: true, rootArtifactId: true },
+            })
+          : null;
+      const finalRoot = priorFinal && (priorFinal.rootArtifactId ?? priorFinal.id);
+      const priorVersion = finalRoot
+        ? await deps.prisma.artifact.findFirst({
+            where: { OR: [{ id: finalRoot }, { rootArtifactId: finalRoot }] },
+            orderBy: { version: "desc" },
+            select: { version: true },
+          })
+        : null;
       const stored = await store.put(
         { name: source.name, mimeType: source.mimeType, bytes },
         context,
@@ -254,10 +403,13 @@ export async function deliverTicketWork(
         storageKey: stored.id,
         size: bytes.byteLength,
         hash: createHash("sha256").update(bytes).digest("hex"),
-        version: 1,
-        rootArtifactId: null,
+        version: priorVersion ? priorVersion.version + 1 : 1,
+        rootArtifactId: finalRoot ?? null,
         standalone: true,
-        clientNonce: `${clientNonce}:artifact:${source.id}`,
+        clientNonce:
+          ticket.managedVersion && source.id === finalArtifactId
+            ? `${clientNonce}:family:${source.rootArtifactId ?? source.id}:artifact:${source.id}`
+            : `${clientNonce}:artifact:${source.id}`,
         createdAt: new Date(),
       };
       copies.push(copy);
@@ -302,6 +454,12 @@ export async function deliverTicketWork(
           ...result,
           ...(requirements ? { requirements, acceptance } : {}),
           artifactIds: files.map(({ visible }) => visible.id),
+          ...(finalArtifactId
+            ? {
+                finalArtifactId: files.find(({ source }) => source.id === finalArtifactId)!.visible
+                  .id,
+              }
+            : {}),
           artifacts: files.map(({ source, visible }) => ({
             id: visible.id,
             name: visible.name,
@@ -347,24 +505,39 @@ export async function deliverTicketWork(
             await touchGroupUpdatedAt(tx, group.id);
           }
           await tx.$queryRaw`SELECT id FROM threads WHERE id = ${origin.id} FOR UPDATE`;
-          const source = await tx.message.findFirst({
-            where: {
-              id: ticket.originMessageId!,
-              threadId: origin.id,
-              role: "user",
-              authorUserId: run.userId,
-              thread: {
-                spaceId: run.spaceId,
-                ...(!origin.groupId
-                  ? { bot: { id: author, userId: run.userId, archivedAt: null } }
-                  : { groupId: origin.groupId }),
-              },
-            },
-            select: { id: true },
-          });
-          if (!source) throw new WorkDeliveryConflict("Original request is unavailable.");
+          const source = ticket.originMessageId
+            ? await tx.message.findFirst({
+                where: {
+                  id: ticket.originMessageId!,
+                  threadId: origin.id,
+                  role: "user",
+                  authorUserId: run.userId,
+                  thread: {
+                    spaceId: run.spaceId,
+                    ...(!origin.groupId
+                      ? { bot: { id: author, userId: run.userId, archivedAt: null } }
+                      : { groupId: origin.groupId }),
+                  },
+                },
+                select: { id: true },
+              })
+            : null;
+          if (ticket.managedVersion) {
+            if (!(await managedWorkOriginAvailable(tx, ticket)))
+              throw new WorkDeliveryConflict("Original request is unavailable.");
+          } else if (!source) throw new WorkDeliveryConflict("Original request is unavailable.");
           // Requirements edits and work-state saves lock the ticket before touching its run.
           await tx.$queryRaw`SELECT id FROM tickets WHERE id = ${ticket.id} AND "spaceId" = ${run.spaceId} FOR UPDATE`;
+          if (ticket.managedVersion && status === "done") {
+            const blockers = await getManagedWorkCompletionBlockers(tx, {
+              spaceId: run.spaceId,
+              ticketId: ticket.id,
+            });
+            if (blockers.ticketIds.length || blockers.executionIds.length)
+              throw new WorkDeliveryConflict(
+                "Delegated work or external execution remains unresolved.",
+              );
+          }
           const linked = await tx.run.updateMany({
             where: {
               id: run.id,
@@ -374,6 +547,12 @@ export async function deliverTicketWork(
               ...(assigned
                 ? { ticketId: ticket.id }
                 : { OR: [{ ticketId: null }, { ticketId: ticket.id }] }),
+              ...(ticket.managedVersion
+                ? {
+                    workControlEpoch: ticket.controlEpoch,
+                    workRequirementsVersion: ticket.requirementsVersion,
+                  }
+                : {}),
             },
             data: { ticketId: ticket.id },
           });
@@ -387,7 +566,14 @@ export async function deliverTicketWork(
               spaceId: run.spaceId,
               receiptVersion: previousVersion,
               originThreadId: origin.id,
-              originMessageId: source.id,
+              originMessageId: ticket.originMessageId,
+              ...(ticket.managedVersion
+                ? {
+                    stopRequestedAt: null,
+                    controlEpoch: ticket.controlEpoch,
+                    requirementsVersion: ticket.requirementsVersion,
+                  }
+                : {}),
               ...(requirements
                 ? {
                     fileDeliveryRequirements: {
@@ -402,6 +588,13 @@ export async function deliverTicketWork(
               receiptVersion: version,
               status,
               completedAt: status === "done" ? new Date() : null,
+              ...(ticket.managedVersion
+                ? {
+                    acceptedRequirementsVersion:
+                      status === "done" ? ticket.requirementsVersion : null,
+                    acceptedReceiptVersion: status === "done" ? version : null,
+                  }
+                : {}),
             },
           });
           if (changed.count !== 1)
@@ -409,9 +602,21 @@ export async function deliverTicketWork(
               "Receipt, requirements, or assignee changed. Read ticket_get before revising it.",
             );
           for (const copy of copies) await tx.artifact.create({ data: copy });
+          if (ticket.managedVersion)
+            await tx.artifact.update({
+              where: { id: artifact.id },
+              data: { clientNonce },
+            });
           const blocks: MessageBlock[] = [
-            { kind: "text", text: `${ref} · ${result.summary}` },
-            messageBlockForArtifact(artifact),
+            ...(internal ? [{ kind: "delivery" as const }] : []),
+            {
+              kind: "text",
+              text:
+                ticket.managedVersion && !internal
+                  ? (finalText ?? result.summary)
+                  : `${ref} · ${result.summary}`,
+            },
+            ...(!ticket.managedVersion || internal ? [messageBlockForArtifact(artifact)] : []),
             ...files.map(({ visible }) => messageBlockForArtifact(visible)),
           ];
           const lease = runLeaseFor(deps, run.id);
@@ -421,9 +626,10 @@ export async function deliverTicketWork(
             botId: author,
             runId: run.id,
             lease,
-            replyToMessageId: source.id,
+            replyToMessageId: source?.id,
             blocks,
             clientNonce,
+            ...(internal ? { markUnread: false } : {}),
           });
           const event = await appendEventInTransaction(tx, {
             spaceId: run.spaceId,
@@ -436,10 +642,41 @@ export async function deliverTicketWork(
               messageId: message.id,
               role: "bot",
               blocks,
-              replyToMessageId: source.id,
+              ...(source ? { replyToMessageId: source.id } : {}),
               clientNonce,
             },
           });
+          if (ticket.managedVersion && ticket.parentTicketId)
+            await recordManagedChildOutcomeInTransaction(tx, {
+              spaceId: run.spaceId,
+              runId: run.id,
+              ticketId: ticket.id,
+              payload: {
+                receiptMessageId: message.id,
+                receiptArtifactId: artifact.id,
+                summary: result.summary,
+                status,
+                receiptVersion: version,
+                artifactIds: files.map(({ visible }) => visible.id),
+                ...(finalArtifactId
+                  ? {
+                      finalArtifactId: files.find(({ source }) => source.id === finalArtifactId)!
+                        .visible.id,
+                    }
+                  : {}),
+              },
+            });
+          if (ticket.managedVersion) {
+            await recordManagedDependencyChangeInTransaction(tx, {
+              spaceId: run.spaceId,
+              ticketId: ticket.id,
+              sourceRunId: run.id,
+            });
+            await settleManagedWorkEventsInTransaction(tx, {
+              spaceId: run.spaceId,
+              runId: run.id,
+            });
+          }
           committed = { id: message.id, seq: event.seq };
         },
       },
@@ -466,11 +703,17 @@ export async function deliverTicketWork(
     assigneeBotId: ticket.assigneeBotId,
     wakeAssignee: false,
   });
+  if (ticket.managedVersion && deps.jobs)
+    await reconcileManagedWorkEvents(
+      { prisma: deps.prisma, jobs: deps.jobs, events: deps.events },
+      { spaceId: run.spaceId },
+    );
   return {
     ok: true,
     version,
     messageId: committed.id,
     status,
+    managed: Boolean(ticket.managedVersion),
     ...(acceptance ? { requirementsVersion: acceptance.requirementsVersion, acceptance } : {}),
   };
 }

@@ -158,14 +158,23 @@ export function dockerComputerToolInstruction(
   return parts.join(" ");
 }
 
-function webLookupClause(disabled?: ReadonlySet<string>): string | undefined {
+function webLookupClause(disabled?: ReadonlySet<string>, providerId?: string): string | undefined {
   const search = builtinOffered(disabled, "web_search");
   const fetch = builtinOffered(disabled, "web_fetch");
   if (search && fetch) {
-    return "Use web_search and web_fetch to look something up or read a page without a computer.";
+    return [
+      providerId
+        ? `The configured backend for the built-in web_search and web_fetch tools is ${providerId}. Use these tools for that service; it is not a separate tool to discover in the connector catalog.`
+        : undefined,
+      "Answer directly from the conversation and available workspace context when sufficient. Use web_search when current or external public information is needed; use web_fetch to verify the relevant source page. For changing facts, verify the subject's current identity, affiliation and relevant dates before narrowing the query; do not turn remembered affiliations into premises. Distinguish publication dates from event dates and verify corrections against original sources. A browser tool result is evidence only for the browser and operation named in that receipt; do not describe a different browser, screenshot or action as observed.",
+    ]
+      .filter(Boolean)
+      .join(" ");
   }
-  if (search) return "Use web_search to look something up without a computer.";
-  if (fetch) return "Use web_fetch to read a page without a computer.";
+  if (search)
+    return "Answer directly from the conversation and available workspace context when sufficient. Use web_search only when current or external public information is needed.";
+  if (fetch)
+    return "Answer directly from the conversation and available workspace context when sufficient. Use web_fetch only when the contents of a specific page are needed.";
   return undefined;
 }
 
@@ -304,11 +313,12 @@ function toolUsageLine(parts: {
   disabledBuiltinTools?: ReadonlySet<string>;
   followUpsOffered?: boolean;
   semanticMemoryEnabled?: boolean;
+  webProviderId?: string;
 }): string {
   const disabled = parts.disabledBuiltinTools;
   const clauses = [
     pageWorkClause(parts.pageBrowserAllowed, disabled),
-    webLookupClause(disabled),
+    webLookupClause(disabled, parts.webProviderId),
     ...secretGuidance(disabled),
     builtinOffered(disabled, "connect_app")
       ? "Use connect_app when an app needs connecting or the user asks to connect one, then wait for them."
@@ -339,6 +349,7 @@ export function userTurnInstructions(parts: {
   hasHistoricalContext: boolean;
   historyRetrievalEnabled?: boolean;
   semanticMemoryEnabled?: boolean;
+  webProviderId?: string;
   computerInstruction: string;
   pageBrowserAllowed: boolean;
   taskCatalogInstruction?: string;
@@ -405,7 +416,7 @@ export function userTurnInstructions(parts: {
       offeredBuiltinClause(
         parts.disabledBuiltinTools,
         "skill_read",
-        "When asked how Rakazo or you work, or how to set something up (apps, the user's own computer, billing), read the Rakazo skill before answering or acting.",
+        "For user-facing questions about using Rakazo or its published setup steps, read the Rakazo skill only when current instructions are needed. Do not read it to diagnose this installation's model connection, settings, source code, or logs; use the relevant conversation or local context.",
       ),
     parts.taughtSkillsLine,
     offeredBuiltinClause(

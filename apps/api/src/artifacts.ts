@@ -567,7 +567,7 @@ async function deleteArtifactRootIfChildless(
   return outcome;
 }
 
-async function removeArtifactBlob(
+export async function removeArtifactBlob(
   artifacts: ArtifactStore,
   actor: Actor,
   member: ArtifactMember,

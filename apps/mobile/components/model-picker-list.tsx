@@ -258,8 +258,8 @@ export function ModelPickerList({
               accessibilityRole="button"
               accessibilityLabel={item.label}
               accessibilityHint={item.images === false ? t`Can't read images` : undefined}
-              accessibilityState={{ selected }}
-              onPress={() => onSelect(item)}
+              accessibilityState={{ selected, disabled: item.unavailable }}
+              onPress={item.unavailable ? undefined : () => onSelect(item)}
               title={item.title ?? item.label}
               detail={item.detail}
               value={section.connect ? t`Connect` : undefined}

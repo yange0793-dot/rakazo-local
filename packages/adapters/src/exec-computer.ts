@@ -195,7 +195,7 @@ export class ExecComputer {
         "trap 'rm -f -- \"$temporary\"' EXIT",
         'cat >"$temporary"',
         'chmod "$mode" -- "$temporary"',
-        'mv -f -- "$temporary" "$target"',
+        'mv -fT -- "$temporary" "$target"',
         "trap - EXIT",
       ].join("\n"),
       "rakazo-write",

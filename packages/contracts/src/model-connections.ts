@@ -131,8 +131,10 @@ export const ManagedModelCatalogSchema = z.object({
 export type ManagedModelCatalog = z.infer<typeof ManagedModelCatalogSchema>;
 
 export const ModelCredentialSchema = z.object({
-  /** Computed space preference order; credentials themselves remain newest first. */
+  /** Account preference order; credentials themselves remain newest first. */
   preferenceRank: z.number().int().nonnegative().optional(),
+  /** The connection's account model, independently of the effective main role. */
+  savedModelId: z.string().nullable().optional(),
   ...ModelContextLimitsSchema.shape,
   id: Id,
   provider: z.string(),

@@ -1,6 +1,7 @@
 import { Trans, useLingui } from "@lingui/react/macro";
 import type {
   AgentSkillCatalogEntry,
+  ApprovalMode,
   Bot,
   BotAvatarSet,
   ComputerMode,
@@ -12,16 +13,19 @@ import { BOT_NAME_MAX_LENGTH, isBuiltinToolName, resolveBotAvatarSet } from "@ra
 import type { ChatModelChoice } from "@rakazo/core";
 import {
   botLookState,
+  botModelPickerKey,
   chatModelChoices,
-  clampCatalogThinkingLevel,
   connectedModelChoices,
+  connectionModelUnavailable,
   credentialForModel,
   modelOptionKey,
   parseModelOptionKey,
   resolveSelectableModelId,
+  THINKING_LEVEL_OPTIONS,
 } from "@rakazo/core";
+import { writeSaved } from "@rakazo/core/query";
 import { Button, Input, Tabs, TabsContent, TabsList, TabsTrigger } from "@rakazo/ui-web";
-import { useQuery } from "@tanstack/react-query";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { Cloud, Mail } from "lucide-react";
 import type { CSSProperties, ReactNode } from "react";
 import { Suspense, useEffect, useId, useRef, useState } from "react";
@@ -59,7 +63,9 @@ const KnowledgeSection = lazyComponent(() =>
 /** The advanced fields one Save sends, in the order their saved snapshot keeps them. */
 function advancedValues(bot: Bot) {
   return [
-    bot.modelProvider && bot.modelId ? modelOptionKey(bot.modelProvider, bot.modelId) : "",
+    bot.modelProvider && bot.modelId
+      ? modelOptionKey(bot.modelProvider, bot.modelId, bot.modelCredentialId)
+      : "",
     bot.thinkingLevel ?? "",
     bot.computerMode,
     bot.memoryScope,
@@ -132,6 +138,7 @@ export function BotSettings({
     voiceId?: string | null;
     modelProvider?: string | null;
     modelId?: string | null;
+    modelCredentialId?: string | null;
     thinkingLevel?: ThinkingLevel | null;
     disabledBuiltinTools?: string[];
   }) => Promise<void>;
@@ -175,9 +182,7 @@ export function BotSettings({
   const [replyMode, setReplyMode] = useState(bot.replyMode);
   useEffect(() => setReplyMode(bot.replyMode), [bot.replyMode]);
   const [voiceId, setVoiceId] = useState(bot.voiceId ?? "");
-  const [modelKey, setModelKey] = useState(
-    bot.modelProvider && bot.modelId ? modelOptionKey(bot.modelProvider, bot.modelId) : "",
-  );
+  const [modelKey, setModelKey] = useState(advancedValues(bot)[0]);
   const [thinkingLevel, setThinkingLevel] = useState(bot.thinkingLevel ?? "");
   const [disabledBuiltinTools, setDisabledBuiltinTools] = useState<string[]>(
     bot.disabledBuiltinTools ?? [],
@@ -195,16 +200,38 @@ export function BotSettings({
     if (pendingSavesRef.current === 0) setDisabledBuiltinTools(next);
   }, [bot.disabledBuiltinTools]);
   // Shared with the model and voice settings, so a revisit paints at once and refreshes behind.
+  const [pendingApprovalMode, setPendingApprovalMode] = useState<ApprovalMode | null>(null);
   const queries = useSpaceQueries();
   const spaceRpc = useSpaceRpc();
+  const queryClient = useQueryClient();
   const refresh = { refetchOnMount: "always" } as const;
   const voices = useQuery({ ...queries.voice.voices.queryOptions({ input: {} }), ...refresh }).data;
   const credentialsQuery = useQuery({ ...queries.models.credentials.queryOptions(), ...refresh });
   const catalogQuery = useQuery({ ...queries.models.list.queryOptions(), ...refresh });
+  const approvalsQuery = useQuery({
+    ...queries.autoReview.get.queryOptions({ input: {} }),
+    ...refresh,
+  });
+  const overridesQuery = useQuery({
+    ...queries.spaceSettings.overrides.queryOptions(),
+    ...refresh,
+  });
   const meQuery = useQuery({ ...queries.me.queryOptions(), ...refresh });
   const credentials = credentialsQuery.data ?? NO_CREDENTIALS;
   const catalog = catalogQuery.data ?? NO_CATALOG;
   const me = meQuery.data ?? null;
+  const approvalMode = pendingApprovalMode ?? approvalsQuery.data?.mode;
+  const approvalScope =
+    overridesQuery.data && (overridesQuery.data.includes("confirmations") ? "space" : "account");
+  const approvalLoadError = approvalsQuery.error ?? overridesQuery.error;
+  const approvalDisabled =
+    !me ||
+    !approvalMode ||
+    !approvalScope ||
+    Boolean(approvalLoadError) ||
+    approvalsQuery.isFetching ||
+    overridesQuery.isFetching ||
+    pendingApprovalMode !== null;
   // No scope: read and write the model list that applies in this Space, so a Space's
   // override is what the star shows and saves rather than a silently shadowed account copy.
   const mainRoleInput = {
@@ -296,31 +323,52 @@ export function BotSettings({
     setSavedAdvanced(JSON.stringify(next));
   }, [bot]);
 
-  const connectedOptions = connectedModelChoices(credentials, catalog);
+  const connectedOptions = connectedModelChoices(credentials, catalog, true);
   const storedModel = modelKey ? parseModelOptionKey(modelKey) : null;
   const selectedModel = storedModel
     ? {
         provider: storedModel.provider,
+        connectionId: storedModel.connectionId,
         modelId: resolveSelectableModelId(catalog, storedModel.provider, storedModel.modelId),
       }
     : null;
   const selectedModelKey = selectedModel
-    ? modelOptionKey(selectedModel.provider, selectedModel.modelId)
+    ? modelOptionKey(selectedModel.provider, selectedModel.modelId, selectedModel.connectionId)
     : "";
 
   const defaultEntry = me?.defaultModel
     ? catalogEntry(catalog, me.defaultProvider, me.defaultModel)
     : undefined;
+  const primary = mainRoleQuery.data?.primary;
+  const mainConnectionId =
+    (primary?.provider === me?.defaultProvider && primary?.modelId === me?.defaultModel
+      ? primary?.credentialId
+      : undefined) ?? credentials.find((entry) => entry.isDefault)?.id;
   const defaultModelKey =
     me?.defaultProvider && me?.defaultModel
-      ? modelOptionKey(me.defaultProvider, me.defaultModel)
+      ? botModelPickerKey(
+          modelOptionKey(me.defaultProvider, me.defaultModel, mainConnectionId),
+          credentials,
+          connectedOptions,
+        )
       : "";
+  const modelValue = selectedModelKey
+    ? botModelPickerKey(selectedModelKey, credentials, connectedOptions)
+    : defaultModelKey;
   const modelChoices = chatModelChoices(
     connectedOptions,
-    selectedModelKey || defaultModelKey,
+    modelValue,
     t`Space default`,
     defaultEntry?.images,
-  ).filter((choice) => choice.key !== "");
+  ).map((choice) => {
+    if (choice.key === "" || choice.providerLabel) return choice;
+    const connection = choice.connectionId
+      ? credentials.find((entry) => entry.id === choice.connectionId)
+      : credentialForModel(credentials, choice.provider, choice.modelId);
+    return connection
+      ? { ...choice, connectionId: connection.id, providerLabel: connection.label }
+      : choice;
+  });
 
   const [pendingDefault, setPendingDefault] = useState(false);
 
@@ -333,11 +381,19 @@ export function BotSettings({
       await spaceRpc.models.setRole({
         role: "main",
         expectedUserId: me.userId,
-        primary: { provider: choice.provider, modelId: choice.modelId },
+        primary: {
+          provider: choice.provider,
+          modelId: choice.modelId,
+          ...(choice.connectionId ? { credentialId: choice.connectionId } : {}),
+        },
       });
       // The star and the effort slider both read this list; without the refresh the
       // panel keeps painting the replaced model until it is reopened.
-      await Promise.allSettled([mainRoleQuery.refetch(), meQuery.refetch()]);
+      await Promise.allSettled([
+        mainRoleQuery.refetch(),
+        meQuery.refetch(),
+        credentialsQuery.refetch(),
+      ]);
     } catch (cause) {
       setError(errorText(cause, t`Could not save`));
     } finally {
@@ -353,15 +409,16 @@ export function BotSettings({
   async function setModel(key: string) {
     if (pendingModel || pendingEffort !== null || saving || !modelMetaReady) return;
     const next = parseModelOptionKey(key);
-    if (!next) return;
+    if (key && !next) return;
     setPendingModel(true);
     setError(null);
     setModelKey(key);
     setThinkingLevel("");
     try {
       await onSave({
-        modelProvider: next.provider,
-        modelId: next.modelId,
+        modelProvider: next?.provider ?? null,
+        modelId: next?.modelId ?? null,
+        ...(next?.connectionId ? { modelCredentialId: next.connectionId } : {}),
         thinkingLevel: null,
       });
       setSavedAdvanced((previous) => {
@@ -381,7 +438,14 @@ export function BotSettings({
 
   async function setEffort(level: ThinkingLevel) {
     const primary = mainRoleQuery.data?.primary;
-    if (!me || pendingModel || pendingEffort !== null || !thinkingOptions.includes(level)) return;
+    if (
+      !me ||
+      pendingModel ||
+      pendingEffort !== null ||
+      level === "off" ||
+      !THINKING_LEVEL_OPTIONS.includes(level)
+    )
+      return;
     setPendingEffort(level);
     setError(null);
     try {
@@ -389,6 +453,7 @@ export function BotSettings({
         await onSave({
           modelProvider: selectedModel?.provider ?? null,
           modelId: selectedModel?.modelId ?? null,
+          ...(selectedModel?.connectionId ? { modelCredentialId: selectedModel.connectionId } : {}),
           thinkingLevel: level,
         });
         setThinkingLevel(level);
@@ -421,36 +486,34 @@ export function BotSettings({
     }
   }
 
+  async function setApprovalMode(mode: ApprovalMode) {
+    if (approvalDisabled || mode === approvalMode) return;
+    setError(null);
+    setPendingApprovalMode(mode);
+    try {
+      // An unscoped write lets the server choose the effective copy, just like the read.
+      const saved = await spaceRpc.autoReview.set({ mode });
+      await writeSaved(queryClient, queries.autoReview.get.queryKey({ input: {} }), () => saved);
+    } catch (cause) {
+      setError(errorText(cause, t`Could not save`));
+    } finally {
+      setPendingApprovalMode(null);
+    }
+  }
+
   const effectiveProvider = selectedModel?.provider ?? me?.defaultProvider ?? null;
   const effectiveModelId = selectedModel?.modelId ?? me?.defaultModel ?? null;
-  const effectiveEntry =
-    effectiveProvider && effectiveModelId
-      ? catalog.find(
-          (entry) =>
-            entry.provider === effectiveProvider &&
-            resolveSelectableModelId(catalog, entry.provider, entry.id) === effectiveModelId,
-        )
-      : undefined;
-  const effectiveCredential =
-    credentialForModel(credentials, effectiveProvider, effectiveModelId) ??
-    credentials.find(
-      (credential) =>
-        credential.provider === effectiveProvider &&
-        effectiveModelId &&
-        credential.catalogSource?.unavailableModelIds.includes(effectiveModelId),
-    );
-  const modelUnavailable = Boolean(
-    effectiveCredential?.catalogSource &&
-      (!effectiveCredential.catalogSource.available ||
-        (effectiveModelId &&
-          effectiveCredential.catalogSource.unavailableModelIds.includes(effectiveModelId))),
-  );
-  const thinkingOptions: readonly ThinkingLevel[] = (
-    effectiveEntry?.thinkingLevels ??
-    effectiveCredential?.thinkingLevels ??
-    []
-  ).filter((level) => level !== "off");
-  const primary = mainRoleQuery.data?.primary;
+  const effectiveConnectionId = selectedModel ? selectedModel.connectionId : mainConnectionId;
+  const effectiveCredential = effectiveConnectionId
+    ? credentials.find((entry) => entry.id === effectiveConnectionId)
+    : credentialForModel(credentials, effectiveProvider, effectiveModelId);
+  const modelUnavailable =
+    Boolean(
+      effectiveConnectionId &&
+        (!effectiveCredential || !connectedOptions.some((choice) => choice.key === modelValue)),
+    ) ||
+    connectionModelUnavailable(effectiveCredential, effectiveModelId) ||
+    Boolean(selectedModel?.provider === "openai-compatible" && !effectiveCredential);
   const usesMainModel =
     primary?.provider === effectiveProvider && primary?.modelId === effectiveModelId;
   const effortLevel =
@@ -459,7 +522,7 @@ export function BotSettings({
     (usesMainModel ? primary?.thinkingLevel : null) ??
     effectiveCredential?.thinkingLevel ??
     "medium";
-  const effectiveEffort = clampCatalogThinkingLevel(effortLevel, thinkingOptions);
+  const effectiveEffort = effortLevel;
   const glowLevel = effortPreview ?? (effectiveEffort as ThinkingLevel | null) ?? "off";
 
   async function executeSave(
@@ -511,6 +574,8 @@ export function BotSettings({
 
       if (nextName) setName(nextName);
       setDescription(nextDescription);
+      const modelChanged =
+        modelMetaReady && selectedModelKey !== (JSON.parse(savedAdvanced) as unknown[])[0];
       const patch = {
         ...(nextName && nextName !== savedNameRef.current.trim() ? { name: nextName } : {}),
         // Keep untouched profile fields off the wire.
@@ -526,16 +591,12 @@ export function BotSettings({
         memoryScope,
         autoSpeak,
         voiceId: voiceId || null,
-        modelProvider: selected?.provider ?? null,
-        modelId: selected?.modelId ?? null,
-        ...(modelMetaReady &&
-        (thinkingOptions.length > 0 ||
-          (selected?.provider ?? null) !== bot.modelProvider ||
-          (selected?.modelId ?? null) !== bot.modelId)
+        ...(modelChanged
           ? {
-              thinkingLevel: thinkingOptions.length
-                ? ((thinkingLevel || null) as ThinkingLevel | null)
-                : null,
+              modelProvider: selected?.provider ?? null,
+              modelId: selected?.modelId ?? null,
+              modelCredentialId: selected?.connectionId ?? null,
+              thinkingLevel: (thinkingLevel || null) as ThinkingLevel | null,
             }
           : {}),
       };
@@ -715,13 +776,22 @@ export function BotSettings({
               containerRef={modelRef}
               onOpenConnections={onOpenConnections}
               choices={modelChoices}
-              value={selectedModelKey || defaultModelKey}
+              value={modelValue}
               onModelChange={(key) => void setModel(key)}
               modelDisabled={pendingModel || pendingEffort !== null || saving || !modelMetaReady}
               modelSaving={pendingModel}
               modelLoading={!modelMetaReady}
               effortLevel={effortLevel}
-              effortLevels={thinkingOptions}
+              supportedEffortLevels={effectiveCredential?.thinkingLevels}
+              approvalMode={approvalMode}
+              approvalScope={approvalScope}
+              approvalError={
+                approvalLoadError
+                  ? errorText(approvalLoadError, t`Could not load permissions.`)
+                  : undefined
+              }
+              onApprovalModeChange={(mode) => void setApprovalMode(mode)}
+              approvalDisabled={approvalDisabled}
               modelUnavailable={modelUnavailable}
               onEffortChange={(level) => void setEffort(level)}
               onEffortPreview={setEffortPreview}

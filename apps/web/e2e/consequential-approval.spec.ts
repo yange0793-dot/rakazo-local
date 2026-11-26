@@ -4,6 +4,7 @@ import {
   activeBotId,
   captureScreenshot,
   completeOnboarding,
+  openBotPanelTab,
   openLocalWorkspace,
   openUserSettings,
   rpc,
@@ -72,11 +73,6 @@ test("A change asks without an approval model, and approvals settings shape what
   await expect(settings).toBeFocused();
   await settings.getByTestId("settings-nav-confirmations").click();
   await expect(settings.getByRole("heading", { name: "Approvals", exact: true })).toBeVisible();
-  const mode = settings.getByTestId("approval-mode");
-  await expect(mode.getByRole("button", { name: "Auto", exact: true })).toHaveAttribute(
-    "aria-pressed",
-    "true",
-  );
   const allowed = settings.getByTestId("approval-rules-always_allow");
   await expect(allowed.getByText("Destination.write", { exact: true })).toBeVisible();
   await captureScreenshot(page, testInfo, "52-approvals-settings");
@@ -87,15 +83,18 @@ test("A change asks without an approval model, and approvals settings shape what
   await expect(
     settings.getByTestId("approval-rules-deny").getByText("Destination.write", { exact: true }),
   ).toBeVisible();
-  await mode.getByRole("button", { name: "Never ask", exact: true }).click();
-  await expect(mode.getByRole("button", { name: "Never ask", exact: true })).toHaveAttribute(
-    "aria-pressed",
-    "true",
-  );
-  await captureScreenshot(page, testInfo, "52b-approvals-never-ask-with-block");
   await settings.getByRole("button", { name: "Close user settings" }).click();
 
-  // A blocked tool is refused without a card, even in Never ask.
+  await openBotPanelTab(page, "Model");
+  const modelSettings = page.getByTestId("bot-settings");
+  const approvalMode = modelSettings.getByRole("slider", { name: "Permissions" });
+  await modelSettings.getByRole("button", { name: "绕过权限", exact: true }).click();
+  await expect(approvalMode).toHaveAttribute("aria-valuetext", "绕过权限");
+  await expect(approvalMode).toBeEnabled();
+  await captureScreenshot(page, testInfo, "52b-model-bypass-permissions-with-block");
+  await page.getByTestId("bot-settings-trigger").click();
+
+  // The selected mode enables every permission without an approval prompt.
   await sendDestinationWrite(page, "write this to the destination crm while it is blocked");
   await waitForRunIdle(page);
   await expectComposerReady(page);

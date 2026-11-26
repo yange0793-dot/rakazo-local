@@ -69,7 +69,8 @@ export function isWorkReceiptMessage(message: {
     message.clientNonce.startsWith("work-receipt:") &&
     typeof message.replyToMessageId === "string" &&
     Array.isArray(message.blocks) &&
-    message.blocks.some((block) => block?.kind === "file")
+    !isDeliveryMessage(message.blocks) &&
+    message.blocks.some((block) => block?.kind === "file" || block?.kind === "text")
   );
 }
 

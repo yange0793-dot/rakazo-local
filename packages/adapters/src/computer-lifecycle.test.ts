@@ -32,6 +32,7 @@ import {
   replaceComputer,
   screenLeaseIdForRun,
 } from "./computer-lifecycle.js";
+import { ComputerScreenUnavailableError } from "./computer-screens.js";
 import { checkpointComputerWorkspace } from "./computer-workspace.js";
 import { FakeSandboxProvider } from "./fake-sandbox.js";
 import { LocalAgentHomeStore } from "./home.js";
@@ -2581,7 +2582,9 @@ describe("computer execution leases", () => {
     };
     const create = vi.fn().mockRejectedValue(Object.assign(new Error("unique"), { code: "P2002" }));
     const client = {
-      $queryRaw: vi.fn().mockResolvedValue([{ id: "run-2" }]),
+      $queryRaw: vi.fn(async (sql: TemplateStringsArray) =>
+        sql.join(" ").includes("SELECT id FROM runs") ? [{ id: "run-2" }] : [],
+      ),
       threadRead: {
         deleteMany: vi.fn(async () => ({ count: 0 })),
         updateMany: vi.fn(async () => ({ count: 0 })),
@@ -2592,11 +2595,24 @@ describe("computer execution leases", () => {
         updateMany: vi.fn().mockResolvedValue({ count: 0 }),
         update: vi
           .fn()
-          .mockResolvedValueOnce({ nextMessageSeq: 0, historyCompactionGeneration: 0 })
+          .mockResolvedValueOnce({
+            nextMessageSeq: 0,
+            historyCompactionGeneration: 0,
+            userId: "user-1",
+          })
           .mockResolvedValue({ nextEventSeq: 1 }),
       },
+      ticket: { findMany: vi.fn(async () => []), updateMany: vi.fn(async () => ({ count: 0 })) },
+      workEvent: { updateMany: vi.fn(async () => ({ count: 0 })) },
+      externalAgentExecution: {
+        findMany: vi.fn(async () => []),
+        updateMany: vi.fn(async () => ({ count: 0 })),
+      },
       run: {
-        findMany: vi.fn().mockResolvedValue([{ id: "run-1", taskId: "task-1" }]),
+        findMany: vi
+          .fn()
+          .mockResolvedValueOnce([])
+          .mockResolvedValue([{ id: "run-1", taskId: "task-1" }]),
         updateManyAndReturn: vi.fn(async ({ where }: { where: { id: { in: string[] } } }) =>
           where.id.in.map((id) => ({ id })),
         ),
@@ -2658,7 +2674,12 @@ describe("computer execution leases", () => {
       botId: "bot-1",
     });
 
-    expect(next).toMatchObject({ runId: "run-2", fence: 2 });
+    expect(next).toEqual({
+      computerId: "computer-1",
+      botId: "bot-1",
+      runId: "run-2",
+      fence: 2,
+    });
     await expect(
       sandbox.observe(computer, {
         ...context,
@@ -2666,6 +2687,9 @@ describe("computer execution leases", () => {
         screenLeaseId: screenLeaseIdForRun(next, "run-2"),
       }),
     ).resolves.toMatchObject({ activeWindow: expect.anything() });
+    await expect(
+      sandbox.observe(computer, { ...context, screenLeaseId: "run-1:1" }),
+    ).rejects.toThrow(ComputerScreenUnavailableError);
     expect(create).not.toHaveBeenCalled();
   });
 

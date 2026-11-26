@@ -11,16 +11,22 @@ const api = vi.hoisted(() => ({
   listSpace: vi.fn(),
   listVersions: vi.fn(),
   getById: vi.fn(),
+  remove: vi.fn(),
 }));
-const rpcClient = vi.hoisted(() => ({ artifacts: api, bootstrap: vi.fn() }));
+const rpcClient = vi.hoisted(() => ({
+  artifacts: api,
+  bootstrap: vi.fn().mockResolvedValue({ bots: [] }),
+}));
+const ambient = vi.hoisted(() => ({ remove: vi.fn(), selected: vi.fn<() => string | null>() }));
+const otherSpaceRemove = vi.hoisted(() => vi.fn());
 vi.mock("../lib/rpc", () => ({
-  rpc: rpcClient,
-  rpcForSpace: () => rpcClient,
+  rpc: { ...rpcClient, artifacts: { ...api, remove: ambient.remove } },
+  rpcForSpace: (spaceId: string) =>
+    spaceId === "space-b"
+      ? { ...rpcClient, artifacts: { ...api, remove: otherSpaceRemove } }
+      : rpcClient,
   createSpaceRpc: () => rpcClient,
-  selectedSpaceId: () => null,
-}));
-vi.mock("../lib/bootstrap", () => ({
-  takeInitialBootstrap: vi.fn().mockResolvedValue({ bots: [] }),
+  selectedSpaceId: ambient.selected,
 }));
 vi.mock("../lib/artifact-open", () => ({
   decodeArtifactBase64: () => new TextEncoder().encode("Preview contents"),
@@ -28,7 +34,8 @@ vi.mock("../lib/artifact-open", () => ({
 }));
 vi.mock("../lib/relative-time", () => ({ formatRelativeTime: () => "just now" }));
 vi.mock("@lingui/react/macro", () => {
-  const t = (parts: TemplateStringsArray) => parts.join("");
+  const t = (parts: TemplateStringsArray, ...values: unknown[]) =>
+    String.raw({ raw: parts }, ...values);
   return { useLingui: () => ({ t }), Trans: ({ children }: { children: ReactNode }) => children };
 });
 vi.mock("@rakazo/chat-ui/web", () => ({
@@ -38,7 +45,11 @@ vi.mock("@rakazo/ui-web", () => {
   const Container = ({ children }: { children?: ReactNode }) => <div>{children}</div>;
   return {
     AlertDialog: Container,
-    AlertDialogAction: Container,
+    AlertDialogAction: ({ onClick, children }: ComponentProps<"button">) => (
+      <button type="button" onClick={onClick}>
+        {children}
+      </button>
+    ),
     AlertDialogCancel: Container,
     AlertDialogContent: Container,
     AlertDialogDescription: Container,
@@ -111,6 +122,7 @@ function typeSearch(container: HTMLElement, value: string) {
 let queryClient: QueryClient;
 beforeEach(() => {
   queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+  ambient.selected.mockReset().mockReturnValue(null);
 });
 
 async function renderArtifacts(path = "/app/artifacts") {
@@ -151,6 +163,45 @@ it("opens the Artifacts screen and lists what listSpace returns", async () => {
     expect(page.container.textContent).toContain("Q3 Content Calendar");
     expect(page.container.querySelector("a[href='/app']")?.getAttribute("aria-label")).toBe("Back");
     expect(page.container.querySelector("[data-testid='app-rail']")).toBeNull();
+  } finally {
+    await page.cleanup();
+    vi.unstubAllGlobals();
+  }
+});
+
+it("deletes from the Space that supplied the mounted listing after selection changes", async () => {
+  vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
+  ambient.selected.mockReturnValue("space-a");
+  api.listSpace.mockResolvedValue({ items: [artifact("Report", "artifact-1")], nextCursor: null });
+  api.remove.mockResolvedValue({ ok: true });
+  const page = await renderArtifacts();
+  try {
+    const remove = page.container.querySelector<HTMLButtonElement>(
+      'button[aria-label="Delete Report"]',
+    );
+    expect(remove).not.toBeNull();
+    ambient.selected.mockReturnValue("space-b");
+    await act(async () => remove?.click());
+    expect(page.container.textContent).toContain('Delete "Report"?');
+    expect(api.remove).not.toHaveBeenCalled();
+    expect(otherSpaceRemove).not.toHaveBeenCalled();
+    expect(ambient.remove).not.toHaveBeenCalled();
+    const confirm = Array.from(page.container.querySelectorAll("button")).find(
+      (button) => button.textContent === "Delete",
+    );
+    expect(confirm).toBeDefined();
+    await act(async () => confirm?.click());
+    expect(api.remove).toHaveBeenCalledExactlyOnceWith({ artifactId: "artifact-1" });
+    expect(otherSpaceRemove).not.toHaveBeenCalled();
+    expect(ambient.remove).not.toHaveBeenCalled();
+    await vi.waitFor(() =>
+      expect(page.container.querySelector('a[href="/app/artifacts/artifact-1"]')).toBeNull(),
+    );
+    const listings = queryClient.getQueryCache().findAll({
+      predicate: (query) => JSON.stringify(query.queryKey).includes("listSpace"),
+    });
+    expect(listings).toHaveLength(1);
+    expect(listings[0]?.queryKey[0]).toContain("space:space-a");
   } finally {
     await page.cleanup();
     vi.unstubAllGlobals();

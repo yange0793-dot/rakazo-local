@@ -14,6 +14,9 @@ import {
   IsolationError,
   isUniqueViolation,
   itemSecretIn,
+  recordSecurityEvent,
+  requireMembership,
+  runAsTenant,
 } from "@rakazo/db";
 import { getLogger } from "@rakazo/logging";
 import {
@@ -37,6 +40,7 @@ import {
   mcpAssignmentDto,
   mcpServerDto,
 } from "../mcp-servers.js";
+import { procedureSecurityEvent } from "../security-audit.js";
 import type { RouterContext } from "./context.js";
 import { computerContext } from "./shared.js";
 
@@ -53,6 +57,7 @@ export function mcpRoutes(ctx: RouterContext) {
     insertMcpServer,
     announceMcpServer,
     authed,
+    os,
   } = ctx;
   return {
     mcp: {
@@ -617,35 +622,38 @@ export function mcpRoutes(ctx: RouterContext) {
             });
           }
         }),
-        complete: authed.mcp.oauth.complete.handler(async ({ context, input }) => {
+        // The pending attempt supplies the tenant for the exchange, probe, and audit event.
+        complete: os.mcp.oauth.complete.handler(async ({ context, input, path }) => {
+          if (!context.actor) throw new ORPCError("UNAUTHORIZED");
           try {
-            const { serverId, revision } = await mcpOAuth.complete({
-              ...input,
-              spaceId: context.actor.spaceId,
-              userId: context.actor.userId,
+            const userId = context.actor.userId;
+            const spaceId = await mcpOAuth.pendingSpace({ ...input, userId });
+            const membership = await requireMembership(deps.prisma, userId, spaceId);
+            const actor = { ...membership, isDeploymentOwner: context.actor.isDeploymentOwner };
+            return await runAsTenant(actor, async () => {
+              const { serverId, revision } = await mcpOAuth.complete({ ...input, spaceId, userId });
+              // A newer edit or sign-in owns its own health check.
+              await recordMcpServerHealth(
+                deps.prisma,
+                serverId,
+                { status: "unknown", message: null },
+                revision,
+              );
+              void (async () => {
+                const server = await deps.prisma.mcpServer.findFirst({
+                  where: { id: serverId, revision, ...availableInSpace(actor) },
+                });
+                if (server)
+                  await beginMcpProbe(server, actor, await mcpOAuth.summaryFor(server, actor));
+              })().catch((error) =>
+                getLogger().error("mcp server probe after oauth failed", error),
+              );
+              const event = procedureSecurityEvent(path, input, actor);
+              if (event) await recordSecurityEvent(event);
+              return { ok: true as const };
             });
-            // A check from before the sign-in would otherwise still read as failing. Only this
-            // sign-in's revision: an edit since then has its own health and its own check.
-            await recordMcpServerHealth(
-              deps.prisma,
-              serverId,
-              { status: "unknown", message: null },
-              revision,
-            );
-            // The account is connected now: check the server so it shows ok/error.
-            void (async () => {
-              const server = await deps.prisma.mcpServer.findFirst({
-                where: { id: serverId, revision, ...availableInSpace(context.actor) },
-              });
-              if (server)
-                await beginMcpProbe(
-                  server,
-                  context.actor,
-                  await mcpOAuth.summaryFor(server, context.actor),
-                );
-            })().catch((error) => getLogger().error("mcp server probe after oauth failed", error));
-            return { ok: true as const };
           } catch (error) {
+            if (error instanceof IsolationError) throw new ORPCError("NOT_FOUND");
             throw new ORPCError("BAD_REQUEST", {
               message: error instanceof Error ? error.message : "Could not complete MCP OAuth",
             });

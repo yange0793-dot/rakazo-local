@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import { getPage, removePage, setPageVisibility } from "./pages.js";
+import { getPage, listPages, PageListCursorError, removePage, setPageVisibility } from "./pages.js";
 
 type Row = { id: string; title: string; visibility: string; shareSecretId: string | null };
 
@@ -102,6 +102,31 @@ const actor = { userId: "user-1", spaceId: "space-1" } as never;
 const signal = new AbortController().signal;
 const share = (deps: unknown, visibility: "link" | "private") =>
   setPageVisibility(deps as never, actor, { pageId: "page-1", visibility }, signal);
+
+describe("page listing", () => {
+  it("searches for literal punctuation in a title", async () => {
+    const findMany = vi.fn(async () => []);
+    await listPages({ page: { findMany } } as never, actor, { query: "50%_off" });
+    expect(findMany).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: expect.objectContaining({
+          title: { contains: "50\\%\\_off", mode: "insensitive" },
+        }),
+      }),
+    );
+  });
+
+  it("rejects a cursor whose date fields are not strings", async () => {
+    const findMany = vi.fn(async () => []);
+    const cursor = Buffer.from(
+      JSON.stringify({ id: "page-1", updatedAt: 0, pinnedAt: null }),
+    ).toString("base64url");
+    await expect(listPages({ page: { findMany } } as never, actor, { cursor })).rejects.toThrow(
+      PageListCursorError,
+    );
+    expect(findMany).not.toHaveBeenCalled();
+  });
+});
 
 describe("page links", () => {
   it("gives a later or racing turn-on the link the page already has", async () => {

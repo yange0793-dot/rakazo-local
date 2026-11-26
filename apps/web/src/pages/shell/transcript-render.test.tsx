@@ -69,7 +69,13 @@ function message(id: string, text: string): ThreadMessage {
   };
 }
 
-function Host({ messages }: { messages: ThreadMessage[] }) {
+function Host({
+  messages,
+  loadOlder,
+}: {
+  messages: ThreadMessage[];
+  loadOlder?: () => Promise<void>;
+}) {
   const scrollRef = useRef<HTMLDivElement>(null);
   const artifactTarget = useMemo(() => ({ botId: "bot" }), []);
   const none = useMemo(() => new Set<string>(), []);
@@ -95,14 +101,14 @@ function Host({ messages }: { messages: ThreadMessage[] }) {
         mergedInto: new Map(),
       }}
       showToolActivity={false}
-      olderCursor={null}
+      olderCursor={loadOlder ? 1 : null}
       unreadAfterSeq={null}
       loadingOlder={false}
       answerableAskIds={none}
       dismissableAskIds={none}
       running={false}
       workingBots={[]}
-      onLoadOlder={reply}
+      onLoadOlder={loadOlder ?? reply}
       onOpenBot={reply}
       onAnswer={answer}
       onReply={reply}
@@ -124,6 +130,23 @@ function Host({ messages }: { messages: ThreadMessage[] }) {
     />
   );
 }
+
+it("shows a history load failure and clears it when the reader tries again", async () => {
+  const loadOlder = vi
+    .fn<() => Promise<void>>()
+    .mockRejectedValueOnce(new Error("History is unavailable"))
+    .mockResolvedValueOnce(undefined);
+  act(() => root.render(<Host messages={[]} loadOlder={loadOlder} />));
+  const button = container.querySelector<HTMLButtonElement>(
+    'button[aria-label="Load earlier messages"]',
+  );
+  expect(button).not.toBeNull();
+  await act(async () => button?.click());
+  expect(container.querySelector('[role="alert"]')?.textContent).toBeTruthy();
+  await act(async () => button?.click());
+  expect(container.querySelector('[role="alert"]')).toBeNull();
+  expect(loadOlder).toHaveBeenCalledTimes(2);
+});
 
 it.each([false, true])(
   "leaves an unchanged message unrendered when a later one updates (mentions: %s)",

@@ -1,4 +1,5 @@
 import { Trans, useLingui } from "@lingui/react/macro";
+import { modelRoleChoiceKey } from "@rakazo/contracts";
 import { modelCatalogSearchText } from "@rakazo/core";
 import {
   Command,
@@ -25,7 +26,11 @@ export type ConnectableProvider = { id: string; name: string; baseUrl?: string }
 export type RoleModelOption = ModelCatalogEntry & { credentialId?: string };
 
 const optionValue = (option: RoleModelOption) =>
-  `${option.provider}:${option.id}:${option.credentialId ?? ""}`;
+  modelRoleChoiceKey({
+    provider: option.provider,
+    modelId: option.id,
+    credentialId: option.credentialId,
+  });
 
 /**
  * One picker for every model a role can use: connected models pick directly, and
@@ -71,12 +76,16 @@ export function RoleModelPicker({
     text: (row) => (row.option ? modelCatalogSearchText(row.option) : row.provider!.name),
   });
   const groups = useMemo(() => {
-    const grouped = new Map<string, RoleModelOption[]>();
+    const grouped = new Map<string, { name: string; entries: RoleModelOption[] }>();
     for (const row of visible) {
       if (!row.option) continue;
       const option = row.option;
-      const name = option.providerName ?? option.provider;
-      grouped.set(name, [...(grouped.get(name) ?? []), option]);
+      const key = option.credentialId
+        ? `connection:${option.credentialId}`
+        : `provider:${option.provider}`;
+      const group = grouped.get(key);
+      if (group) group.entries.push(option);
+      else grouped.set(key, { name: option.providerName ?? option.provider, entries: [option] });
     }
     return [...grouped];
   }, [visible]);
@@ -84,7 +93,7 @@ export function RoleModelPicker({
   const matchingProviders = visible.flatMap((row) => (row.provider ? [row.provider] : []));
   const values = [
     ...(defaultOption && !needle ? ["default"] : []),
-    ...groups.flatMap(([, entries]) => entries.map(optionValue)),
+    ...groups.flatMap(([, group]) => group.entries.map(optionValue)),
     ...matchingProviders.map((provider) => `connect:${provider.id}:${provider.baseUrl ?? ""}`),
   ];
   // The first row is active whenever the list changes, so Enter always picks something.
@@ -176,8 +185,8 @@ export function RoleModelPicker({
                 </CommandItem>
               </CommandGroup>
             ) : null}
-            {groups.map(([name, entries]) => (
-              <CommandGroup key={name} heading={name}>
+            {groups.map(([key, { name, entries }]) => (
+              <CommandGroup key={key} value={key} heading={name}>
                 {entries.map((option) => (
                   <CommandItem
                     key={optionValue(option)}

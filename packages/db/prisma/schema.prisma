@@ -360,8 +360,7 @@ model ActionAutoReviewPreference {
   space         Space    @relation(fields: [spaceId], references: [id], onDelete: Cascade)
   userId        String
   user          User     @relation(fields: [userId], references: [id], onDelete: Cascade)
-  enabled       Boolean  @default(false)
-  skipApprovals Boolean  @default(false)
+  mode          String   @default("ask")
   createdAt     DateTime @default(now())
   updatedAt     DateTime @updatedAt
 
@@ -781,6 +780,7 @@ model Bot {
   autoSpeak         Boolean           @default(false)
   modelProvider     String?
   modelId           String?
+  modelCredentialId String?
   thinkingLevel     String?
   disabledBuiltinTools String[] @default([])
   webhookSecretId   String?
@@ -1035,6 +1035,7 @@ model Run {
   trigger              String
   modelProvider        String?
   modelId              String?
+  modelCredentialId    String?
   thinkingLevel        String?
   // True when these columns are the model the run must keep. A later attempt
   // may record the model it used in the same columns without setting this.
@@ -1063,13 +1064,15 @@ model Run {
   startedAt            DateTime?
   // The occurrence a recurring timer run was due at, recorded at its first start only when it started late.
   lateSince            DateTime?
-  /// Outside content entered this run, or it was not started by its owner. Lesson auto-apply requires false.
+  /// Outside content entered this run, or it was not started by its owner. Verified owner corrections are checked separately.
   tainted              Boolean           @default(false)
   /// False on historical runs and when learning was disabled: absence of a taint flag is not clearance.
   learningSourceChecked Boolean          @default(false)
   completedAt          DateTime?
   ticketId             String?
   ticket               Ticket?           @relation("TicketExecutions", fields: [ticketId], references: [id], onDelete: SetNull)
+  workControlEpoch     Int?
+  workRequirementsVersion Int?
   startedTickets       Ticket[]          @relation("TicketOriginRun")
   botOutcomeReturnedAt DateTime?
   messagingMirroredAt  DateTime?
@@ -2482,13 +2485,107 @@ model Ticket {
   workState      Json?
   workStateVersion Int @default(0)
   subscriptions TicketSubscription[]
+  managedVersion Int @default(0)
+  parentTicketId String?
+  parentTicket Ticket? @relation("ManagedTicketChildren", fields: [parentTicketId], references: [id], onDelete: SetNull)
+  childTickets Ticket[] @relation("ManagedTicketChildren")
+  controlEpoch Int @default(0)
+  stopRequestedAt DateTime?
+  requirementsVersion Int @default(1)
+  acceptedRequirementsVersion Int?
+  acceptedReceiptVersion Int?
+  originRoutineId String?
+  originGeneration Int?
+  dependencies TicketDependency[] @relation("TicketDependencies")
+  dependents TicketDependency[] @relation("TicketDependents")
+  workEvents WorkEvent[]
 
   @@index([originThreadId, updatedAt])
+  @@index([parentTicketId])
 
   @@unique([boardId, number])
   @@index([spaceId, status])
   @@index([boardId, status])
   @@map("tickets")
+}
+
+model TicketDependency {
+  id String @id @default(cuid())
+  spaceId String
+  ticketId String
+  ticket Ticket @relation("TicketDependencies", fields: [ticketId], references: [id], onDelete: Cascade)
+  prerequisiteTicketId String
+  prerequisiteTicket Ticket @relation("TicketDependents", fields: [prerequisiteTicketId], references: [id], onDelete: Cascade)
+  requirementsVersion Int
+  receiptVersion Int?
+  createdAt DateTime @default(now())
+
+  @@unique([ticketId, prerequisiteTicketId])
+  @@index([spaceId, prerequisiteTicketId])
+  @@map("ticket_dependencies")
+}
+
+// Execution and cancellation references survive deletion of the initiating chat or Run.
+model ExternalAgentExecution {
+  id String @id @default(cuid())
+  spaceId String
+  userId String
+  ownerBotId String
+  threadId String
+  ticketId String
+  runId String?
+  operationKey String @unique
+  connectionId String?
+  provider String
+  route Json
+  request Json
+  sessionId String?
+  turnId String?
+  cursor String @default("0")
+  status String @default("registered")
+  operationState String @default("registered")
+  controlEpoch Int @default(0)
+  leaseOwner String?
+  leaseExpiresAt DateTime?
+  leaseFence Int @default(0)
+  lastEventAt DateTime?
+  stopRequestedAt DateTime?
+  completedAt DateTime?
+  result Json?
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([spaceId, ticketId, status])
+  @@index([spaceId, threadId, status])
+  @@index([status, leaseExpiresAt])
+  @@map("external_agent_executions")
+}
+
+// Durable obligations consumed through the existing Run/JobPublisher lifecycle.
+model WorkEvent {
+  id String @id @default(cuid())
+  spaceId String
+  userId String
+  ticketId String
+  ticket Ticket @relation(fields: [ticketId], references: [id], onDelete: Cascade)
+  eventKey String @unique
+  kind String
+  controlEpoch Int
+  targetBotId String
+  targetThreadId String
+  sourceTicketId String?
+  sourceRunId String?
+  wakeRunId String?
+  payload Json?
+  status String @default("pending")
+  handledAt DateTime?
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([spaceId, ticketId, status])
+  @@index([status, createdAt])
+  @@index([wakeRunId])
+  @@map("work_events")
 }
 
 model TicketSubscription {
@@ -2734,8 +2831,7 @@ model UserActionApprovalRule {
 model UserActionAutoReviewPreference {
   userId        String   @id
   user          User     @relation(fields: [userId], references: [id], onDelete: Cascade)
-  enabled       Boolean  @default(false)
-  skipApprovals Boolean  @default(false)
+  mode          String   @default("ask")
   createdAt     DateTime @default(now())
   updatedAt     DateTime @updatedAt
 

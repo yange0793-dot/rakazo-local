@@ -36,8 +36,10 @@ function emptySkill() {
 function recordingDeps(skill: ReturnType<typeof skillRow>) {
   let current = structuredClone(skill);
   const tx = {
+    $queryRaw: vi.fn(),
     $executeRaw: vi.fn(),
     taughtSkill: {
+      findUnique: vi.fn(async () => current),
       findUniqueOrThrow: vi.fn(async () => current),
       update: vi.fn(async ({ data }: { data: Record<string, unknown> }) => {
         current = { ...current, ...data };

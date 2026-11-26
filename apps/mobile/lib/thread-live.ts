@@ -241,8 +241,13 @@ export function useThreadLiveSubscription({
                   }
                 }
               }
-              const shouldProject = (event.seq ?? -1) > projectionFloor;
-              if (!shouldProject && !newEvent) return;
+              const previous = snapRef.current;
+              const snapshotCursor =
+                previous?.threadId === event.threadId ? previous?.cursor : undefined;
+              const afterProjectionFloor = (event.seq ?? -1) > projectionFloor;
+              const shouldProject =
+                afterProjectionFloor && (event.seq ?? -1) > (snapshotCursor ?? -1);
+              if (!afterProjectionFloor && !newEvent) return;
               if (shouldProject) {
                 if (event.type === "thread.cleared") {
                   expandedHistoryThread.current = null;
@@ -251,7 +256,6 @@ export function useThreadLiveSubscription({
                   jumpAnchor.current.release();
                   historyEpoch.current += 1;
                 }
-                const previous = snapRef.current;
                 const reduced = reduceThreadSnapshot(previous, event);
                 if (reduced !== previous) commitSnap(reduced);
               }

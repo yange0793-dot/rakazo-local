@@ -11,6 +11,7 @@ import {
   SandboxRateLimitError,
   TransientModelError,
 } from "@rakazo/adapter-kit";
+import type { MessageBlock } from "@rakazo/contracts";
 import {
   BACKGROUND_HELPER_TRIGGER,
   containsSecret,
@@ -230,7 +231,7 @@ export async function consumeRunEvents(
         reply.assistantTurnText = "";
       }
       if (event.type === "text") {
-        await streamText(ctx, event);
+        if (!ctx.state.deliveredWorkReceipt) await streamText(ctx, event);
       } else if (event.type === "turn") {
         reply.assistantTurnBreakPending = true;
       } else if (event.type === "steered") {
@@ -257,6 +258,7 @@ export async function consumeRunEvents(
           operationId: runId,
         });
       } else if (event.type === "done") {
+        if (ctx.state.deliveredWorkReceipt) continue;
         recordExplicitNoResponse(reply, event.text ?? "");
         if (!reply.assembled && event.text) {
           if (reply.publishedMidTurnUserMessage || reply.discardedMidTurnNarration) {
@@ -829,6 +831,17 @@ async function noteGroupPass(ctx: RunContext) {
 export async function completeRun(ctx: RunContext) {
   const { deps, run, runId, bot, thread, context } = ctx;
   const { reply } = ctx.state;
+  const deliveredManagedWork =
+    run.ticketId && run.workControlEpoch != null
+      ? await deps.prisma.message.findFirst({
+          where: {
+            runId,
+            role: "bot",
+            clientNonce: { startsWith: `work-receipt:${run.ticketId}:` },
+          },
+          select: { id: true, blocks: true },
+        })
+      : null;
   recordExplicitNoResponse(reply, reply.assistantTurnText);
   ctx.computer.lazy.throwIfFailed();
   if (ctx.state.approval.pausePending || !ctx.state.lease.valid) return;
@@ -946,15 +959,24 @@ export async function completeRun(ctx: RunContext) {
       skipEmptyFallback: reply.publishedTerminalSubagent || reply.publishedMidTurnUserMessage,
     });
   }
-  const blocks = ctx.state.handedOff
-    ? []
-    : finalBlocksAfterMidTurnProgress(
-        redactBlocks(completionBlocks, ctx.secrets),
-        reply.publishedMidTurnUserMessage || runAllowsSilentEmpty(run.trigger),
-      );
+  const blocks =
+    ctx.state.handedOff || deliveredManagedWork
+      ? []
+      : finalBlocksAfterMidTurnProgress(
+          redactBlocks(completionBlocks, ctx.secrets),
+          reply.publishedMidTurnUserMessage || runAllowsSilentEmpty(run.trigger),
+        );
   const text = ctx.state.handedOff
     ? ""
-    : redactSecrets(completionNotificationBody(silentReply.assembled, blocks), ctx.secrets);
+    : redactSecrets(
+        deliveredManagedWork
+          ? (deliveredManagedWork.blocks as MessageBlock[])
+              .filter((block) => block.kind === "text")
+              .map((block) => block.text)
+              .join("\n\n")
+          : completionNotificationBody(silentReply.assembled, blocks),
+        ctx.secrets,
+      );
   if (containsSecret(text, ctx.secrets)) {
     throw new Error("refusing to persist a secret in the thread");
   }
@@ -963,6 +985,7 @@ export async function completeRun(ctx: RunContext) {
   // failure, not a successful delegated summary.
   if (
     !ctx.state.handedOff &&
+    !deliveredManagedWork &&
     !silentReply.assembled.trim() &&
     emptyDelegatedToolTurnShouldFail(completionBlocks)
   ) {
@@ -991,7 +1014,7 @@ export async function completeRun(ctx: RunContext) {
     leaseFence: ctx.fence,
     outcome: "completed",
     blocks,
-    markUnread: !groupSilentEnd && marksUnread,
+    markUnread: !deliveredManagedWork && !groupSilentEnd && marksUnread,
     memoryArchiveAt:
       deps.automaticMemory?.enabled && (run.trigger === "user" || run.trigger === "follow_up")
         ? new Date((deps.now?.() ?? new Date()).getTime() + 60_000)

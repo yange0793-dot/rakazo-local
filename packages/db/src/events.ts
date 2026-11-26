@@ -19,10 +19,11 @@ import {
 import { getLogger } from "@rakazo/logging";
 import { cancelRunsInTransaction } from "./cancel-runs.js";
 import { createChatAlerts } from "./chat-alerts.js";
-import type { PrismaClient } from "./client.js";
+import type { Artifact, PrismaClient } from "./client.js";
 import { Prisma } from "./client.js";
 import { expireComputerExecutionLeases } from "./computers.js";
 import { contentEncryptionOf } from "./content-encryption.js";
+import { requestManagedWorkStopInTransaction } from "./coordination.js";
 import {
   CrossSpaceCommunicationBlockedError,
   crossSpaceCommunicationAllowed,
@@ -51,6 +52,7 @@ import { createRowId } from "./row-id.js";
 import { deleteRunSecretsInTransaction } from "./run-secrets.js";
 import { isRunResponse, readRunTimingFields } from "./run-timing.js";
 import { RUN_TURN_CHECKPOINT_KIND } from "./run-turn-checkpoint.js";
+import { SemanticFactStore } from "./semantic-facts.js";
 import { SpaceDeletionInProgressError, spaceTakesWork } from "./spaces.js";
 import type { AnswerRunInput, PauseRunForInput, RunSecretWriter } from "./thread-ask.js";
 import { answerRunInput, pauseRunForInput } from "./thread-ask.js";
@@ -96,6 +98,25 @@ export function transientRunEventsWhere(): Prisma.EventWhereInput {
   };
 }
 
+/** Match the original activity shape even when the stored payload is sealed. */
+export async function deleteTransientRunEvents(
+  tx: Prisma.TransactionClient,
+  runId: string | Prisma.StringNullableFilter<"Event">,
+) {
+  const where = transientRunEventsWhere();
+  if (contentEncryptionOf(tx)) {
+    const candidates = await tx.event.findMany({
+      where: { runId, type: "thread.meta" },
+      select: { id: true, payload: true },
+    });
+    const ids = candidates
+      .filter(({ payload }) => ThreadActivityPayloadSchema.safeParse(payload).success)
+      .map(({ id }) => id);
+    if (ids.length) where.OR!.push({ id: { in: ids } });
+  }
+  await tx.event.deleteMany({ where: { runId, ...where } });
+}
+
 export interface ThreadEvents {
   notifyIncomingCalls?(userId: string): Promise<void>;
   followIncomingCalls?(userId: string, signal?: AbortSignal): AsyncGenerator<void>;
@@ -131,6 +152,24 @@ export interface ClearThreadInput {
   /** A pre-clear archive drained this exact source generation and conversation head. */
   expectedGeneration?: number;
   expectedNextMessageSeq?: number;
+  archiveCoverage?: "required" | "if-activated";
+  removeTicketImprovementFile?: (
+    file: Pick<TicketImprovementFile, "id" | "storageKey" | "botId">,
+  ) => Promise<void>;
+}
+
+export class ThreadClearStorageError extends Error {
+  constructor(cause?: unknown) {
+    super("Skill comparison files could not be removed. No messages were deleted.", { cause });
+    this.name = "ThreadClearStorageError";
+  }
+}
+
+export class ThreadArchiveCoverageError extends Error {
+  constructor() {
+    super("Memory archiving is unavailable. No messages were deleted.");
+    this.name = "ThreadArchiveCoverageError";
+  }
 }
 
 export class ThreadClearConflictError extends Error {
@@ -146,6 +185,59 @@ export interface ClearThreadResult {
   event: ProductEvent;
   cancelledRunIds: string[];
   historyCompactionGeneration: number;
+}
+
+export const TICKET_IMPROVEMENT_NONCE_PREFIX = "ticket-improvement:";
+
+type TicketImprovementFile = Pick<Artifact, "id" | "storageKey" | "botId" | "rootArtifactId">;
+
+type TicketImprovementCleanup = {
+  generation: number;
+  nextMessageSeq: number;
+  keys: ReadonlyMap<string, string>;
+};
+
+function lockTicketImprovementFiles(
+  tx: Prisma.TransactionClient,
+  spaceId: string,
+  threadIds: string[],
+) {
+  return tx.$queryRaw<TicketImprovementFile[]>`
+    SELECT a.id, a."storageKey", a."botId", a."rootArtifactId"
+    FROM artifacts a
+    JOIN runs r ON r.id = a."runId" AND r."spaceId" = a."spaceId"
+    JOIN tickets t ON t.id = r."ticketId" AND t."spaceId" = r."spaceId"
+    WHERE a."spaceId" = ${spaceId}
+      AND t."originThreadId" IN (${Prisma.join(threadIds)})
+      AND a."clientNonce" LIKE ${TICKET_IMPROVEMENT_NONCE_PREFIX + "%"}
+      AND a.name = 'Skill comparison.json' AND a."mimeType" = 'application/json'
+    ORDER BY a.id FOR UPDATE OF a`;
+}
+
+async function retireTicketImprovementFiles(
+  tx: Prisma.TransactionClient,
+  spaceId: string,
+  files: TicketImprovementFile[],
+) {
+  if (!files.length) return;
+  const ids = files.map(({ id }) => id);
+  const roots = files.filter(({ rootArtifactId }) => rootArtifactId === null).map(({ id }) => id);
+  if (roots.length) {
+    // Old checkpoints joined the same-name artifact family. Keep its unrelated versions.
+    await tx.$executeRaw`
+      WITH surviving_roots AS (
+        SELECT DISTINCT ON ("rootArtifactId") "rootArtifactId", id
+        FROM artifacts
+        WHERE "rootArtifactId" IN (${Prisma.join(roots)})
+          AND id NOT IN (${Prisma.join(ids)})
+        ORDER BY "rootArtifactId", version, id
+      )
+      UPDATE artifacts a
+      SET "rootArtifactId" = CASE WHEN a.id = s.id THEN NULL ELSE s.id END
+      FROM surviving_roots s
+      WHERE a."rootArtifactId" = s."rootArtifactId" AND a.id NOT IN (${Prisma.join(ids)})`;
+  }
+  await tx.artifact.deleteMany({ where: { id: { in: ids }, spaceId } });
 }
 
 export interface FinalizeRunResult {
@@ -273,7 +365,12 @@ export async function clearThread(
   input: ClearThreadInput,
   realtime?: RealtimeFanout,
 ): Promise<ClearThreadResult> {
-  const committed = await prisma.$transaction(async (tx: Prisma.TransactionClient) => {
+  // Blob deletion stays outside the database transaction. A failed or interrupted removal
+  // leaves the rows as retry references and preserves the chat.
+  const clearInTransaction = async (
+    tx: Prisma.TransactionClient,
+    cleanup?: TicketImprovementCleanup,
+  ) => {
     // Group before thread, the order every group writer uses (see lockOwnedGroup).
     if (input.groupId) {
       await tx.$queryRaw`
@@ -295,33 +392,55 @@ export async function clearThread(
       (input.expectedGeneration !== undefined &&
         thread.historyCompactionGeneration !== input.expectedGeneration) ||
       (input.expectedNextMessageSeq !== undefined &&
-        thread.nextMessageSeq !== input.expectedNextMessageSeq)
+        thread.nextMessageSeq !== input.expectedNextMessageSeq) ||
+      (cleanup &&
+        (thread.historyCompactionGeneration !== cleanup.generation ||
+          thread.nextMessageSeq !== cleanup.nextMessageSeq))
     ) {
       throw new ThreadClearConflictError();
     }
-    await clearThreadReads(tx, input.threadId);
-    // Background helpers this chat started work in threads of their own, group chats included.
+    if (
+      input.archiveCoverage ||
+      (input.expectedGeneration !== undefined && input.expectedNextMessageSeq !== undefined)
+    ) {
+      const progress = await tx.memoryArchiveProgress.findUnique({
+        where: { threadId: input.threadId },
+        select: {
+          generation: true,
+          processedUpToSeq: true,
+          spaceId: true,
+          botId: true,
+          userId: true,
+        },
+      });
+      if (
+        (input.archiveCoverage !== "if-activated" || progress) &&
+        (!progress ||
+          progress.generation !== thread.historyCompactionGeneration ||
+          progress.processedUpToSeq < thread.nextMessageSeq - 1 ||
+          (input.archiveCoverage &&
+            (progress.spaceId !== input.spaceId ||
+              progress.botId !== input.botId ||
+              progress.userId !== thread.userId)))
+      ) {
+        if (input.archiveCoverage) {
+          // A prior clear leaves its retired progress and a monotone message head.
+          const hasMessages = await tx.message.findFirst({
+            where: { threadId: input.threadId },
+            select: { id: true },
+          });
+          if (hasMessages) throw new ThreadArchiveCoverageError();
+        } else {
+          throw new ThreadClearConflictError();
+        }
+      }
+    }
+    // Find helper threads while their origin messages still link them to this chat.
+    // Lock all cleared threads before cancelling their runs, as finalization does.
     const helpers = {
       trigger: BACKGROUND_HELPER_TRIGGER,
       sourceMessage: { threadId: input.threadId },
     };
-    const activeRuns = await tx.run.findMany({
-      where: {
-        spaceId: input.spaceId,
-        OR: [
-          input.groupId
-            ? { threadId: input.threadId }
-            : { threadId: input.threadId, botId: input.botId },
-          helpers,
-        ],
-        status: { in: ["queued", "leased", "running", "waiting_input", "waiting_takeover"] },
-      },
-      select: { id: true, taskId: true, userId: true, spaceId: true },
-    });
-    const now = new Date();
-    const runIds = (await cancelRunsInTransaction(tx, activeRuns, now)).map((run) => run.id);
-    // Expire as tombstones so a still-open provider screen claim cannot reset fencing to 1.
-    await expireComputerExecutionLeases(tx, { runId: { in: runIds } });
     // Only the helper threads this chat started keep their history with it: clear is read
     // before the source messages go, which would cut the link. A helper another chat started
     // stays that chat's to clear. Imported threads predate runs, so a private chat keeps
@@ -340,16 +459,71 @@ export async function clearThread(
       select: { id: true },
     });
     const helperThreadIds = helperThreads.map((thread) => thread.id);
-    const cleared = { threadId: { in: [input.threadId, ...helperThreadIds] } };
+    if (helperThreadIds.length) {
+      await tx.$queryRaw`SELECT id FROM threads WHERE id IN (${Prisma.join(helperThreadIds)}) ORDER BY id FOR UPDATE`;
+    }
+    const threadIds = [input.threadId, ...helperThreadIds];
+    const files = await lockTicketImprovementFiles(tx, input.spaceId, threadIds);
+    if (!cleanup && files.length) {
+      return {
+        kind: "remove-files" as const,
+        files,
+        generation: thread.historyCompactionGeneration,
+        nextMessageSeq: thread.nextMessageSeq,
+      };
+    }
+    if (cleanup && files.some(({ id, storageKey }) => cleanup.keys.get(id) !== storageKey))
+      throw new ThreadClearConflictError();
+
+    await clearThreadReads(tx, input.threadId);
+    const managed = await requestManagedWorkStopInTransaction(tx, {
+      spaceId: input.spaceId,
+      userId: thread.userId,
+      threadId: input.threadId,
+    });
+    if (managed.ticketIds.length || managed.executionIds.length) {
+      await tx.externalAgentExecution.updateMany({
+        where: {
+          spaceId: input.spaceId,
+          OR: [{ ticketId: { in: managed.ticketIds } }, { id: { in: managed.executionIds } }],
+        },
+        data: { request: Prisma.JsonNull, result: Prisma.DbNull },
+      });
+      await tx.workEvent.updateMany({
+        where: { spaceId: input.spaceId, ticketId: { in: managed.ticketIds } },
+        data: { payload: Prisma.DbNull },
+      });
+    }
+    const activeRuns = await tx.run.findMany({
+      where: {
+        spaceId: input.spaceId,
+        OR: [
+          input.groupId
+            ? { threadId: input.threadId }
+            : { threadId: input.threadId, botId: input.botId },
+          helpers,
+          { id: { in: managed.runIds } },
+        ],
+        status: { in: ["queued", "leased", "running", "waiting_input", "waiting_takeover"] },
+      },
+      select: { id: true, taskId: true, userId: true, spaceId: true },
+    });
+    const now = new Date();
+    const runIds = (await cancelRunsInTransaction(tx, activeRuns, now)).map((run) => run.id);
+    // Expire as tombstones so a still-open provider screen claim cannot reset fencing to 1.
+    await expireComputerExecutionLeases(tx, { runId: { in: runIds } });
+    const cleared = { threadId: { in: threadIds } };
+    await new SemanticFactStore(prisma).clearThreadSourcesInTransaction(tx, {
+      spaceId: input.spaceId,
+      threadIds,
+    });
+    await retireTicketImprovementFiles(tx, input.spaceId, files);
     await tx.message.deleteMany({ where: cleared });
     await tx.event.deleteMany({ where: cleared });
     if (helperThreadIds.length > 0) {
       // Their history went too, so compaction has nothing left to summarize.
       await tx.thread.updateMany({
-        where: {
-          id: { in: helperThreadIds },
-          historyCompactionSummary: { not: null },
-        },
+        where: { id: { in: helperThreadIds } },
         data: { historyCompactionSummary: null, historyCompactionGeneration: { increment: 1 } },
       });
     }
@@ -383,17 +557,40 @@ export async function clearThread(
       });
     }
     const event = await appendEventInTransaction(tx, {
-      ...input,
+      spaceId: input.spaceId,
+      threadId: input.threadId,
+      botId: input.botId,
       type: "thread.cleared",
       payload: {},
     });
     return {
+      kind: "committed" as const,
       event,
       userId: thread.userId,
       cancelledRunIds: runIds,
       historyCompactionGeneration: thread.historyCompactionGeneration,
     };
-  }, THREAD_LOCK_TRANSACTION_OPTIONS);
+  };
+  const attempt = (cleanup?: TicketImprovementCleanup) =>
+    prisma.$transaction((tx) => clearInTransaction(tx, cleanup), THREAD_LOCK_TRANSACTION_OPTIONS);
+
+  let committed = await attempt();
+  if (committed.kind === "remove-files") {
+    const remove = input.removeTicketImprovementFile;
+    if (!remove) throw new ThreadClearStorageError();
+    const { generation, nextMessageSeq, files } = committed;
+    const keys = new Map<string, string>();
+    for (const file of files) {
+      try {
+        await remove(file);
+      } catch (error) {
+        throw new ThreadClearStorageError(error);
+      }
+      keys.set(file.id, file.storageKey);
+    }
+    committed = await attempt({ generation, nextMessageSeq, keys });
+  }
+  if (committed.kind !== "committed") throw new ThreadClearConflictError();
   await notifyRealtime(realtime, committed.event.threadId, committed.event.seq);
   if (!input.groupId && committed.userId)
     await realtime?.publish(`incoming-calls:${committed.userId}`, "").catch(() => undefined);
@@ -924,9 +1121,7 @@ async function finalizeRunOnce(
       runId: input.runId,
       payload: input.outcome === "completed" ? {} : { error: input.error },
     });
-    await tx.event.deleteMany({
-      where: { runId: input.runId, ...transientRunEventsWhere() },
-    });
+    await deleteTransientRunEvents(tx, input.runId);
     if (writableRun) {
       await deleteRunSecretsInTransaction(tx, [
         { id: input.runId, userId: writableRun.userId, spaceId: input.spaceId },

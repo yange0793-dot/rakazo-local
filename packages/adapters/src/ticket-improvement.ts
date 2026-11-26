@@ -7,6 +7,7 @@ import type {
 } from "@rakazo/adapter-kit";
 import type { MessageBlock } from "@rakazo/contracts";
 import {
+  ATTACHMENT_MAX_BYTES,
   ImprovementComponentSetSchema,
   MessageReactionSchema,
   SkillPlaybookSchema,
@@ -18,12 +19,13 @@ import {
   redactSecrets,
   withAbort,
 } from "@rakazo/core";
-import type { Artifact, PrismaClient, ThreadEvents } from "@rakazo/db";
+import type { Artifact, Prisma, PrismaClient, ThreadEvents } from "@rakazo/db";
 import {
   appendEventInTransaction,
   createThreadMessageInTransaction,
   openTaughtSkillSnapshot,
   recordUsage,
+  TICKET_IMPROVEMENT_NONCE_PREFIX,
   THREAD_LOCK_TRANSACTION_OPTIONS,
   withTransactionRetry,
 } from "@rakazo/db";
@@ -47,7 +49,6 @@ import {
   taughtSkillPlaybookHash,
   taughtSkillRevisionHash,
 } from "./taught-skill-revisions.js";
-import { attachWorkspaceFileToThread } from "./thread-artifacts.js";
 import { ticketReceiptsEnabled } from "./ticket-receipt-config.js";
 import type {
   JsonValue,
@@ -136,6 +137,7 @@ type PilotSource = {
   task: string;
   project: string;
   originThreadId: string;
+  originGeneration?: number;
   originBotId: string;
   originGroupId: string | null;
   receiptMessageId: string;
@@ -184,6 +186,8 @@ type PilotRecord = {
   status: "proposed" | "adopted" | "retained" | "conflict" | "skipped" | "unknown";
 };
 type Stored = { artifact: Artifact; record: PilotRecord; bytes: Uint8Array };
+
+class TicketImprovementSourceRetiredError extends Error {}
 
 /** Exact quote matching establishes provenance; the model judges the feedback's meaning. */
 export function parseTicketImprovementProposal(text: string, feedback: string): Proposal | null {
@@ -352,6 +356,113 @@ function messageText(blocks: unknown): string {
     .trim();
 }
 
+async function requireLiveFeedback(
+  db: Pick<Prisma.TransactionClient, "message">,
+  { source, baseline }: PilotRecord,
+): Promise<void> {
+  const feedback = await db.message.findFirst({
+    where: {
+      id: source.feedback.messageId,
+      threadId: source.originThreadId,
+      role: "user",
+      authorUserId: baseline.userId,
+      thread: {
+        spaceId: baseline.spaceId,
+        ...(source.originGeneration === undefined
+          ? {}
+          : { historyCompactionGeneration: source.originGeneration }),
+      },
+      replyTo: {
+        is: {
+          id: source.receiptMessageId,
+          threadId: source.originThreadId,
+          runId: source.runId,
+          role: "bot",
+          botId: source.originBotId,
+          clientNonce: { startsWith: `work-receipt:${source.ticketId}:` },
+        },
+      },
+    },
+    select: { id: true },
+  });
+  if (!feedback) throw new TicketImprovementSourceRetiredError();
+}
+
+async function lockLiveFeedback(tx: Prisma.TransactionClient, record: PilotRecord) {
+  await tx.$queryRaw`
+    SELECT id FROM threads WHERE id = ${record.source.originThreadId}
+      AND "spaceId" = ${record.baseline.spaceId} FOR NO KEY UPDATE`;
+  await requireLiveFeedback(tx, record);
+}
+
+/** A ticket revision and its feedback check must use the revision service's same transaction. */
+function revisionClient(prisma: PrismaClient, record: PilotRecord): PrismaClient {
+  return new Proxy(prisma, {
+    get(client, key, receiver) {
+      if (key === "$transaction") {
+        return <T>(write: (tx: Prisma.TransactionClient) => Promise<T>) =>
+          client.$transaction(async (tx) => {
+            await lockLiveFeedback(tx, record);
+            return write(tx);
+          }, THREAD_LOCK_TRANSACTION_OPTIONS);
+      }
+      return Reflect.get(client, key, receiver);
+    },
+  });
+}
+
+async function attachReviewArtifact(
+  deps: TicketImprovementDeps,
+  record: PilotRecord,
+  bytes: Uint8Array,
+  target: { botId: string; groupId?: string | null; nonce: string },
+): Promise<Artifact> {
+  if (bytes.byteLength > ATTACHMENT_MAX_BYTES)
+    throw new Error("Skill comparison file exceeds the attachment limit");
+  const { baseline, source } = record;
+  const context = {
+    operationId: target.nonce,
+    traceId: target.nonce,
+    spaceId: baseline.spaceId,
+    userId: baseline.userId,
+    botId: target.botId,
+    signal: new AbortController().signal,
+  };
+  const name = "Skill comparison.json";
+  const mimeType = "application/json";
+  const hash = createHash("sha256").update(bytes).digest("hex");
+  let storageKey: string | undefined;
+  try {
+    return await deps.prisma.$transaction(async (tx) => {
+      await lockLiveFeedback(tx, record);
+      storageKey = (await deps.artifacts.put({ name, mimeType, bytes }, context)).id;
+      // Review files have their own lifecycle. Same-name user files must never depend on them.
+      return tx.artifact.create({
+        data: {
+          spaceId: baseline.spaceId,
+          userId: baseline.userId,
+          botId: target.botId,
+          groupId: target.groupId ?? null,
+          runId: source.runId,
+          name,
+          mimeType,
+          size: bytes.byteLength,
+          hash,
+          storageKey,
+          standalone: true,
+          clientNonce: target.nonce,
+        },
+      });
+    }, THREAD_LOCK_TRANSACTION_OPTIONS);
+  } catch (error) {
+    if (storageKey)
+      await deps.artifacts.remove(storageKey, context).catch((failure) =>
+        getLogger().error("ticket improvement checkpoint cleanup", failure),
+      );
+    throw error;
+  }
+}
+
 async function readStored(
   deps: TicketImprovementDeps,
   baseline: TaughtSkillRevision,
@@ -371,14 +482,8 @@ async function readStored(
     },
   });
   if (!artifact) return null;
-  const bytes = await deps.artifacts.get(artifact.storageKey, {
-    operationId: comparisonId,
-    traceId: comparisonId,
-    spaceId: baseline.spaceId,
-    userId: baseline.userId,
-    botId: baseline.botId,
-    signal: AbortSignal.timeout(30_000),
-  });
+  const bytes = await readReviewBytes(deps, artifact, baseline, comparisonId, AbortSignal.timeout(30_000));
+  if (!bytes) return null;
   if (createHash("sha256").update(bytes).digest("hex") !== artifact.hash)
     throw new Error("Improvement checkpoint hash mismatch");
   const record = JSON.parse(new TextDecoder().decode(bytes)) as PilotRecord;
@@ -393,6 +498,34 @@ async function readStored(
   return { artifact, bytes, record };
 }
 
+async function readReviewBytes(
+  deps: TicketImprovementDeps,
+  artifact: Artifact,
+  baseline: TaughtSkillRevision,
+  operationId: string,
+  signal: AbortSignal,
+): Promise<Uint8Array | null> {
+  try {
+    return await withAbort(deps.artifacts.get(artifact.storageKey, {
+      operationId,
+      traceId: operationId,
+      spaceId: baseline.spaceId,
+      userId: baseline.userId,
+      botId: baseline.botId,
+      signal,
+    }), signal);
+  } catch (error) {
+    signal.throwIfAborted();
+    // Clear can unlink a checkpoint between the row lookup and the blob read.
+    const current = await deps.prisma.artifact.findUnique({
+      where: { id: artifact.id },
+      select: { id: true },
+    });
+    if (current) throw error;
+    return null;
+  }
+}
+
 async function storeRecord(deps: TicketImprovementDeps, record: PilotRecord): Promise<Stored> {
   const prior = await readStored(
     deps,
@@ -403,25 +536,14 @@ async function storeRecord(deps: TicketImprovementDeps, record: PilotRecord): Pr
   );
   if (prior) return prior;
   const bytes = new TextEncoder().encode(JSON.stringify(record, null, 2));
-  let row: Artifact | undefined;
   try {
-    await attachWorkspaceFileToThread(deps, {
-      spaceId: record.baseline.spaceId,
-      userId: record.baseline.userId,
+    const artifact = await attachReviewArtifact(deps, record, bytes, {
       botId: record.baseline.botId,
-      runId: record.source.runId,
-      filePath: `${record.comparisonId}.json`,
-      name: "Skill comparison.json",
-      operationId: `${record.comparisonId}:${record.phase}`,
-      bytes,
-      onAttached: async (tx, artifact) => {
-        row = await tx.artifact.update({
-          where: { id: artifact.id },
-          data: { clientNonce: `${record.comparisonId}:${record.phase}` },
-        });
-      },
+      nonce: `${record.comparisonId}:${record.phase}`,
     });
+    return { artifact, bytes, record };
   } catch (error) {
+    if (error instanceof TicketImprovementSourceRetiredError) throw error;
     const replay = await readStored(
       deps,
       record.baseline,
@@ -432,8 +554,6 @@ async function storeRecord(deps: TicketImprovementDeps, record: PilotRecord): Pr
     if (replay) return replay;
     throw error;
   }
-  if (!row) throw new Error("Missing improvement checkpoint");
-  return { artifact: row, bytes, record };
 }
 
 async function historyForProposal(
@@ -452,7 +572,7 @@ async function historyForProposal(
           botId: baseline.botId,
           groupId: null,
           runId: { not: null },
-          clientNonce: { startsWith: "ticket-improvement:", endsWith: ":comparison" },
+          clientNonce: { startsWith: TICKET_IMPROVEMENT_NONCE_PREFIX, endsWith: ":comparison" },
           mimeType: "application/json",
         },
         orderBy: [{ createdAt: "desc" }, { id: "desc" }],
@@ -465,17 +585,10 @@ async function historyForProposal(
     if (!records.length) break;
     for (const artifact of records) {
       signal.throwIfAborted();
-      const bytes = await withAbort(
-        deps.artifacts.get(artifact.storageKey, {
-          operationId: "ticket-improvement:history",
-          traceId: "ticket-improvement:history",
-          spaceId: baseline.spaceId,
-          userId: baseline.userId,
-          botId: baseline.botId,
-          signal,
-        }),
-        signal,
+      const bytes = await readReviewBytes(
+        deps, artifact, baseline, "ticket-improvement:history", signal,
       );
+      if (!bytes) continue;
       signal.throwIfAborted();
       if (createHash("sha256").update(bytes).digest("hex") !== artifact.hash)
         throw new Error("Improvement history hash mismatch");
@@ -741,22 +854,10 @@ async function publishResult(deps: TicketImprovementDeps, stored: Stored): Promi
     });
     if (prior) file = prior;
     else {
-      await attachWorkspaceFileToThread(deps, {
-        spaceId: baseline.spaceId,
-        userId: baseline.userId,
+      file = await attachReviewArtifact(deps, record, bytes, {
         botId: source.originBotId,
-        groupId: source.originGroupId ?? undefined,
-        runId: source.runId,
-        filePath: `${comparisonId}.json`,
-        name: "Skill comparison.json",
-        bytes,
-        operationId: nonce,
-        onAttached: async (tx, artifact) => {
-          file = await tx.artifact.update({
-            where: { id: artifact.id },
-            data: { clientNonce: nonce },
-          });
-        },
+        groupId: source.originGroupId,
+        nonce,
       });
     }
   }
@@ -772,8 +873,7 @@ async function publishResult(deps: TicketImprovementDeps, stored: Stored): Promi
   const clientNonce = `${comparisonId}:reply`;
   const seq = await withTransactionRetry(() =>
     deps.prisma.$transaction(async (tx) => {
-      // This is a host-authored background result, with no running run's write lease or runId.
-      await tx.$queryRaw`SELECT id FROM threads WHERE id = ${source.originThreadId} FOR UPDATE`;
+      await lockLiveFeedback(tx, record);
       const existing = await tx.message.findUnique({
         where: { threadId_clientNonce: { threadId: source.originThreadId, clientNonce } },
         select: { id: true, blocks: true },
@@ -822,6 +922,7 @@ async function finishComparison(deps: TicketImprovementDeps, stored: Stored): Pr
       ? "reject"
       : "inconclusive");
   const actor = { spaceId: record.baseline.spaceId, userId: record.baseline.userId };
+  const prisma = revisionClient(deps.prisma, record);
   const result: PilotRecord = {
     ...record,
     phase: "result",
@@ -840,7 +941,7 @@ async function finishComparison(deps: TicketImprovementDeps, stored: Stored): Pr
     if (!candidateId) {
       if (!selfEvolutionEnabled()) return stored;
       candidateId = (
-        await snapshotTaughtSkillRevision(deps.prisma, actor, {
+        await snapshotTaughtSkillRevision(prisma, actor, {
           skillId: record.baseline.skillId,
           playbook: comparison.candidate.playbook,
           components: comparison.candidate.components,
@@ -853,7 +954,7 @@ async function finishComparison(deps: TicketImprovementDeps, stored: Stored): Pr
     result.candidateRevisionId = candidateId;
     if (decision === "adopt" && trial.withinBudget) {
       const current = await getCurrentTaughtSkillRevision(
-        deps.prisma,
+        prisma,
         actor,
         record.baseline.skillId,
       );
@@ -861,7 +962,7 @@ async function finishComparison(deps: TicketImprovementDeps, stored: Stored): Pr
         result.activation = { status: "activated", revision: current };
       else {
         if (!selfEvolutionEnabled()) return stored;
-        result.activation = await activateTaughtSkillRevision(deps.prisma, actor, {
+        result.activation = await activateTaughtSkillRevision(prisma, actor, {
           skillId: record.baseline.skillId,
           revisionId: candidateId,
           expectedCurrentRevisionId: record.baseline.id,
@@ -886,6 +987,18 @@ async function finishComparison(deps: TicketImprovementDeps, stored: Stored): Pr
 
 /** True means this receipt's review is owned by the pilot; otherwise normal reflection proceeds. */
 export async function reflectTicketImprovement(
+  deps: TicketImprovementDeps,
+  payload: ReflectionPayload,
+): Promise<boolean> {
+  try {
+    return await reviewTicketImprovement(deps, payload);
+  } catch (error) {
+    if (error instanceof TicketImprovementSourceRetiredError) return true;
+    throw error;
+  }
+}
+
+async function reviewTicketImprovement(
   deps: TicketImprovementDeps,
   payload: ReflectionPayload,
 ): Promise<boolean> {
@@ -916,6 +1029,7 @@ export async function reflectTicketImprovement(
               botId: true,
               groupId: true,
               externalConversationId: true,
+              historyCompactionGeneration: true,
             },
           },
         },
@@ -982,7 +1096,7 @@ export async function reflectTicketImprovement(
     const text = messageText(feedback.blocks);
     if (!text || MessageReactionSchema.safeParse(text).success || text.length > 12_000) continue;
     const digest = createHash("sha256").update(`${feedback.id}:${baseline.id}`).digest("hex");
-    const comparisonId = `ticket-improvement:${digest}`;
+    const comparisonId = `${TICKET_IMPROVEMENT_NONCE_PREFIX}${digest}`;
     const final = await readStored(deps, baseline, comparisonId, "result", run.id);
     if (final) {
       await publishResult(deps, final);
@@ -1056,6 +1170,7 @@ export async function reflectTicketImprovement(
             task: run.task.prompt,
             project: baseline.snapshot.scope.project?.path ?? `unscoped-${family.id}`,
             originThreadId: origin.id,
+            originGeneration: origin.historyCompactionGeneration,
             originBotId: ticket.createdByBotId,
             originGroupId: origin.groupId,
             receiptMessageId: parent.id,
@@ -1117,10 +1232,12 @@ export async function reflectTicketImprovement(
         )
           record.proposal.error = "original_model_route_unavailable";
         else {
+          await requireLiveFeedback(deps.prisma, record);
           record.model = safeModel(executionModel);
           record.proposal = await propose(deps, record, executionModel);
         }
-      } catch {
+      } catch (error) {
+        if (error instanceof TicketImprovementSourceRetiredError) throw error;
         record.proposal.error = "model_resolution_failed";
       }
       proposed = await storeRecord(deps, record);
@@ -1172,6 +1289,7 @@ export async function reflectTicketImprovement(
       proposal.playbook,
       proposal.components ?? baseline.snapshot.components,
     );
+    await requireLiveFeedback(deps.prisma, proposed.record);
     const comparison = await compareAndComposeWorkImprovement(
       {
         comparisonId,

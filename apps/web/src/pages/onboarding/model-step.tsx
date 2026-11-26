@@ -1,5 +1,6 @@
 import { Plural, Trans, useLingui } from "@lingui/react/macro";
 import type { ThinkingLevel } from "@rakazo/contracts";
+import { THINKING_LEVEL_OPTIONS } from "@rakazo/core";
 import {
   Button,
   Input,
@@ -253,6 +254,14 @@ export function ModelStep({ model, fieldId }: { model: OnboardingModel; fieldId:
 /** Server URL, found or typed model id, and advanced options for an OpenAI-compatible server. */
 function CompatibleServerFields({ model, fieldId }: { model: OnboardingModel; fieldId: string }) {
   const { t } = useLingui();
+  const thinkingLevelLabels = {
+    minimal: t`Minimal`,
+    low: t`Low`,
+    medium: t`Medium`,
+    high: t`High`,
+    xhigh: t`Extra high`,
+    max: t`Max`,
+  } as const;
   const {
     baseUrl,
     contextWindow,
@@ -362,14 +371,10 @@ function CompatibleServerFields({ model, fieldId }: { model: OnboardingModel; fi
         thinkingLabel={t`Supports thinking`}
         thinkingLevel={thinkingLevel}
         onThinkingLevelChange={(value) => setThinkingLevel(value as ThinkingLevel | null)}
-        thinkingLevelOptions={[
-          { value: "minimal", label: t`Minimal` },
-          { value: "low", label: t`Low` },
-          { value: "medium", label: t`Medium` },
-          { value: "high", label: t`High` },
-          { value: "xhigh", label: t`Extra high` },
-          { value: "max", label: t`Max` },
-        ]}
+        thinkingLevelOptions={THINKING_LEVEL_OPTIONS.map((value) => ({
+          value,
+          label: thinkingLevelLabels[value],
+        }))}
         thinkingLevelLabel={t`Reasoning effort`}
         thinkingLevelDefaultLabel={t`Default`}
         maxTokens={maxTokens}

@@ -4,8 +4,8 @@ import {
   buildModelConnectPlaintext,
   CHATGPT_OAUTH_PROVIDER,
   codexLiveListsModel,
-  compatibleThinkingLevels,
   defaultCatalogModelId,
+  deleteSecretBestEffort,
   modelCredentialDto,
   parseModelSecret,
   prepareAllowedThinkingLevels as prepareModelThinkingLevels,
@@ -22,11 +22,13 @@ import {
   storedPiProviderIds,
   usableModelId,
 } from "@rakazo/contracts";
-import { clampCatalogThinkingLevel } from "@rakazo/core";
+import { canSelectThinkingLevel } from "@rakazo/core";
 import {
   deleteUnreferencedCredentialSecret,
   findNewestUserModelCredential,
   getModelRole,
+  lockAccountModels,
+  lockSpaceSettings,
   modelCredentialProviderFilter,
   modelRoleTarget,
   Prisma,
@@ -39,7 +41,7 @@ import { assertNoDanglingModelPins } from "./model-pins.js";
 import type { RouterDeps } from "./router.js";
 
 export function prepareAllowedThinkingLevels(
-  deps: RouterDeps,
+  deps: { prisma: Prisma.TransactionClient; secrets: RouterDeps["secrets"] },
   actor: Actor,
   provider: string,
   modelId: string,
@@ -52,12 +54,6 @@ export function prepareAllowedThinkingLevels(
     modelId,
     resolution,
   );
-}
-
-async function allowedThinkingLevels(
-  ...args: Parameters<typeof prepareAllowedThinkingLevels>
-): Promise<string[] | undefined> {
-  return (await prepareAllowedThinkingLevels(...args)).allowed;
 }
 
 /**
@@ -146,16 +142,6 @@ export async function prepareModelCredential(
     resolvedCodexModelId ??
     defaultCatalogModelId(input.provider, input.plaintext) ??
     usableModelId(deps.env.defaultModel);
-  // A compatible connect may enable its new default, so judge it by the secret being saved.
-  const allowedThinking = !defaultModel
-    ? undefined
-    : input.provider === OPENAI_COMPATIBLE_PROVIDER_ID
-      ? compatibleThinkingLevels(
-          { id: "", provider: input.provider, label: "", defaultModel },
-          input.plaintext,
-          defaultModel,
-        ).allowed
-      : await allowedThinkingLevels(deps, actor, input.provider, defaultModel);
   const stored = await deps.secrets.put(input.plaintext, {
     operationId: "cred",
     traceId: "cred",
@@ -163,7 +149,7 @@ export async function prepareModelCredential(
     userId: actor.userId,
     signal: input.signal ?? new AbortController().signal,
   });
-  return { stored, defaultModel, allowedThinking };
+  return { stored, defaultModel };
 }
 
 /** Create-only: null when the provider is already connected. */
@@ -173,6 +159,9 @@ export async function createImportedModelCredential(
   input: ModelCredentialInput,
   prepared: Awaited<ReturnType<typeof prepareModelCredential>>,
 ) {
+  if (input.provider === OPENAI_COMPATIBLE_PROVIDER_ID) {
+    await lockAccountModels(tx, actor.userId);
+  }
   const existing = await tx.userModelCredential.findFirst({
     where: { userId: actor.userId, provider: { in: storedPiProviderIds(input.provider) } },
     select: { id: true },
@@ -186,8 +175,9 @@ async function writeModelCredential(
   actor: Actor,
   input: ModelCredentialInput,
   prepared: Awaited<ReturnType<typeof prepareModelCredential>>,
+  secrets?: RouterDeps["secrets"],
 ) {
-  const { stored, defaultModel, allowedThinking } = prepared;
+  const { stored, defaultModel } = prepared;
   throwIfAborted(input.signal);
   const existing = input.credentialId
     ? await tx.userModelCredential.findFirst({
@@ -201,6 +191,30 @@ async function writeModelCredential(
   // A connection removed while this save was in flight stays removed.
   if (input.credentialId && !existing)
     throw new ORPCError("NOT_FOUND", { message: "Connection not found" });
+  const target = await modelRoleTarget(tx, actor, input.scope);
+  const mainRole = await getModelRole(tx, target, "main");
+  const runsMain = Boolean(existing && mainRole.primary?.credentialId === existing.id);
+  const becomesMain =
+    input.makeDefault !== false &&
+    Boolean(defaultModel) &&
+    (!input.keepExistingDefault || !mainRole.primary);
+  if (existing && secrets && input.provider === OPENAI_COMPATIBLE_PROVIDER_ID) {
+    const preference =
+      runsMain && !becomesMain
+        ? await tx.userModelPreference.findFirst({
+            where: { userId: actor.userId, credentialId: existing.id },
+            select: { modelId: true },
+          })
+        : null;
+    await assertNoDanglingModelPins(
+      tx,
+      secrets,
+      actor,
+      existing,
+      parseModelSecret(input.plaintext),
+      runsMain && !becomesMain ? (preference?.modelId ?? null) : defaultModel,
+    );
+  }
   throwIfAborted(input.signal);
   const secret = await tx.secret.create({
     data: {
@@ -239,22 +253,16 @@ async function writeModelCredential(
         },
       });
   throwIfAborted(input.signal);
-  // Connect and limit saves can still carry an effort chosen for the previous
-  // model. Keep it only when this model supports it; otherwise clamp or clear.
-  const thinkingLevel =
-    input.thinkingLevel === undefined
-      ? undefined
-      : defaultModel
-        ? clampCatalogThinkingLevel(input.thinkingLevel, allowedThinking)
-        : null;
-  const target = await modelRoleTarget(tx, actor, input.scope);
-  const mainRole = await getModelRole(tx, target, "main");
-  const runsMain = mainRole.primary?.credentialId === credential.id;
-  // Only an explicit main-model connect changes a role. Omitted means yes for older apps.
-  const becomesMain =
-    input.makeDefault !== false &&
-    Boolean(defaultModel) &&
-    (!input.keepExistingDefault || !mainRole.primary);
+  let thinkingLevel: string | null | undefined;
+  if (input.thinkingLevel !== undefined) {
+    if (!input.thinkingLevel || input.thinkingLevel === "off") {
+      thinkingLevel = null;
+    } else if (canSelectThinkingLevel(input.thinkingLevel)) {
+      thinkingLevel = input.thinkingLevel;
+    } else {
+      throw new ORPCError("BAD_REQUEST", { message: "Unsupported thinking level" });
+    }
+  }
   // A main-model connect keeps the effort its model already had.
   const ownThinking = becomesMain
     ? ((
@@ -290,12 +298,28 @@ export async function persistModelCredential(
   codexCatalog: CodexLiveCatalog,
 ) {
   const prepared = await prepareModelCredential(deps, actor, input, codexCatalog);
-  throwIfAborted(input.signal);
+  const compatible = input.provider === OPENAI_COMPATIBLE_PROVIDER_ID;
   const cred = await withTransactionRetry(() =>
-    deps.prisma.$transaction((tx) => writeModelCredential(tx, actor, input, prepared), {
-      isolationLevel: Prisma.TransactionIsolationLevel.Serializable,
-    }),
-  );
+    deps.prisma.$transaction(
+      async (tx) => {
+        if (compatible) {
+          await lockSpaceSettings(tx, actor);
+          await lockAccountModels(tx, actor.userId);
+        }
+        return writeModelCredential(tx, actor, input, prepared, deps.secrets);
+      },
+      {
+        isolationLevel: compatible
+          ? Prisma.TransactionIsolationLevel.ReadCommitted
+          : Prisma.TransactionIsolationLevel.Serializable,
+      },
+    ),
+  ).catch(async (error: unknown) => {
+    if (error instanceof ORPCError) {
+      await deleteSecretBestEffort(deps.secrets, prepared.stored.ciphertext, prepared.stored.id);
+    }
+    throw error;
+  });
   (deps.providerCatalog ?? providerCatalogCache).invalidate(canonicalPiProviderId(input.provider));
   return modelCredentialDto(cred, input.plaintext);
 }
@@ -371,14 +395,6 @@ export function createModelConnector(deps: RouterDeps, codexCatalog: CodexLiveCa
       throw new ORPCError("BAD_REQUEST", {
         message: error instanceof Error ? error.message : "Invalid model connection",
       });
-    }
-    if (input.provider === OPENAI_COMPATIBLE_PROVIDER_ID) {
-      // Known race: this runs before persistModelCredential's transaction, so a pin saved in
-      // between can fall outside the stored list and fail at run time. Concurrent saves of
-      // the same connection are last-write-wins.
-      const saved = parseModelSecret(plaintext);
-      if (credential)
-        await assertNoDanglingModelPins(deps, actor, credential, saved, input.modelId ?? "");
     }
     return { plaintext, credential };
   };

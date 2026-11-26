@@ -641,6 +641,18 @@ describe("CreateOSSandboxProvider", () => {
     expect(events.at(-1)).toEqual({ type: "exit", code: 1 });
   });
 
+  it("fails a successful HTTP response without a command exit code", async () => {
+    const plane = createosControlPlane({
+      status: "running",
+      failExec: () => jsonResponse({ result: { stdout: "started\n" } }),
+    });
+    expect(await runEcho(plane.provider())).toEqual([
+      { type: "stdout", data: "started\n" },
+      { type: "stderr", data: "CreateOS command did not report an exit code\n" },
+      { type: "exit", code: 1 },
+    ]);
+  });
+
   it("refuses a plaintext base url outside loopback", () => {
     expect(
       () => new CreateOSSandboxProvider({ apiKey: "test-key", baseUrl: "http://api.example.com" }),

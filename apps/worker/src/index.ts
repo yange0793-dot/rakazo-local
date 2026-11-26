@@ -16,6 +16,7 @@ import {
   configuredEmailProvider,
   contentKeyProviderFromEnv,
   createAgentHomeStore,
+  createAgentRuntimeSelection,
   createApnsActivityProvider,
   createApnsVoipProvider,
   createArtifactStore,
@@ -43,16 +44,15 @@ import {
   isMessagingSurfaceEnabled,
   messagingEnvFromProcess,
   messagingPlatformsFromEnv,
-  PiAgentRuntime,
   PostgresRealtimeFanout,
   PrismaPushTokenStore,
+  parseAgentRuntimeRoutes,
   RunJobPublisher,
   RunStarter,
   RunWorkerHost,
   resolvePiSessionRoot,
   resolveSandboxProvider,
   runRuntimeEnvFromProcess,
-  ScriptedAgentRuntime,
   SpaceMemoryProviderResolver,
   sandboxProviderOptionsFromEnv,
   shutdownPiTelemetry,
@@ -135,10 +135,12 @@ async function main() {
   });
   const env = runRuntimeEnvFromProcess(process.env);
   const boardEvents = createBoardEvents(realtime);
-  const runtime =
-    process.env.AGENT_RUNTIME === "scripted"
-      ? new ScriptedAgentRuntime()
-      : new PiAgentRuntime({ sessionRoot: resolvePiSessionRoot(env.dataDir) });
+  const runtime = await createAgentRuntimeSelection({
+    defaultRuntime: process.env.AGENT_RUNTIME,
+    routes: parseAgentRuntimeRoutes(process.env.AGENT_RUNTIME_ROUTES),
+    dataDir: env.dataDir,
+    piSessionRoot: resolvePiSessionRoot(env.dataDir),
+  });
   const sandboxProvider = resolveSandboxProvider(process.env);
   const sandboxOptions = sandboxProviderOptionsFromEnv(process.env);
   const sandbox = await createRunSandbox(sandboxProvider, {
@@ -260,7 +262,17 @@ async function main() {
     );
 
   const reconciler = createRunReconciler(
-    { prisma, jobs, events, notifications, cloudAgent, paymentWallet, mediaGeneration },
+    {
+      prisma,
+      jobs,
+      events,
+      notifications,
+      cloudAgent,
+      paymentWallet,
+      mediaGeneration,
+      connector: connectors.stack.connector,
+      shutdownSignal: shutdown.signal,
+    },
     {
       leadership: createPostgresReconciliationLeadership(pool),
       reconcileRoutineRetryNotices: inMemoryJobs

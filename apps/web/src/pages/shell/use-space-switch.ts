@@ -4,7 +4,7 @@ import { initialBootstrapTarget } from "../../lib/bootstrap-target";
 import { getSnapshot as getCallSnapshot } from "../../lib/call-session";
 import { leaveOrganization } from "../../lib/organizations";
 import { queryClient, spaceSeedKey } from "../../lib/query";
-import { selectedSpaceId, selectSpace } from "../../lib/rpc";
+import { selectSpace } from "../../lib/rpc";
 import { remountShellForSpace, spaceSwitchDecision } from "../../lib/space-switch";
 import { speaker } from "../../lib/tts";
 import { readShellOverlay, searchString, withShellOverlay } from "../shell-overlay";
@@ -15,14 +15,14 @@ import type { useShellNavigation } from "./use-shell-navigation";
  * first, then the shell remounts into it.
  */
 export function useOpenSpaceChat({
-  bootstrapSpaceId,
+  currentSpaceId,
   userId,
   navigate,
   navigationRevision,
   overlayRevision,
   closeMobileSidebar,
 }: {
-  bootstrapSpaceId: string | undefined;
+  currentSpaceId: string | null;
   userId: string | undefined;
   navigate: ReturnType<typeof useShellNavigation>["navigate"];
   navigationRevision: ReturnType<typeof useShellNavigation>["navigationRevision"];
@@ -49,30 +49,16 @@ export function useOpenSpaceChat({
       const startedNavigation = navigationRevision.current;
       const startedOverlay = overlayRevision.current;
       const startedIndex = window.history.state?.idx;
-      const previousEffective = selectedSpaceId() ?? bootstrapSpaceId;
+      const previousEffective = currentSpaceId ?? undefined;
       // Persist the active space (including primary) so voice/RPC headers match the chat.
       if (previousEffective === spaceId) {
         if (selectSpace(spaceId)) navigate(path);
         return;
       }
-      const reload = () => {
-        void leaveOrganization(userId ?? null, previousEffective, spaceId).then(() => {
-          if (request !== spaceSwitchRequest.current) return;
-          if (selectSpace(spaceId)) window.location.assign(destination());
-        });
-      };
       const destination = () =>
         overlayRevision.current === startedOverlay
           ? path
           : `${path}${searchString(withShellOverlay(new URLSearchParams(), readShellOverlay(new URLSearchParams(window.location.search))))}`;
-      // Another space is an auth boundary: its bootstrap is loaded first, under that
-      // space's header, then the shell remounts so none of this space's state survives.
-      // A call in progress, or a page outside the shell, still reloads.
-      const target = initialBootstrapTarget(path, false);
-      if (!target || getCallSnapshot()) {
-        reload();
-        return;
-      }
       const startedAt = window.location.pathname;
       const decision = () =>
         spaceSwitchDecision(
@@ -84,6 +70,18 @@ export function useOpenSpaceChat({
           Boolean(getCallSnapshot()),
         );
       const current = () => decision() !== "abandon";
+      const reload = () => {
+        void leaveOrganization(userId ?? null, previousEffective, spaceId).then(() => {
+          if (!current()) return;
+          if (selectSpace(spaceId)) window.location.assign(destination());
+        });
+      };
+      // Load the new space under its own header before remounting the shell.
+      const target = initialBootstrapTarget(path, false);
+      if (!target || getCallSnapshot()) {
+        reload();
+        return;
+      }
       // A space visited before opens at once with what it showed then, refreshing behind it.
       const cached = queryClient.getQueryData(spaceSeedKey(userId ?? null, spaceId));
       const primed = primeSpaceBootstrap(spaceId, target.botId, cached);
@@ -134,6 +132,6 @@ export function useOpenSpaceChat({
         },
       );
     },
-    [bootstrapSpaceId, navigate, navigationRevision, overlayRevision, userId],
+    [currentSpaceId, navigate, navigationRevision, overlayRevision, userId],
   );
 }

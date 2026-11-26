@@ -123,10 +123,11 @@ function forwardRequests(api: string): Middleware {
       },
       (incoming) => {
         res.writeHead(incoming.statusCode ?? 502, withoutHopHeaders(incoming.rawHeaders));
-        incoming.pipe(res);
+        pipeline(incoming, res).catch(() => upstream.destroy());
       },
     );
     upstream.on("error", () => {
+      if (res.destroyed) return;
       if (res.headersSent) res.destroy();
       else res.writeHead(502, { "content-type": "text/plain" }).end();
     });

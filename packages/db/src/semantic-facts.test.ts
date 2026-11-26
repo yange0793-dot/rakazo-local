@@ -106,8 +106,10 @@ function fixture(rows: FactRecord[] = []) {
     },
     run: {
       findFirst: vi.fn(async () => ({
+        id: "run-a",
         threadId: "thread-a",
-        sourceMessageId: "message-a",
+        thread: { historyCompactionGeneration: 3 },
+        sourceMessageId: "message-a" as string | null,
         trigger: "user",
         status: "running",
       })),
@@ -141,6 +143,14 @@ function fixture(rows: FactRecord[] = []) {
       ),
     },
     semanticFactRevision: {
+      findUniqueOrThrow: vi.fn(async ({ where }) => {
+        const { factId, revision } = where.factId_revision;
+        return { id: `${factId}:${revision}` };
+      }),
+      update: vi.fn(async ({ where, data }) => {
+        const snapshot = revisions.find((row) => `${row.factId}:${row.revision}` === where.id);
+        if (snapshot) Object.assign(snapshot, data);
+      }),
       create: vi.fn(async ({ data }: { data: Record<string, unknown> }) => {
         revisions.push(data);
         return data;
@@ -190,6 +200,7 @@ function fixture(rows: FactRecord[] = []) {
     ),
     $contentEncryption: () => ({
       ring: {
+        remember: vi.fn(),
         encryptWrites: true,
         current: async () => ({ key: Buffer.alloc(32, 7) }),
         all: async () => [{ key: Buffer.alloc(32, 7) }],
@@ -774,7 +785,9 @@ describe("managed semantic fact authority", () => {
       ),
     ).rejects.toBeInstanceOf(IsolationError);
     f.db.run.findFirst.mockResolvedValueOnce({
+      id: "run-a",
       threadId: "thread-a",
+      thread: { historyCompactionGeneration: 3 },
       sourceMessageId: "message-a",
       trigger: "helper",
       status: "running",
@@ -785,8 +798,10 @@ describe("managed semantic fact authority", () => {
   it("retains routine run attribution without granting a user quote or helper writes", async () => {
     const f = fixture();
     f.db.run.findFirst.mockResolvedValue({
+      id: "routine-run",
       threadId: "thread-a",
-      sourceMessageId: "message-a",
+      thread: { historyCompactionGeneration: 3 },
+      sourceMessageId: null,
       trigger: "routine",
       status: "running",
     });
@@ -803,6 +818,7 @@ describe("managed semantic fact authority", () => {
       threadId: "thread-a",
     });
     expect(saved.provenance.messageId).toBeUndefined();
+    expect(saved.provenance.quote).toBeUndefined();
     await expect(
       f.store.save(
         { ...request, source: { ...request.source, quote: "invented user authorization" } },
@@ -1085,6 +1101,27 @@ describe("managed semantic fact authority", () => {
       observedAt: time.toISOString(),
     });
     expect([...f.outbox.values()].map((work) => work.action)).toEqual(["upsert"]);
+    await expect(
+      f.store.applyArchiveChanges(
+        f.db as never,
+        {
+          botId: "bot-a",
+          scope: "isolated",
+          threadId: "thread-a",
+          sources,
+          changes: [
+            {
+              content: "Use a narrow console.",
+              sourceMessageId: "message-b",
+              sourceQuote: "Prefer a narrow console",
+              category: "preference",
+            },
+          ],
+        },
+        ctx,
+      ),
+    ).resolves.toMatchObject({ saved: 0, skipped: 1 });
+    expect(f.rows).toHaveLength(1);
   });
 
   it("keeps an archived source quotation retired when a retry paraphrases the fact", async () => {

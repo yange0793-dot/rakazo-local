@@ -30,10 +30,16 @@ export function SpaceSettingsPanel({
   const { t } = useLingui();
   const nameId = useId();
   const [draft, setDraft] = useState(space.name);
+  const [sourceName, setSourceName] = useState(space.name);
+  const [edited, setEdited] = useState(false);
   const [pending, setPending] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [confirmingDelete, setConfirmingDelete] = useState(false);
   const [overridesBusy, setOverridesBusy] = useState(false);
+  if (sourceName !== space.name) {
+    setSourceName(space.name);
+    if (!edited) setDraft(space.name);
+  }
   // A rename in flight holds the dialog open, so a failure is shown instead of lost on leaving.
   const busy = pending || overridesBusy;
   useEffect(() => {
@@ -41,11 +47,12 @@ export function SpaceSettingsPanel({
   }, [busy, onBusyChange]);
 
   async function save() {
+    if (pending || !edited) return;
     const trimmed = draft.trim();
-    if (pending) return;
     // An empty or unchanged name keeps the current one without a request.
     if (!trimmed || trimmed === space.name) {
       setDraft(space.name);
+      setEdited(false);
       setError(null);
       return;
     }
@@ -54,6 +61,7 @@ export function SpaceSettingsPanel({
     try {
       await onRename(trimmed);
       setDraft(trimmed);
+      setEdited(false);
     } catch (err) {
       setError(
         err instanceof Error && err.message.trim() ? err.message : t`Could not rename space`,
@@ -82,6 +90,7 @@ export function SpaceSettingsPanel({
                 disabled={pending}
                 onChange={(event) => {
                   setDraft(event.target.value);
+                  setEdited(true);
                   setError(null);
                 }}
                 onBlur={() => void save()}
@@ -94,6 +103,7 @@ export function SpaceSettingsPanel({
                   }
                   if (event.key === "Escape") {
                     setDraft(space.name);
+                    setEdited(false);
                     setError(null);
                   }
                 }}

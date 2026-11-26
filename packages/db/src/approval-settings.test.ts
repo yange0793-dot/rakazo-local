@@ -114,25 +114,18 @@ describe("auto review", () => {
   it("reads and writes the account's choice when the Space follows it", async () => {
     const client = confirmationsClient();
     client.userActionAutoReviewPreference.findUnique.mockResolvedValue({
-      enabled: true,
-      skipApprovals: false,
+      mode: "auto",
     });
 
     await expect(findAutoReviewPreference(client.prisma, scope)).resolves.toEqual({
-      enabled: true,
-      skipApprovals: false,
+      mode: "auto",
     });
-    await saveAutoReviewPreference(
-      client.prisma,
-      scope,
-      { skipApprovals: true },
-      { enabled: false, skipApprovals: false },
-    );
+    await saveAutoReviewPreference(client.prisma, scope, { mode: "bypermission" });
 
     expect(client.userActionAutoReviewPreference.upsert).toHaveBeenCalledWith({
       where: { userId: "user" },
-      create: { userId: "user", enabled: false, skipApprovals: true },
-      update: { skipApprovals: true },
+      create: { userId: "user", mode: "bypermission" },
+      update: { mode: "bypermission" },
     });
     expect(client.actionAutoReviewPreference.findUnique).not.toHaveBeenCalled();
     expect(client.actionAutoReviewPreference.upsert).not.toHaveBeenCalled();
@@ -141,18 +134,12 @@ describe("auto review", () => {
   it("writes the Space's own choice when asked for the Space", async () => {
     const client = confirmationsClient();
 
-    await saveAutoReviewPreference(
-      client.prisma,
-      scope,
-      { enabled: true },
-      { enabled: false, skipApprovals: false },
-      "space",
-    );
+    await saveAutoReviewPreference(client.prisma, scope, { mode: "auto" }, "space");
 
     expect(client.actionAutoReviewPreference.upsert).toHaveBeenCalledWith({
       where: { spaceId_userId: { spaceId: "space", userId: "user" } },
-      create: { spaceId: "space", userId: "user", enabled: true, skipApprovals: false },
-      update: { enabled: true },
+      create: { spaceId: "space", userId: "user", mode: "auto" },
+      update: { mode: "auto" },
     });
     expect(client.userActionAutoReviewPreference.upsert).not.toHaveBeenCalled();
   });

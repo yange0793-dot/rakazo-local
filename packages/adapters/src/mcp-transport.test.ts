@@ -468,6 +468,24 @@ describe("MCP transport seam", () => {
     },
   );
 
+  it("limits the loopback HTTP exception to the configured origin with private endpoints enabled", async () => {
+    const fetchImpl = vi.fn();
+    const safeFetch = secureFetch(
+      new URL("http://localhost:8123/mcp"),
+      { allowHttpLocalhost: true, allowPrivateEndpoint: true },
+      {},
+      { ...TEST_NETWORK, fetch: fetchImpl },
+    );
+    try {
+      await expect(safeFetch("http://localhost:8124/token")).rejects.toThrow(
+        "configured resource origin",
+      );
+      expect(fetchImpl).not.toHaveBeenCalled();
+    } finally {
+      await safeFetch.close();
+    }
+  });
+
   it("releases the body of a refused local redirect", async () => {
     let cancels = 0;
     const body = new ReadableStream({

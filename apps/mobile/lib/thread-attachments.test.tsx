@@ -155,6 +155,18 @@ it("counts a read that settles before the next render against the attachment lim
   expect(attachments.attachmentNotice).toBe("Skipped d2.txt (max 4 attachments)");
 });
 
+it("discards a picker result when the mounted chat changes during the read", async () => {
+  let settle!: (result: Awaited<ReturnType<typeof pickDocuments>>) => void;
+  vi.mocked(pickDocuments).mockReturnValueOnce(new Promise((resolve) => {
+    settle = resolve;
+  }));
+  act(() => root.render(<Probe botId="bot-a" />));
+  act(() => attachments.attachFrom("file"));
+  act(() => root.render(<Probe botId="bot-b" />));
+  await act(async () => settle({ attachments: [attachment("late", "bot-a")], skipped: [] }));
+  expect(attachments.pendingAttachments).toEqual([]);
+});
+
 it("keeps a chat's unsent attachments when the chat is left and reopened", () => {
   const scope = { apiBase: "https://example.test", userId: "user-1", threadKey: "bot-a" };
   mount(<Probe botId="bot-a" draftScope={scope} />);

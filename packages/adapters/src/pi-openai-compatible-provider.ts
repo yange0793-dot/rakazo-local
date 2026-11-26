@@ -122,6 +122,8 @@ export function openAiCompatibleModel(
           compat: {
             // `store: false` is already the default, and Google's endpoint rejects the field.
             supportsStore: false,
+            // Responses may normalize omitted strict; let Pi emit its default strict: false.
+            ...(apiProtocol === "responses" ? { supportsStrictMode: true } : {}),
             supportsDeveloperRole: false,
             supportsReasoningEffort: reasoning,
             thinkingFormat: "openai",

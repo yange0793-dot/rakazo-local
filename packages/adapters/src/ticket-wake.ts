@@ -17,6 +17,9 @@ export async function prepareTicketRun(
     include: { board: { select: { ticketPrefix: true } } },
   });
   if (!ticket) return null;
+  // Managed dispatches have one bot_message/WorkEvent path. A board notifier
+  // must never create a second execution with the tickets tool surface.
+  if (ticket.managedVersion) return null;
   const status = TicketStatusSchema.safeParse(ticket.status);
   if (!status.success || isTicketCompletedStatus(status.data)) return null;
   const bot = await tx.bot.findFirst({

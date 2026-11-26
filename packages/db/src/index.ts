@@ -22,6 +22,7 @@ export * from "./content-encryption.js";
 export * from "./content-export.js";
 export * from "./content-keys.js";
 export * from "./content-migration.js";
+export * from "./coordination.js";
 export * from "./credential-secrets.js";
 export * from "./cross-space-communication.js";
 export * from "./database-access.js";
@@ -66,6 +67,7 @@ export * from "./spaces.js";
 export * from "./spending.js";
 export * from "./thread-ask.js";
 export { primaryActiveRun } from "./thread-listing.js";
+export * from "./thread-managed-input.js";
 export * from "./thread-reads.js";
 export type { ClaimedSteeringMessage, ClaimSteeringInput } from "./thread-steering.js";
 export {

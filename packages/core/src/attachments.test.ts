@@ -267,6 +267,38 @@ describe("attachment helpers", () => {
     expect(userTurnMessageForRun("bot_message", "run-bot", messages)).toBeUndefined();
   });
 
+  it.each(["bot_message", "follow_up"])(
+    "selects only the explicit hidden delivery source for a %s run",
+    (trigger) => {
+      const file = {
+        kind: "file" as const,
+        artifactId: "article-1",
+        mimeType: "text/markdown",
+        name: "article.md",
+        size: 41,
+      };
+      const source = {
+        id: "wake-source",
+        role: "system",
+        runId: "run-work",
+        blocks: [{ kind: "delivery" as const }, file],
+      };
+      const unrelated = { ...source, id: "another-source", runId: "run-other" };
+      const reply = {
+        id: "ordinary-reply",
+        role: "bot",
+        runId: "run-work",
+        blocks: [file],
+      };
+      const messages = [unrelated, reply, source];
+      expect(userTurnMessageForRun(trigger, "run-work", messages, source.id)).toEqual(source);
+      expect(userTurnMessageForRun(trigger, "run-work", messages)).toBeUndefined();
+      expect(userTurnMessageForRun(trigger, "run-work", messages, reply.id)).toBeUndefined();
+      expect(userTurnMessageForRun(trigger, "run-work", messages, "missing")).toBeUndefined();
+      expect(userTurnMessageForRun("routine", "run-work", messages, source.id)).toBeUndefined();
+    },
+  );
+
   it("selects pending attachments only for their originating bot", () => {
     const attachments = [
       { id: "one", botId: "bot-one" },

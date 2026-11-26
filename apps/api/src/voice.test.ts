@@ -57,6 +57,25 @@ describe("toVoiceStatus", () => {
 });
 
 describe("voice HTTP routes", () => {
+  it.each([{ audioBase64: "AAAA!" }, { audioBase64: ["AAAA"] }])(
+    "rejects invalid audio input before loading credentials",
+    async (body) => {
+      const app = new Hono();
+      mountVoiceHttpRoutes(
+        app,
+        {} as VoiceDeps,
+        async () => ({ userId: "user", spaceId: "space" }) as Actor,
+      );
+      const response = await app.request("/api/voice/transcribe", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify(body),
+      });
+      expect(response.status).toBe(400);
+      await expect(response.json()).resolves.toEqual({ error: "Recording is not valid audio." });
+    },
+  );
+
   it("rejects unauthenticated speak and transcribe", async () => {
     const app = new Hono();
     mountVoiceHttpRoutes(app, {} as VoiceDeps, async () => null);

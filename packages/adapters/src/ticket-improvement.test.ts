@@ -26,7 +26,6 @@ import {
   taughtSkillPlaybookHash,
   taughtSkillRevisionHash,
 } from "./taught-skill-revisions.js";
-import { attachWorkspaceFileToThread } from "./thread-artifacts.js";
 import type { TicketImprovementDeps } from "./ticket-improvement.js";
 import {
   CURRENT_IMPROVER,
@@ -58,7 +57,6 @@ vi.mock("./taught-skill-revisions.js", async (original) => ({
   getCurrentTaughtSkillRevisionState: vi.fn(),
   activateTaughtSkillRevision: vi.fn(),
 }));
-vi.mock("./thread-artifacts.js", () => ({ attachWorkspaceFileToThread: vi.fn() }));
 
 const CORRECTION =
   "You checked installation but did not inspect the complete directory or confirm upload completion.";
@@ -191,6 +189,7 @@ function harness() {
         botId: "owner-bot",
         groupId: null,
         externalConversationId: null,
+        historyCompactionGeneration: 0,
       },
     },
   };
@@ -213,21 +212,20 @@ function harness() {
       }
       return actual === value;
     });
+  const liveFeedback = vi.fn(async () => ({ id: feedbackId }));
   const tx = {
-    $queryRaw: vi.fn(async () => {
-      const rows = revisions.map((revision) => ({ id: revision.id, snapshot: revision.snapshot }));
-      afterCandidateLookup?.();
-      afterCandidateLookup = undefined;
-      return rows;
-    }),
+    $queryRaw: vi.fn(async () => []),
     artifact: {
-      update: vi.fn(async ({ where, data }: { where: { id: string }; data: Partial<Artifact> }) => {
-        const row = artifacts.find((artifact) => artifact.id === where.id)!;
-        Object.assign(row, data);
-        return row;
+      create: vi.fn(async ({ data }: { data: Pick<Artifact, "botId" | "name" | "storageKey"> & Partial<Artifact> }) => {
+        const bytes = files.get(data.storageKey)!;
+        const artifact = { ...row(`artifact-${artifacts.length}`, data.botId!, data.name, bytes), ...data };
+        artifacts.push(artifact);
+        afterStorePhase?.(JSON.parse(new TextDecoder().decode(bytes)).phase);
+        return artifact;
       }),
     },
     message: {
+      findFirst: liveFeedback,
       findUnique: vi.fn(
         async ({ where }: { where: { threadId_clientNonce: { clientNonce: string } } }) =>
           posted.find(
@@ -246,6 +244,7 @@ function harness() {
   const prisma = {
     run: { findUnique: vi.fn(async () => run) },
     message: {
+      findFirst: liveFeedback,
       findMany: vi.fn(async () => [
         {
           id: feedbackId,
@@ -258,6 +257,9 @@ function harness() {
       ]),
     },
     artifact: {
+      findUnique: vi.fn(async ({ where }: { where: { id: string } }) =>
+        artifacts.find((row) => row.id === where.id) ?? null,
+      ),
       findFirst: vi.fn(
         async ({ where }: { where: Record<string, unknown> }) =>
           artifacts.find((row) => matches(row, where)) ?? null,
@@ -282,7 +284,12 @@ function harness() {
             .slice(skip, take === undefined ? undefined : skip + take),
       ),
     },
-    $queryRaw: tx.$queryRaw,
+    $queryRaw: vi.fn(async () => {
+      const rows = revisions.map((revision) => ({ id: revision.id, snapshot: revision.snapshot }));
+      afterCandidateLookup?.();
+      afterCandidateLookup = undefined;
+      return rows;
+    }),
     $transaction: vi.fn(async (work: (client: unknown) => Promise<unknown>) => work(tx)),
   } as unknown as PrismaClient;
   const receiptBytes = new TextEncoder().encode(
@@ -315,34 +322,6 @@ function harness() {
   });
   artifacts.push(row("receipt-artifact", "owner-bot", "work-ticket.json", receiptBytes));
   files.set("receipt-artifact", receiptBytes);
-  vi.mocked(attachWorkspaceFileToThread).mockImplementation(async (_deps, input) => {
-    const phase = JSON.parse(new TextDecoder().decode(input.bytes)).phase;
-    if (phase === failPhase) {
-      failPhase = null;
-      throw new Error("checkpoint storage unavailable");
-    }
-    const artifact = row(
-      `artifact-${artifacts.length}`,
-      input.botId,
-      input.name ?? input.filePath,
-      input.bytes,
-    );
-    artifact.groupId = input.groupId ?? null;
-    artifacts.push(artifact);
-    files.set(artifact.storageKey, input.bytes);
-    await input.onAttached?.(tx as never, artifact);
-    afterStorePhase?.(phase);
-    return {
-      artifactId: artifact.id,
-      block: {
-        kind: "file",
-        artifactId: artifact.id,
-        name: artifact.name,
-        mimeType: artifact.mimeType,
-        size: artifact.size,
-      },
-    };
-  });
   vi.mocked(createThreadMessageInTransaction).mockImplementation(async (_tx, input) => {
     const message = { ...input, id: `result-message-${posted.length}` };
     posted.push(message);
@@ -396,7 +375,20 @@ function harness() {
     prisma,
     runtime,
     events: { notify: vi.fn(async () => undefined) } as never,
-    artifacts: { get: vi.fn(async (key: string) => files.get(key)!) } as never,
+    artifacts: {
+      get: vi.fn(async (key: string) => files.get(key)!),
+      put: vi.fn(async ({ bytes }: { bytes: Uint8Array }) => {
+        const phase = JSON.parse(new TextDecoder().decode(bytes)).phase;
+        if (phase === failPhase) {
+          failPhase = null;
+          throw new Error("checkpoint storage unavailable");
+        }
+        const id = `file-${files.size}`;
+        files.set(id, bytes);
+        return { id };
+      }),
+      remove: vi.fn(async (id: string) => { files.delete(id); }),
+    } as never,
     resolveModel,
   };
   const result = () =>
@@ -740,7 +732,7 @@ describe("ticket improvement actual isolated comparison", () => {
     await reflectTicketImprovement(h.deps, { runId: h.run.id, auto: true });
 
     expect(h.revisions[0]?.snapshot.trial?.componentProof?.eligible).toBe(true);
-    expect(activateTaughtSkillRevision).toHaveBeenCalledWith(h.deps.prisma, expect.anything(), {
+    expect(activateTaughtSkillRevision).toHaveBeenCalledWith(expect.anything(), expect.anything(), {
       skillId: BASELINE.skillId,
       revisionId: h.revisions[0]!.id,
       expectedCurrentRevisionId: BASELINE.id,
@@ -869,7 +861,7 @@ describe("ticket improvement actual isolated comparison", () => {
     expect(h.current().snapshot.trial!.candidatePlaybookHash).not.toBe(
       taughtSkillPlaybookHash(goodDeliveryPlaybook),
     );
-    expect(activateTaughtSkillRevision).toHaveBeenCalledWith(h.deps.prisma, expect.anything(), {
+    expect(activateTaughtSkillRevision).toHaveBeenCalledWith(expect.anything(), expect.anything(), {
       skillId: BASELINE.skillId,
       revisionId: h.current().id,
       expectedCurrentRevisionId: BASELINE.id,

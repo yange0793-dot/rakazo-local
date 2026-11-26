@@ -535,6 +535,19 @@ describe("archiveConversationMemory", () => {
     expect(store.pause).toHaveBeenCalledWith(target, context);
   });
 
+  it("preserves the cursor and pauses a background batch that cannot be loaded", async () => {
+    const { deps, extract, enqueue } = setup();
+    store.loadBatch.mockRejectedValueOnce(new Error("synthetic source exceeds the limit"));
+
+    await expect(archiveConversationMemory(deps, target, context)).rejects.toThrow(
+      "synthetic source exceeds the limit",
+    );
+    expect(store.pause).toHaveBeenCalledWith(target, context);
+    expect(store.applyBatch).not.toHaveBeenCalled();
+    expect(extract).not.toHaveBeenCalled();
+    expect(enqueue).not.toHaveBeenCalled();
+  });
+
   it("fails explicitly instead of truncating a source over the extractor limit", async () => {
     const huge = "字".repeat(1_500_000);
     const batch = makeBatch({
@@ -557,7 +570,7 @@ describe("archiveConversationMemory", () => {
     expect(store.applyBatch).not.toHaveBeenCalled();
   });
 
-  it("steps over an unextractable range during a forced clear instead of blocking it", async () => {
+  it("fails a forced clear and preserves the unextractable range", async () => {
     const bad = makeBatch({ fromSeq: 1, throughSeq: 2 });
     const good = makeBatch({ fromSeq: 3, throughSeq: 4 });
     const { deps, extract } = setup({
@@ -568,12 +581,60 @@ describe("archiveConversationMemory", () => {
 
     await expect(
       archiveConversationMemory(deps, target, context, { force: true }),
-    ).resolves.toBeUndefined();
+    ).rejects.toThrow("synthetic model failure");
 
     expect(store.pause).not.toHaveBeenCalled();
-    // The failed range is checkpointed empty so the clear can delete the conversation.
-    expect(store.applyBatch).toHaveBeenCalledWith(bad, [], context);
-    expect(store.applyBatch).toHaveBeenCalledWith(good, [], context);
+    expect(store.applyBatch).not.toHaveBeenCalled();
+    expect(extract).toHaveBeenCalledOnce();
+  });
+
+  it("redacts a secret before taking the byte-bounded recall tail", async () => {
+    const secret = "synthetic-credential";
+    const text = `${secret}${"x".repeat(8 * 1024 - 5)}`;
+    const batch = makeBatch({
+      newSources: [{ id: "message-a", text, createdAt: "2026-11-17T09:00:00.000Z" }],
+    });
+    const { deps, recall } = setup({ batches: [batch, null], secrets: [secret] });
+
+    await archiveConversationMemory(deps, target, context);
+
+    const query = recall.mock.calls[0]?.[0].query;
+    expect(query).not.toContain(secret.slice(-5));
+    expect(Buffer.byteLength(query ?? "")).toBe(8 * 1024);
+  });
+
+  it("redacts overlapping credentials and rejects a quote from the hidden text", async () => {
+    const text = "example-first-overlap-second";
+    const batch = makeBatch({
+      messages: [
+        {
+          id: "message-a",
+          role: "user",
+          content: text,
+          createdAt: "2026-11-17T09:00:00.000Z",
+          isNew: true,
+        },
+      ],
+      newSources: [{ id: "message-a", text, createdAt: "2026-11-17T09:00:00.000Z" }],
+    });
+    const { deps, extract, recall } = setup({
+      batches: [batch, null],
+      secrets: ["example-first-overlap", "overlap-second"],
+      changes: [
+        {
+          content: "Synthetic memory.",
+          sourceMessageId: "message-a",
+          sourceQuote: "second",
+          category: "preference",
+        },
+      ],
+    });
+
+    await archiveConversationMemory(deps, target, context);
+
+    expect(recall.mock.calls[0]?.[0].query).toBe("[redacted]");
+    expect(extract.mock.calls[0]?.[0].messages[0]?.content).toBe("[redacted]");
+    expect(store.applyBatch).toHaveBeenCalledWith(batch, [], context);
   });
 
   it("keeps saved memory when the index sync publisher fails", async () => {

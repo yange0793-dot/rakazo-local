@@ -7,9 +7,10 @@ import { cn } from "@rakazo/ui-web";
 import { useQuery } from "@tanstack/react-query";
 import { useEffect, useMemo, useRef, useState } from "react";
 import type { ArtifactTarget } from "../lib/artifact-open";
-import { fetchArtifactBytes } from "../lib/artifact-open";
+import { decodeArtifactBase64 } from "../lib/artifact-open";
 import { composerDraftKey, offerComposerText } from "../lib/composer-draft";
 import { useAppTheme, useMedia } from "../lib/pages";
+import { useSpaceQueries } from "../lib/query";
 
 type AppBlock = Extract<MessageBlock, { kind: "app" }>;
 
@@ -18,8 +19,8 @@ export const MCP_APP_MAX_HEIGHT = 640;
 /** An app that has not started by then is not shown; the bot's reply stands without it. */
 const START_TIMEOUT_MS = 15_000;
 
-async function fetchAppHtml(target: ArtifactTarget, artifactId: string): Promise<string> {
-  return new TextDecoder().decode(await fetchArtifactBytes(target, artifactId));
+function appHtml(artifact: { contentBase64: string }): string {
+  return new TextDecoder().decode(decodeArtifactBase64(artifact.contentBase64));
 }
 
 /**
@@ -40,9 +41,10 @@ export function McpAppCard({ block, target }: { block: AppBlock; target: Artifac
   const [height, setHeight] = useState(0);
   const [started, setStarted] = useState(false);
   const [failed, setFailed] = useState(false);
+  const queries = useSpaceQueries();
   const html = useQuery({
-    queryKey: ["mcp-app-html", block.artifactId],
-    queryFn: () => fetchAppHtml(target, block.artifactId),
+    ...queries.artifacts.get.queryOptions({ input: { ...target, artifactId: block.artifactId } }),
+    select: appHtml,
     enabled: near,
     staleTime: Number.POSITIVE_INFINITY,
   });

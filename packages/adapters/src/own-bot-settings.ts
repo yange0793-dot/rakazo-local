@@ -2,12 +2,13 @@ import type { AdapterContext, SecretStore } from "@rakazo/adapter-kit";
 import { VoiceAccountError } from "@rakazo/adapter-kit";
 import type { Actor, BotSettingsValues, VoiceInfo } from "@rakazo/contracts";
 import { ThinkingLevelSchema } from "@rakazo/contracts";
+import { THINKING_LEVEL_OPTIONS } from "@rakazo/core";
 import type { PrismaClient } from "@rakazo/db";
 import { findDefaultVoiceCredential } from "@rakazo/db";
 import type { FleetPrepareDeps } from "./fleet-tools.js";
 import { botModelLabel } from "./fleet-tools.js";
 import { connectedModelChoices, echoedQuery, resolveModelChoice, words } from "./model-choice.js";
-import { prepareAllowedThinkingLevels, validateBotModelChange } from "./model-selection.js";
+import { validateBotModelChange } from "./model-selection.js";
 import { OPENAI_COMPATIBLE_VOICE_PROVIDER_ID } from "./openai-compatible-voice.js";
 import { createVoiceProvider } from "./voice-factory.js";
 import { resolveVoiceKey } from "./voice-model-connection.js";
@@ -21,6 +22,7 @@ export type OwnBotSettingsRow = {
   dailyCheckIns: boolean;
   modelProvider: string | null;
   modelId: string | null;
+  modelCredentialId?: string | null;
   thinkingLevel: string | null;
   autoSpeak: boolean;
   voiceId: string | null;
@@ -55,12 +57,7 @@ export async function readOwnBotSettings(
     bot.modelProvider && bot.modelId
       ? { provider: bot.modelProvider, model: bot.modelId }
       : await deps.modelChange.defaultModel();
-  const [choices, levels] = await Promise.all([
-    connectedModelChoices(modelDeps, scope),
-    effective.provider && effective.model
-      ? prepareAllowedThinkingLevels(modelDeps, scope, effective.provider, effective.model)
-      : undefined,
-  ]);
+  const choices = await connectedModelChoices(modelDeps, scope);
   const providers = new Map<string, string[]>();
   for (const choice of choices) {
     const ids = providers.get(choice.providerName) ?? [];
@@ -86,7 +83,7 @@ export async function readOwnBotSettings(
       ids: ids.slice(0, MODELS_PER_PROVIDER),
       ...(ids.length > MODELS_PER_PROVIDER ? { more: ids.length - MODELS_PER_PROVIDER } : {}),
     })),
-    thinkingLevels: levels?.allowed ?? ThinkingLevelSchema.options,
+    thinkingLevels: THINKING_LEVEL_OPTIONS,
     ...(paging
       ? {
           instructionsLength: paging.length,
@@ -197,7 +194,7 @@ export function resolveVoiceChoice(
 export async function prepareOwnBotSettings(
   deps: FleetPrepareDeps,
   scope: Pick<Actor, "userId" | "spaceId">,
-  bot: Pick<OwnBotSettingsRow, "modelProvider" | "modelId" | "thinkingLevel">,
+  bot: Pick<OwnBotSettingsRow, "modelProvider" | "modelId" | "modelCredentialId" | "thinkingLevel">,
   args: { model?: unknown; thinkingLevel?: unknown; readAloud?: unknown; voice?: unknown },
   listVoices: () => Promise<VoiceInfo[] | null> = async () => null,
 ): Promise<{ data: BotSettingsValues } | { error: string }> {
@@ -246,12 +243,17 @@ export async function prepareOwnBotSettings(
       current: { provider: bot.modelProvider, model: bot.modelId },
     });
   let validated = await validate(level || bot.thinkingLevel);
-  // A new model keeps the current thinking level when it supports it, else uses its default.
+  // A new model keeps the current thinking level; it only falls back when the value is invalid.
   if (!validated.ok && !level && bot.thinkingLevel) validated = await validate(null);
   if (!validated.ok) return { error: validated.error };
   if (model) {
     data.modelProvider = validated.provider;
     data.modelId = validated.model;
+    if (
+      bot.modelCredentialId &&
+      (validated.provider !== bot.modelProvider || validated.model !== bot.modelId)
+    )
+      data.modelCredentialId = null;
   }
   data.thinkingLevel = ThinkingLevelSchema.nullable().parse(validated.thinkingLevel);
   return { data };

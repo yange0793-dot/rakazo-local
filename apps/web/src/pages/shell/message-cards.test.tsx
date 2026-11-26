@@ -10,6 +10,7 @@ const calls = vi.hoisted(() => ({
   mark: vi.fn(async () => ({ ok: true })),
   oauthBegin: vi.fn(async () => ({
     status: "authorization_required" as const,
+    sessionId: "approval-session",
     authorizationUrl: "https://identity.example.test/authorize",
   })),
   approve: vi.fn(async () => ({ ok: true })),
@@ -82,7 +83,15 @@ it("approves the bot after OAuth completes while a COOP popup keeps focus", asyn
     await act(async () => vi.advanceTimersByTimeAsync(1000));
     expect(calls.approve).not.toHaveBeenCalled();
     await act(async () =>
-      channels[0]?.onmessage?.({ data: { type: "mcp-oauth-complete" } } as MessageEvent),
+      channels[0]?.onmessage?.({
+        data: { type: "mcp-oauth-complete", sessionId: "another-session" },
+      } as MessageEvent),
+    );
+    expect(calls.approve).not.toHaveBeenCalled();
+    await act(async () =>
+      channels[0]?.onmessage?.({
+        data: { type: "mcp-oauth-complete", sessionId: "approval-session" },
+      } as MessageEvent),
     );
     expect(calls.approve).toHaveBeenCalledExactlyOnceWith({
       botId: "bot",

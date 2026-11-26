@@ -1,12 +1,40 @@
 import { getEventListeners } from "node:events";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { HEARTBEAT, HEARTBEAT_MS, withHeartbeats } from "./shared.js";
+import { HEARTBEAT, HEARTBEAT_MS, mergeStreams, withHeartbeats } from "./shared.js";
 
 afterEach(() => {
   vi.useRealTimers();
 });
 
+function deferred<T>() {
+  let resolve!: (value: T) => void;
+  const promise = new Promise<T>((done) => {
+    resolve = done;
+  });
+  return { promise, resolve };
+}
+
 describe("withHeartbeats", () => {
+  it("observes a pending read once across repeated heartbeats", async () => {
+    vi.useFakeTimers();
+    const read = deferred<IteratorResult<string>>();
+    const observe = vi.spyOn(read.promise, "then");
+    const source = (async function* (): AsyncGenerator<string> {})();
+    source.next = () => read.promise;
+    const stream = withHeartbeats({}, () => source);
+
+    for (let i = 0; i < 3; i++) {
+      const heartbeat = stream.next();
+      await vi.advanceTimersByTimeAsync(HEARTBEAT_MS);
+      await expect(heartbeat).resolves.toEqual({ done: false, value: HEARTBEAT });
+    }
+    expect(observe).toHaveBeenCalledOnce();
+
+    read.resolve({ done: false, value: "event" });
+    await expect(stream.next()).resolves.toEqual({ done: false, value: "event" });
+    await stream.return(undefined);
+  });
+
   it("keeps the in-flight read across heartbeats so events stay in order", async () => {
     vi.useFakeTimers();
     let release: (() => void) | undefined;
@@ -90,5 +118,33 @@ describe("withHeartbeats", () => {
     await expect(first).resolves.toEqual({ done: true, value: undefined });
     await vi.advanceTimersByTimeAsync(HEARTBEAT_MS);
     expect(stillAuthorized).not.toHaveBeenCalled();
+  });
+});
+
+describe("mergeStreams", () => {
+  it("observes a quiet stream once while another stream yields", async () => {
+    const read = deferred<IteratorResult<string>>();
+    const observe = vi.spyOn(read.promise, "then");
+    const quiet = (async function* (): AsyncGenerator<string> {})();
+    const next = quiet.next.bind(quiet);
+    quiet.next = () => {
+      quiet.next = next;
+      return read.promise;
+    };
+    async function* busy() {
+      yield 1;
+      yield 2;
+      yield 3;
+    }
+    const stream = mergeStreams(quiet, busy());
+
+    for (const value of [1, 2, 3]) {
+      await expect(stream.next()).resolves.toEqual({ done: false, value });
+    }
+    expect(observe).toHaveBeenCalledOnce();
+
+    read.resolve({ done: false, value: "event" });
+    await expect(stream.next()).resolves.toEqual({ done: false, value: "event" });
+    await expect(stream.next()).resolves.toMatchObject({ done: true });
   });
 });

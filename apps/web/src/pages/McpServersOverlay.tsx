@@ -33,7 +33,7 @@ import {
 import { McpServerHealthLine } from "../components/McpServerHealthLine";
 import { connectMcpOauth, MCP_OAUTH_CHANNEL } from "../lib/mcp-connect";
 import { useSpaceQueries } from "../lib/query";
-import { rpc } from "../lib/rpc";
+import { useSpaceRpc } from "../lib/space-rpc";
 import type { ErrorDetails } from "../lib/user-error";
 import { errorCode, errorDetails } from "../lib/user-error";
 import {
@@ -83,6 +83,7 @@ export function McpServersOverlay({
   const [saving, setSaving] = useState(false);
   const [oauthPending, setOauthPending] = useState<string | null>(null);
   const [testingIds, setTestingIds] = useState<Set<string>>(() => new Set());
+  const rpc = useSpaceRpc();
   const queries = useSpaceQueries();
   const queryClient = useQueryClient();
   const serversOptions = queries.mcp.servers.list.queryOptions();
@@ -145,7 +146,6 @@ export function McpServersOverlay({
     const channel = new BroadcastChannel(MCP_OAUTH_CHANNEL);
     channel.onmessage = (event: MessageEvent) => {
       if ((event.data as { type?: string } | null)?.type !== "mcp-oauth-complete") return;
-      setOauthPending(null);
       void refresh().catch(() => undefined);
     };
     return () => channel.close();
@@ -224,11 +224,11 @@ export function McpServersOverlay({
   }
 
   async function connectOAuth(server: McpServer) {
+    if (oauthPending !== null) return;
     setError(null);
     setOauthPending(server.id);
     try {
-      const result = await connectMcpOauth(server.id);
-      if (result !== "cancelled") setOauthPending(null);
+      const result = await connectMcpOauth(server.id, rpc);
       await refresh();
       if (result === "connected") return;
       if (result === "already_connected") {
@@ -243,14 +243,14 @@ export function McpServersOverlay({
         setError(errorDetails(t`This server did not request browser authorization.`));
         return;
       }
-      setOauthPending((current) => (current === server.id ? null : current));
     } catch (err) {
-      setOauthPending(null);
       if (errorCode(err) === MCP_OAUTH_CLIENT_REQUIRED) {
         startEditing(server, true);
         void refresh().catch(() => undefined);
       }
       setError(errorDetails(err, t`Could not start OAuth`));
+    } finally {
+      setOauthPending(null);
     }
   }
 
@@ -389,7 +389,7 @@ export function McpServersOverlay({
               type="button"
               variant="outline"
               size="sm"
-              disabled={pending}
+              disabled={oauthPending !== null}
               onClick={() => void connectOAuth(server)}
             >
               {oauthActionLabel(server, pending)}
@@ -414,7 +414,10 @@ export function McpServersOverlay({
                 <Trans>Test connection</Trans>
               </DropdownMenuItem>
               {oauth && !signInFirst ? (
-                <DropdownMenuItem disabled={pending} onClick={() => void connectOAuth(server)}>
+                <DropdownMenuItem
+                  disabled={oauthPending !== null}
+                  onClick={() => void connectOAuth(server)}
+                >
                   {oauthActionLabel(server, pending)}
                 </DropdownMenuItem>
               ) : null}

@@ -12,12 +12,17 @@ import {
 } from "@rakazo/contracts";
 import type { PrismaClient } from "./client.js";
 import { Prisma } from "./client.js";
+import { lockAccountModels } from "./model-credentials.js";
 import { lockSpaceSettings, settingsTarget } from "./space-settings.js";
 import { withTransactionRetry } from "./transaction-retry.js";
 
 type Scope = { userId: string; spaceId: string };
 /** Which copy of a member's model roles a call acts on: the account's or the Space's override. */
 export type ModelRoleTarget = Scope & { scope: SettingsScope };
+type ValidateRoleChoices = (
+  tx: Prisma.TransactionClient,
+  choices: ModelRoleChoice[],
+) => Promise<void>;
 type RoleClient = Pick<PrismaClient, "spaceModelRoleChoice" | "userModelRoleChoice">;
 type StoredChoice = {
   role: string;
@@ -137,25 +142,25 @@ export async function updateModelRole(
   target: Scope & { scope?: SettingsScope },
   role: ModelRole,
   patch: Partial<ModelRoleSettings>,
+  validateChoices?: ValidateRoleChoices,
 ): Promise<ModelRoleSettings> {
   return withTransactionRetry(() =>
     prisma.$transaction(
       async (tx) => {
         await lockSpaceSettings(tx, target);
+        await lockAccountModels(tx, target.userId);
         const resolved = await modelRoleTarget(
           tx,
           { userId: target.userId, spaceId: target.spaceId },
           target.scope,
         );
-        // The account's list is shared by every Space, so its saves also queue on the user.
-        // At ReadCommitted, the rewrite after these locks observes the previous writer's list.
-        if (resolved.scope === "account") {
-          const users = await tx.$queryRaw<Array<{ locked: number }>>`
-            SELECT 1 AS locked FROM "user" WHERE "id" = ${target.userId} FOR UPDATE
-          `;
-          if (users.length !== 1) throw new Error("Model settings owner not found");
-        }
-        return writeModelRole(tx, resolved, role, patch);
+        return writeModelRole(
+          tx,
+          resolved,
+          role,
+          patch,
+          validateChoices && ((choices) => validateChoices(tx, choices)),
+        );
       },
       { isolationLevel: Prisma.TransactionIsolationLevel.ReadCommitted },
     ),
@@ -171,6 +176,7 @@ export async function writeModelRole(
   target: ModelRoleTarget,
   role: ModelRole,
   patch: Partial<ModelRoleSettings>,
+  validateChoices?: (choices: ModelRoleChoice[]) => Promise<void>,
 ): Promise<ModelRoleSettings> {
   const { table, owner } = roleRows(tx, target);
   const current = await getModelRole(tx, target, role);
@@ -208,6 +214,10 @@ export async function writeModelRole(
         (!primary || modelRoleChoiceKey(backup) !== modelRoleChoiceKey(primary)) &&
         list.findIndex((item) => modelRoleChoiceKey(item) === modelRoleChoiceKey(backup)) === index,
     );
+  await validateChoices?.([
+    ...(patch.primary && primary ? [primary] : []),
+    ...(patch.backups ? backups : []),
+  ]);
   await table.deleteMany({ where: { ...owner, role } });
   await table.createMany({
     data: [

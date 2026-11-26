@@ -907,6 +907,10 @@ msgstr "約 {kb} KB 的記憶不再提供給機器人。"
 msgid "About {label}"
 msgstr "關於 {label}"
 
+#: apps/web/src/pages/shell/bot-settings-sections.tsx
+msgid "Accept edits"
+msgstr "接受編輯"
+
 #: apps/web/src/components/ComputerProviderSettings.tsx
 msgid "Access key ID"
 msgstr "存取金鑰 ID"
@@ -1963,6 +1967,10 @@ msgstr "內建"
 #: apps/web/src/components/AskCard.tsx
 msgid "Button “{button}” · read from the page, not checked"
 msgstr "按鈕「{button}」· 讀取自頁面，未核實"
+
+#: apps/web/src/pages/shell/bot-settings-sections.tsx
+msgid "Bypass permissions"
+msgstr "略過權限"
 
 #: apps/mobile/components/thread-composer.tsx
 #: apps/web/src/pages/shell/chat-header.tsx
@@ -4733,6 +4741,10 @@ msgstr "說明文件"
 #: apps/web/src/pages/KnowledgeSection.tsx
 msgid "Document changed. Reopen to edit the latest version."
 msgstr "文件已變更，請重新開啟以編輯最新版本。"
+
+#: apps/web/src/pages/shell/bot-settings-sections.tsx
+msgid "Don't ask"
+msgstr "不詢問"
 
 #: apps/mobile/app/sign-in.tsx
 #: apps/web/src/pages/Auth.tsx
@@ -7943,6 +7955,10 @@ msgstr "置頂"
 msgid "Plan"
 msgstr "方案"
 
+#: apps/web/src/pages/shell/bot-settings-sections.tsx
+msgid "Plan only"
+msgstr "僅規劃"
+
 #: apps/mobile/components/audio-attachment.tsx
 #: apps/mobile/components/voice-player-bar.tsx
 msgid "Play"
@@ -10643,6 +10659,10 @@ msgstr "此伺服器已連線。請先中斷再重新授權。"
 #: packages/i18n/src/run-error.ts
 msgid "This server's tool result does not fit the model. Turn off Keep tool results whole for that server, or choose another model."
 msgstr "此伺服器的工具結果超出模型容量。請關閉該伺服器的「保留完整工具結果」，或選擇其他模型。"
+
+#: apps/web/src/pages/shell/bot-settings-sections.tsx
+msgid "This space only"
+msgstr "僅此空間"
 
 #: apps/mobile/app/(settings)/model-connection.tsx
 #: apps/web/src/pages/model-settings/connection-controls.tsx

@@ -21,24 +21,23 @@ export function ApprovalModeRow({
   const { t } = useLingui();
   const { settings, pending, loadError } = approvals;
   const choices: { key: ApprovalMode; label: string }[] = [
-    { key: "never", label: t`Never ask` },
-    // Auto needs an approval model; it stays listed while chosen so the choice is visible.
-    ...(settings?.checkerAvailable || settings?.mode === "auto"
-      ? [{ key: "auto" as const, label: t`Auto` }]
-      : []),
+    { key: "auto", label: t`Auto` },
     { key: "ask", label: t`Ask` },
+    { key: "bypermission", label: t`Bypass permissions` },
   ];
   const current = choices.find((choice) => choice.key === settings?.mode)?.label;
   const detail =
     settings?.mode === "auto" && !settings.checkerAvailable
-      ? t`Add a model in Settings to use this.`
-      : settings?.mode === "auto"
-        ? t`A model approves routine actions and asks you about the rest.`
-        : settings?.mode === "never"
-          ? t`Asks only before purchases and the first use of your computer. Only Block rules apply.`
-          : settings?.mode === "ask"
-            ? t`Asks before sending, spending or changing anything in your apps.`
-            : undefined;
+      ? t`No review model is configured; actions that need review will ask you.`
+      : settings
+        ? (
+            {
+              auto: t`A model approves routine actions and asks you about the rest.`,
+              ask: t`Asks before sending, spending or changing anything in your apps.`,
+              bypermission: "Do not ask; all permissions are enabled.",
+            } satisfies Record<ApprovalMode, string>
+          )[settings.mode]
+        : undefined;
   const held = disabled || pending || !settings;
   // A failed read, first or on return, may leave the mode out of date, so offer to read it again.
   if (loadError) {

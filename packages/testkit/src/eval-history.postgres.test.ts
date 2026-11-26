@@ -68,6 +68,7 @@ describe.skipIf(!databaseAvailable)("eval history accounting", () => {
             },
             timeoutMs: 20_000,
             maxToolCalls,
+            approvalMode: "bypermission",
             createApp: (composio) =>
               createApp({
                 databaseUrl: process.env.DATABASE_URL!,
@@ -84,7 +85,7 @@ describe.skipIf(!databaseAvailable)("eval history accounting", () => {
           },
         );
         expect(result.cleanupFailed).toBe(false);
-        expect(result.toolCalls).toBe(2);
+        expect(result.toolCalls, result.reason ?? undefined).toBe(2);
         if (maxToolCalls === 2) {
           model.assertComplete();
           expect(result).toMatchObject({ status: "passed", category: null, reason: null });

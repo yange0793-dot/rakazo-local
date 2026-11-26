@@ -100,7 +100,8 @@ type HelperExpectation = {
 
 type HelperInput = {
   spaceName: string;
-  action: "navigate" | "snapshot" | "act" | "hand_off" | "resume";
+  action: "navigate" | "snapshot" | "act" | "hand_off" | "resume" | "frame";
+  framePath?: string;
   session?: BrowserSession;
   pageId?: string;
   userConfirmed?: boolean;
@@ -135,6 +136,7 @@ type HelperResult = {
   spaceId?: number | string;
   pageLabel?: string;
   pages?: BrowserPage[];
+  frame?: string;
   control?: "agent" | "user";
   url?: string;
   title?: string;
@@ -213,6 +215,36 @@ export class EgoBrowserProvider implements BrowserProvider {
     this.blockedOrigins = withLoopbackAliases(origins);
     this.run = options.run ?? runEgoBrowser;
     this.timeoutMs = options.timeoutMs ?? DEFAULT_TIMEOUT_MS;
+  }
+
+  async readFrame(
+    computer: ComputerRef,
+    pageId: string | undefined,
+    context: AdapterContext,
+  ): Promise<Uint8Array | null> {
+    const key = spaceKey(computer, context);
+    const session = this.sessions.get(key);
+    if (
+      !session ||
+      (pageId !== undefined && pageId !== `${session.spaceId}:${session.pageLabel}`) ||
+      session.handedOff
+    ) {
+      return null;
+    }
+    const helper = await this.runHelper(
+      {
+        spaceName: spaceNameFor(key),
+        session,
+        pageId: `${session.spaceId}:${session.pageLabel}`,
+        action: "frame",
+        blockedOrigins: this.blockedOrigins,
+        maxSnapshotChars: MAX_SNAPSHOT_CHARS,
+      },
+      context.signal,
+    );
+    if ("error" in helper || !helper.result.ok || !helper.result.frame) return null;
+    if (helper.result.frame.length > 8 * 1024 * 1024) return null;
+    return Buffer.from(helper.result.frame, "base64");
   }
 
   describe() {
@@ -751,7 +783,14 @@ export class EgoBrowserProvider implements BrowserProvider {
     const inputPath = path.join(dir, "input.json");
     const resultPath = path.join(dir, "result.json");
     try {
-      await writeFile(inputPath, JSON.stringify(input), { encoding: "utf8", mode: 0o600 });
+      await writeFile(
+        inputPath,
+        JSON.stringify({
+          ...input,
+          ...(input.action === "frame" ? { framePath: `${resultPath}.png` } : {}),
+        }),
+        { encoding: "utf8", mode: 0o600 },
+      );
       let run: EgoRunResult;
       try {
         run = await this.run({
@@ -865,7 +904,7 @@ function spaceKey(computer: ComputerRef, context: AdapterContext): string {
     context.spaceId,
     context.userId,
     bot,
-    computer.id,
+    computer.providerRef || computer.id,
     computer.kind,
     computer.providerRef,
   ]);
@@ -1390,8 +1429,9 @@ async function observe(page) {
   // old address returned just after a click.
   info = await page.info();
   if (blocked(info.url)) return { info, nonce, tree: "", elements: [], egoRefs: new Map() };
-  const parsed = parseSnapshot(bound(String(raw || ""), limit), nonce);
-  return { info, nonce, tree: parsed.body, elements: parsed.elements, egoRefs: parsed.egoRefs };
+  // Queries and action bindings need every element, including those beyond the displayed tree.
+  const parsed = parseSnapshot(String(raw || ""), nonce);
+  return { info, nonce, tree: bound(parsed.body, limit), elements: parsed.elements, egoRefs: parsed.egoRefs };
 }
 
 function pageView(page, state) {
@@ -1430,7 +1470,7 @@ async function openPage() {
   const spaces = await listTaskSpaces();
   const found = spaces.find((space) => space.name === input.spaceName);
   const control = input.action === "hand_off" || input.action === "resume";
-  const wantedSpace = input.action === "act" ? input.expected && input.expected.spaceId : control ? input.session && input.session.spaceId : undefined;
+  const wantedSpace = input.action === "act" ? input.expected && input.expected.spaceId : control || input.action === "frame" ? input.session && input.session.spaceId : undefined;
   if (wantedSpace && (!found || String(found.id) !== String(wantedSpace))) {
     return { refused: { ok: false, code: "space-expired", error: "This browser session has expired. Observe a new session before continuing; no action was replayed.", uncertain: false, completed: 0 } };
   }
@@ -1640,6 +1680,23 @@ async function run() {
     return;
   }
   const { task, page } = opened;
+  if (input.action === "frame") {
+    const before = (await page.cdp("Page.getFrameTree")).frameTree.frame;
+    if (!before.loaderId || new URL(before.url).origin !== "https://gemini.google.com") {
+      await write({ ok: false });
+      return;
+    }
+    await page.screenshot({ path: input.framePath });
+    // A tab can reload at the same URL while the screenshot is in flight.
+    const after = (await page.cdp("Page.getFrameTree")).frameTree.frame;
+    if (before.id !== after.id || before.loaderId !== after.loaderId || before.url !== after.url) {
+      await write({ ok: false });
+      return;
+    }
+    const frame = (await fs.readFile(input.framePath, "base64"));
+    await write({ ok: true, frame });
+    return;
+  }
   if (input.action === "hand_off") {
     lastPages = await pageList(task, page);
     await task.handOff();

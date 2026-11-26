@@ -48,7 +48,7 @@ describe("requireMembership", () => {
     });
     expect(prisma.spaceMember.findFirst).toHaveBeenCalledWith(
       expect.objectContaining({
-        where: { userId: "user-1", spaceId: "space-support" },
+        where: { userId: "user-1", spaceId: "space-support", space: { deletingAt: null } },
       }),
     );
   });

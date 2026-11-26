@@ -107,6 +107,18 @@ describe("web markdown diagrams", () => {
     expect(container.querySelector('[data-testid="chat-diagram"] img')).not.toBeNull();
   });
 
+  it("keeps quote-like code in a streaming fence until it closes", async () => {
+    const source = `${freshDiagram()}\n>${"\t>".repeat(8)} still in the fence`;
+    const open = `~~~~mermaid\n${source}`;
+    await render(open, true);
+    expect(container.querySelector("pre")?.textContent).toBe(`${source}\n`);
+    expect(mermaid.parse).not.toHaveBeenCalled();
+
+    await render(`${open}\n~~~~~ \t`, true);
+    expect(container.querySelector('[data-testid="chat-diagram"] img')).not.toBeNull();
+    expect(mermaid.render).toHaveBeenCalledWith(expect.stringMatching(/^rk-mermaid-/), source);
+  });
+
   it.each([
     ["blockquote", "> ", "> "],
     ["nested blockquote", "> > ", "> > "],
@@ -122,7 +134,7 @@ describe("web markdown diagrams", () => {
     expect(container.querySelector("pre")?.textContent).toContain(source);
     expect(mermaid.parse).not.toHaveBeenCalled();
 
-    await render(`${open}\n${rest}\`\`\`\n\nMore`, true);
+    await render(`${open}\n${rest}\`\`\``, true);
     expect(container.querySelector('[data-testid="chat-diagram"] img')).not.toBeNull();
     expect(mermaid.render).toHaveBeenCalledTimes(1);
   });

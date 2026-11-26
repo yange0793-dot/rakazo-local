@@ -3,9 +3,11 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { ComposioConnector, FakeComposioClient } from "@rakazo/adapters";
 import type { createApp } from "@rakazo/api/app";
-import type { RpcInput, Space, SpaceNavigation } from "@rakazo/contracts";
+import type { OrganizationList, RpcInput, RpcPath, Space, SpaceNavigation } from "@rakazo/contracts";
+import { THINKING_LEVEL_OPTIONS } from "@rakazo/core";
 import {
   claimSpaceDeletionForMember,
+  createThreadMessage,
   deleteClaimedSpaceForMember,
   listClaimedSpaceComputers,
   releaseSpaceDeletionClaim,
@@ -106,9 +108,15 @@ describeWithDatabase("API authorization and resource isolation", () => {
       "capabilities/install",
       capabilityInput("Owner Capability"),
     );
-    for (const [kind, id] of [["skill", ownerAgentSkill.id], ["install", ownerCapability.id]]) {
+    for (const [kind, id] of [
+      ["skill", ownerAgentSkill.id],
+      ["install", ownerCapability.id],
+    ]) {
       await rpc(app, owner, "availability/set", {
-        kind, id, allSpaces: false, spaceIds: [ownerActor.spaceId],
+        kind,
+        id,
+        allSpaces: false,
+        spaceIds: [ownerActor.spaceId],
       });
     }
     const ownerConnection = await rpc<{ connectionId: string }>(
@@ -163,8 +171,17 @@ describeWithDatabase("API authorization and resource isolation", () => {
         trigger: "user",
       },
     });
+    const ownerAsk = await runAsTenant(ownerActor, () =>
+      createThreadMessage(handles.prisma, {
+        threadId: ownerThread.id,
+        botId: ownerBot.id,
+        runId: ownerRun.id,
+        role: "bot",
+        blocks: [{ kind: "ask", text: "Which city?", status: "pending" }],
+      }),
+    );
 
-    const botIdCalls: Array<[string, unknown]> = [
+    const botIdCalls: Array<[RpcPath, unknown]> = [
       ["bots/get", { botId: ownerBot.id }],
       ["bots/duplicate", { botId: ownerBot.id }],
       ["bots/update", { botId: ownerBot.id, name: "Stolen Bot" }],
@@ -186,7 +203,7 @@ describeWithDatabase("API authorization and resource isolation", () => {
         {
           botId: ownerBot.id,
           runId: ownerRun.id,
-          messageId: "missing-message",
+          messageId: ownerAsk.id,
           answer: "intruder answer",
         },
       ],
@@ -233,7 +250,7 @@ describeWithDatabase("API authorization and resource isolation", () => {
       name: "Owner Group",
       botIds: [ownerBot.id, ownerBot2.id],
     });
-    const groupCalls: Array<[string, unknown]> = [
+    const groupCalls: Array<[RpcPath, unknown]> = [
       ["groups/get", { groupId: ownerGroup.id }],
       ["groups/update", { groupId: ownerGroup.id, name: "Stolen Group" }],
       ["groups/remove", { groupId: ownerGroup.id }],
@@ -252,12 +269,20 @@ describeWithDatabase("API authorization and resource isolation", () => {
     );
 
     // A caller cannot pair their own bot with another workspace's run ID.
-    await expectDenied(app, intruder, "threads/answer", {
+    const foreignAnswer = await raw(app, intruder, "threads/answer", {
       botId: intruderBot.id,
       runId: ownerRun.id,
-      messageId: "missing-message",
+      messageId: ownerAsk.id,
       answer: "mixed-resource attack",
     });
+    expect(foreignAnswer.status).toBe(409);
+    expect(await foreignAnswer.json()).toMatchObject({ json: { code: "CONFLICT" } });
+    expect(
+      await asSystem(handles.prisma).run.findUniqueOrThrow({ where: { id: ownerRun.id } }),
+    ).toMatchObject({ status: "waiting_input" });
+    expect(
+      await asSystem(handles.prisma).message.findUniqueOrThrow({ where: { id: ownerAsk.id } }),
+    ).toMatchObject({ blocks: [{ kind: "ask", text: "Which city?", status: "pending" }] });
 
     const resourceIdCalls = [
       ["routines/update", { routineId: ownerRoutine.id, name: "Stolen Routine" }],
@@ -291,7 +316,7 @@ describeWithDatabase("API authorization and resource isolation", () => {
       ["skills/remove", { skillId: ownerSkill.id }],
       ["memory/update", { documentId: ownerMemory.id, content: "stolen" }],
       ["connections/complete", { connectionId: ownerConnection.connectionId }],
-    ] satisfies Array<[string, unknown]>;
+    ] satisfies Array<[RpcPath, unknown]>;
     await Promise.all(
       resourceIdCalls.map(([procedure, input]) => expectDenied(app, intruder, procedure, input)),
     );
@@ -977,18 +1002,32 @@ describeWithDatabase("API authorization and resource isolation", () => {
         renewSpaceDeletionClaim(handles.prisma, { ...deleteInput, claimId: firstClaim.claimId }),
       ),
     ).resolves.toBe(true);
-    const claimedNavigation = await rpc<SpaceNavigation>(app, scope, "spaces/list", {}, space.id);
+    const deniedNavigation = await raw(app, scope, "spaces/list", {}, space.id);
+    expect(deniedNavigation.status).toBe(401);
+    expect(await deniedNavigation.json()).toMatchObject({ json: { code: "UNAUTHORIZED" } });
+    const organizations = await rpc<OrganizationList>(app, "", "organizations/list");
+    const availableSpaceIds = organizations.organizations.flatMap((org) => org.spaceIds);
+    expect(availableSpaceIds).toContain(actor.spaceId);
+    expect(availableSpaceIds).not.toContain(space.id);
+
+    const claimedNavigation = await rpc<SpaceNavigation>(app, scope, "spaces/list");
+    expect(claimedNavigation.current.id).toBe(actor.spaceId);
     expect(claimedNavigation.spaces.find((item) => item.id === space.id)).toMatchObject({
       canDelete: false,
       canRename: false,
     });
-    await expect(
-      raw(app, scope, "spaces/rename", { spaceId: space.id, name: "Blocked" }, space.id),
-    ).resolves.toMatchObject({ status: 409 });
+    const blockedRename = await raw(app, scope, "spaces/rename", {
+      spaceId: space.id,
+      name: "Blocked",
+    });
+    expect(blockedRename.status).toBe(409);
+    expect(await blockedRename.json()).toMatchObject({ json: { code: "CONFLICT" } });
     const blockedCreate = await raw(app, scope, "bots/create", botInput("Racing bot"), space.id);
     expect(blockedCreate.ok).toBe(false);
-    expect(blockedCreate.status).toBe(409);
-    expect(await asSystem(handles.prisma).bot.count({ where: { spaceId: space.id } })).toBe(0);
+    expect(blockedCreate.status).toBe(401);
+    expect(await blockedCreate.json()).toMatchObject({ json: { code: "UNAUTHORIZED" } });
+    expect(await db.bot.count({ where: { spaceId: space.id } })).toBe(0);
+    expect(await db.bot.count({ where: { userId: actor.userId, name: "Racing bot" } })).toBe(0);
     expect(
       await asSystem(handles.prisma).computer.findFirst({
         where: { spaceId: space.id },
@@ -1000,14 +1039,17 @@ describeWithDatabase("API authorization and resource isolation", () => {
       where: { id: space.id },
       data: { deletingAt: new Date(Date.now() - 6 * 60_000) },
     });
-    const staleNavigation = await rpc<SpaceNavigation>(app, scope, "spaces/list", {}, space.id);
+    const staleNavigation = await rpc<SpaceNavigation>(app, scope, "spaces/list");
     expect(staleNavigation.spaces.find((item) => item.id === space.id)).toMatchObject({
       canDelete: true,
       canRename: false,
     });
-    await expect(
-      raw(app, scope, "spaces/rename", { spaceId: space.id, name: "Still blocked" }, space.id),
-    ).resolves.toMatchObject({ status: 409 });
+    const staleRename = await raw(app, scope, "spaces/rename", {
+      spaceId: space.id,
+      name: "Still blocked",
+    });
+    expect(staleRename.status).toBe(409);
+    expect(await staleRename.json()).toMatchObject({ json: { code: "CONFLICT" } });
     await expect(
       handles.prisma.space.findUniqueOrThrow({ where: { id: space.id }, select: { name: true } }),
     ).resolves.toEqual({ name: "Concurrent" });
@@ -1135,7 +1177,21 @@ describeWithDatabase("API authorization and resource isolation", () => {
         botInput("Blocked during teardown"),
         space.id,
       );
-      expect(blockedCreate.status).toBe(409);
+      expect(blockedCreate.status).toBe(401);
+      expect(await blockedCreate.json()).toMatchObject({ json: { code: "UNAUTHORIZED" } });
+      expect(await db.bot.count({ where: { spaceId: space.id } })).toBe(0);
+      expect(
+        await db.bot.count({ where: { userId: actor.userId, name: "Blocked during teardown" } }),
+      ).toBe(0);
+      await expect(
+        db.space.findUnique({
+          where: { id: space.id },
+          select: { deletingAt: true, deletionClaimId: true },
+        }),
+      ).resolves.toEqual(lifecycle);
+      await expect(
+        db.computer.findFirst({ where: { spaceId: space.id }, select: { providerRef: true } }),
+      ).resolves.toEqual({ providerRef: `space-deadline-provider-${stamp}` });
     } finally {
       destroy.mockRestore();
       delete process.env.SPACE_TEARDOWN_TIMEOUT_MS;
@@ -1194,7 +1250,7 @@ describeWithDatabase("API authorization and resource isolation", () => {
     expect(cleared.find((row) => row.id === connected.id)?.headerNames).toEqual([]);
   });
 
-  it("validates custom thinking against the saved connection capability", async () => {
+  it("saves custom thinking independently of the connection's reasoning metadata", async () => {
     const scope = await testSpace(app, "Custom Thinking");
     const bot = await rpc<Bot>(app, scope, "bots/create", botInput("Thinking Bot"));
     const connection = {
@@ -1233,15 +1289,12 @@ describeWithDatabase("API authorization and resource isolation", () => {
       { thinkingLevel: "max" },
     );
     await rpc(app, scope, "models/connect", { ...connection, reasoning: false });
-    expect((await raw(app, scope, "bots/update", { ...update, thinkingLevel: "low" })).status).toBe(
-      400,
-    );
-    expect(
-      (await raw(app, scope, "bots/update", { ...update, thinkingLevel: "xhigh" })).status,
-    ).toBe(400);
-    expect(await rpc(app, scope, "bots/update", { ...update, thinkingLevel: "off" })).toMatchObject(
-      { thinkingLevel: "off" },
-    );
+    for (const thinkingLevel of THINKING_LEVEL_OPTIONS) {
+      expect(await rpc(app, scope, "bots/update", { ...update, thinkingLevel })).toMatchObject({
+        thinkingLevel,
+      });
+      expect(await rpc(app, scope, "bots/get", { botId: bot.id })).toMatchObject({ thinkingLevel });
+    }
   });
 
   it("validates per-bot model overrides against connected providers and catalog", async () => {
@@ -1479,18 +1532,24 @@ async function rpc<T>(
 async function expectDenied(
   app: App,
   scope: string,
-  procedure: string,
+  procedure: RpcPath,
   body: unknown,
   spaceId?: string,
 ) {
   const response = await raw(app, scope, procedure, body, spaceId);
-  if (procedure === "threads/subscribe" && response.status === 200) {
-    // Streaming transports commit the HTTP 200 before advancing the async iterator. The
-    // ownership error is therefore encoded in the iterator response instead of the status.
-    expect(await response.text(), procedure).toMatch(/error|forbidden|not.found|unauthorized/i);
+  if (procedure === "threads/subscribe") {
+    expect(response.status, procedure).toBe(404);
+    expect(await response.json(), procedure).toMatchObject({ json: { code: "NOT_FOUND" } });
     return;
   }
-  expect(response.status, procedure).toBeGreaterThanOrEqual(400);
+  const codes: Record<number, string> = {
+    401: "UNAUTHORIZED",
+    403: "FORBIDDEN",
+    404: "NOT_FOUND",
+  };
+  const code = codes[response.status];
+  expect(code, `${procedure} returned ${response.status}`).toBeDefined();
+  expect(await response.json(), procedure).toMatchObject({ json: { code } });
 }
 
 async function expectForbidden(app: App, scope: string, procedure: string, body: unknown) {

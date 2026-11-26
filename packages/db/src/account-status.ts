@@ -4,7 +4,7 @@ import { cancelRunsInTransaction } from "./cancel-runs.js";
 import type { Prisma, PrismaClient } from "./client.js";
 import { expireComputerExecutionLeases } from "./computers.js";
 import type { ThreadEvents } from "./events.js";
-import { appendEventInTransaction, transientRunEventsWhere } from "./events.js";
+import { appendEventInTransaction, deleteTransientRunEvents } from "./events.js";
 import { createPendingSteeringRun } from "./thread-steering.js";
 import { withTransactionRetry } from "./transaction-retry.js";
 
@@ -113,6 +113,6 @@ async function cancelInThread(
     });
     seq = event.seq;
   }
-  await tx.event.deleteMany({ where: { runId: { in: ids }, ...transientRunEventsWhere() } });
+  await deleteTransientRunEvents(tx, { in: ids });
   return { seq };
 }

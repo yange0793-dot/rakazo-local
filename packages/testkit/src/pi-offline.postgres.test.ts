@@ -78,6 +78,11 @@ describe.skipIf(!databaseAvailable)("offline Pi product journey", () => {
       });
       stop = handles.stop;
       const scope = await createTestSpace(handles.app, "Offline fixture");
+      await rpc(handles.app, scope, "spaceSettings/setOverride", {
+        setting: "confirmations",
+        enabled: true,
+      });
+      await rpc(handles.app, scope, "autoReview/set", { mode: "bypermission" });
       await rpc(handles.app, scope, "models/connect", {
         provider: model.model.provider,
         modelId: model.model.id,

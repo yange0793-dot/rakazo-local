@@ -102,17 +102,18 @@ internal fun handleUnseenCompletion(
 }
 
 internal class PollTokenCache {
-  @Volatile private var token: String? = null
+  private data class Entry(val encoded: String?, val token: String)
+  @Volatile private var entry: Entry? = null
 
   // The service commits under its generation lock after the expensive read.
-  fun getOrLoad(load: () -> String, commit: (() -> Unit) -> Boolean): String? {
-    token?.let { return it }
+  fun getOrLoad(encoded: String?, load: () -> String, commit: (() -> Unit) -> Boolean): String? {
+    entry?.let { if (it.encoded == encoded) return it.token }
     val loaded = load()
-    return if (commit { token = loaded }) loaded else null
+    return if (commit { entry = Entry(encoded, loaded) }) loaded else null
   }
 
   fun reset() {
-    token = null
+    entry = null
   }
 }
 

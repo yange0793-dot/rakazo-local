@@ -3,6 +3,7 @@ import type { Actor } from "@rakazo/contracts";
 import { credentialForModel } from "@rakazo/core";
 import type { PrismaClient } from "@rakazo/db";
 import { describe, expect, it, vi } from "vitest";
+import type { ExecutorDeps } from "./executor-deps.js";
 import { selectConfiguredModel } from "./model-roles.js";
 import { serializeModelSecret } from "./model-secret.js";
 import {
@@ -27,6 +28,8 @@ import { listAvailablePiCatalog } from "./pi-catalog-availability.js";
 import type { CodexLiveCatalog } from "./pi-codex-catalog.js";
 import { liveCatalogEntry, providerCatalogCache } from "./pi-live-catalog.js";
 import { listPiCatalog } from "./pi-models.js";
+import { resolveConnectedModelKey } from "./run-model.js";
+import { runModelBackups, startRunModel } from "./run-model-start.js";
 
 function credential(provider: string, defaultModel: string | null) {
   return {
@@ -885,6 +888,121 @@ describe("model auth availability", () => {
 });
 
 describe("connected model credential selection", () => {
+  it("uses only the chosen endpoint even when another connection offers the same model", async () => {
+    const provider = "openai-compatible";
+    const modelId = "shared";
+    const a = { ...credential(provider, modelId), id: "channel-a", secretId: "secret-a" };
+    const b = { ...a, id: "channel-b", secretId: "secret-b" };
+    const connections = [b, a];
+    const preferences = [
+      {
+        id: "preference-a",
+        credential: a,
+        modelId,
+        thinkingLevel: null,
+        updatedAt: new Date(0),
+      },
+    ];
+    const endpoints = new Map([
+      [a.secretId, "https://channel-a.example.test/v1"],
+      [b.secretId, "https://channel-b.example.test/v1"],
+    ]);
+    const deps = {
+      billingEnabled: false,
+      secretStore: { load: async (ciphertext: string) => ciphertext },
+      prisma: {
+        userModelCredential: {
+          findMany: async () => connections,
+          findFirst: async ({
+            where,
+          }: {
+            where: { id: string; userId: string; provider: string };
+          }) => {
+            const row = connections.find(
+              (candidate) =>
+                candidate.id === where.id &&
+                candidate.userId === where.userId &&
+                candidate.provider === where.provider,
+            );
+            return row
+              ? {
+                  ...row,
+                  userPreferences: preferences.filter(
+                    (preference) => preference.credential === row,
+                  ),
+                }
+              : null;
+          },
+        },
+        userModelPreference: {
+          findMany: async () => preferences,
+          findFirst: async ({ where }: { where: { credentialId: string } }) =>
+            preferences.find((entry) => entry.credential.id === where.credentialId) ?? null,
+        },
+        secret: {
+          findFirst: async ({ where }: { where: { id: string } }) => {
+            const baseUrl = endpoints.get(where.id);
+            return baseUrl
+              ? {
+                  id: where.id,
+                  ciphertext: JSON.stringify({
+                    kind: "openai_compatible",
+                    baseUrl,
+                    enabledModelIds: [modelId],
+                  }),
+                }
+              : null;
+          },
+        },
+      },
+    } as unknown as ExecutorDeps;
+    const scope = { userId: "user-1", spaceId: "space-1" };
+    const resolve = (id?: string) =>
+      resolveConnectedModelKey(deps, scope, provider, modelId, undefined, true, id);
+    await expect(resolve()).resolves.toMatchObject({
+      resolved: { baseUrl: endpoints.get(a.secretId) },
+    });
+    await expect(resolve(b.id)).resolves.toMatchObject({
+      resolved: { baseUrl: endpoints.get(b.secretId) },
+    });
+    const selected = await resolve(b.id);
+    const backups = runModelBackups(
+      deps,
+      { ...scope, id: "run", modelPinned: false },
+      {},
+      false,
+      () => undefined,
+      true,
+    );
+    const start = () =>
+      startRunModel(
+        deps,
+        scope,
+        {
+          provider,
+          id: modelId,
+          credential: selected.credential,
+          pinnedConnection: true,
+          thinkingLevel: null,
+        },
+        undefined,
+        backups,
+        () => undefined,
+      );
+    await expect(start()).resolves.toMatchObject({
+      start: { resolved: { baseUrl: endpoints.get(b.secretId) } },
+    });
+    endpoints.delete(b.secretId);
+    await expect(start()).resolves.toMatchObject({
+      failure: { message: "The selected model connection is no longer available" },
+    });
+    connections.shift();
+    await expect(resolve(b.id)).rejects.toThrow("Connect that model provider first");
+    await expect(resolve()).resolves.toMatchObject({
+      resolved: { baseUrl: endpoints.get(a.secretId) },
+    });
+  });
+
   it("routes legacy pins and new choices to enabled connections without storing choices", async () => {
     const selected = credential("openai-compatible", "X");
     const alternate = { ...selected, id: "alternate", secretId: "secret-alternate" };
@@ -1292,13 +1410,13 @@ describe("bot model change validation", () => {
     expect(result).toEqual({ ok: false, error: "Unknown model for that provider" });
   });
 
-  it("rejects a thinking level the model does not offer, including the default model", async () => {
+  it("accepts the shared effort scale for reasoning models and rejects off", async () => {
     const deps = changeDeps({ xai: credential("xai", null) });
     const levels = listPiCatalog().find(
       (item) => item.provider === "xai" && item.id === "grok-4.6",
     )?.thinkingLevels;
     expect(levels).not.toContain("off");
-    const error = `Thinking level must be one of: ${levels?.join(", ")}`;
+    const error = "Unsupported thinking level";
     await expect(
       validateBotModelChange(deps, {
         ...scope,
@@ -1318,6 +1436,14 @@ describe("bot model change validation", () => {
         thinkingLevel: "high",
       }),
     ).resolves.toEqual({ ok: true, provider: "xai", model: "grok-4.6", thinkingLevel: "high" });
+    await expect(
+      validateBotModelChange(deps, {
+        ...scope,
+        provider: "xai",
+        model: "grok-4.6",
+        thinkingLevel: "max",
+      }),
+    ).resolves.toEqual({ ok: true, provider: "xai", model: "grok-4.6", thinkingLevel: "max" });
   });
 
   it("uses canonical catalog thinking levels for a saved Azure provider alias", async () => {
@@ -1339,7 +1465,7 @@ describe("bot model change validation", () => {
       }),
     ).resolves.toEqual({
       ok: false,
-      error: `Thinking level must be one of: ${entry!.thinkingLevels!.join(", ")}`,
+      error: "Unsupported thinking level",
     });
   });
 

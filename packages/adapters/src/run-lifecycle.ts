@@ -14,8 +14,13 @@ import {
   redactSecrets,
   userRunError,
 } from "@rakazo/core";
-import type { PrismaClient } from "@rakazo/db";
-import { isTooManyDatabaseConnections, spaceTakesWork } from "@rakazo/db";
+import type { Prisma, PrismaClient, Run } from "@rakazo/db";
+import {
+  isTooManyDatabaseConnections,
+  readManagedInputCheckpoint,
+  spaceTakesWork,
+  THREAD_LOCK_TRANSACTION_OPTIONS,
+} from "@rakazo/db";
 import { getLogger } from "@rakazo/logging";
 import { sanitizedError } from "@rakazo/logging/monitoring";
 import { returnHelperOutcome } from "./background-helpers.js";
@@ -25,6 +30,11 @@ import type { ComputerExecutionLease } from "./computer-lifecycle.js";
 import { ComputerBusyError, releaseComputerExecutionLease } from "./computer-lifecycle.js";
 import { withComputerScreenAvailability } from "./computer-screens.js";
 import type { ExecutorDeps } from "./executor-deps.js";
+import type { ManagedRunAdmission } from "./managed-work-admission.js";
+import {
+  cancelRejectedManagedRunInTransaction,
+  managedRunRejectionInTransaction,
+} from "./managed-work-admission.js";
 import type { RunComputerUseState, RunLeaseState } from "./run-context.js";
 import { notifyRun } from "./run-notifications.js";
 import type { TakeoverResumeCheckpoint } from "./takeover-resume.js";
@@ -336,7 +346,17 @@ export async function writeComputerRunRequeue(
     },
     data: releasedHold,
   });
-  return retried.count === 1;
+  if (retried.count === 1) return true;
+  const current = await deps.prisma.run.findUnique({
+    where: { id: runId },
+    select: { checkpoint: true },
+  });
+  if (!readManagedInputCheckpoint(current?.checkpoint)) return false;
+  const managed = await deps.prisma.run.updateMany({
+    where: { ...whereLease, checkpoint: current!.checkpoint },
+    data: releasedHold,
+  });
+  return managed.count === 1;
 }
 
 /**
@@ -449,49 +469,58 @@ async function announceWaitingForComputer(
  */
 export async function claimRun(
   deps: ExecutorDeps,
-  run: {
-    id: string;
-    spaceId: string;
-    status: string;
-    checkpoint: string | null;
-    leaseFence: number;
-  },
+  run: ManagedRunAdmission & Pick<Run, "status" | "checkpoint">,
   workerId: string,
 ) {
   const fence = nextFence(run.leaseFence);
   const now = new Date();
   // A Space being deleted starts nothing; its runs wait for the deletion to end or be called
   // off. Its lock comes before the run row, so a claim committing meanwhile is seen.
-  const leased = await deps.prisma.$transaction(async (tx) =>
-    !(await spaceTakesWork(tx, run.spaceId))
-      ? { count: 0 }
-      : tx.run.updateMany({
-          where: {
-            id: run.id,
-            ...continueRunClaimFence(run),
-            AND: [{ OR: [{ wakeAt: null }, { wakeAt: { lte: now } }] }],
-            OR: [
-              // Answer transactions queue input waits; a stale wake cannot answer them.
-              { status: "queued" },
-              RESUMABLE_TAKEOVER_WHERE,
-              {
-                status: { in: ["leased", "running"] },
-                leaseExpiresAt: { lte: now },
-              },
-            ],
-          },
-          data: {
-            status: "leased",
-            leaseOwner: workerId,
-            leaseFence: fence,
-            leaseExpiresAt: new Date(Date.now() + 5 * 60_000),
-            error: null,
-            checkpoint: null,
-            wakeAt: null,
-          },
-        }),
+  const where: Prisma.RunWhereInput = {
+    id: run.id,
+    ticketId: run.ticketId,
+    workControlEpoch: run.workControlEpoch,
+    workRequirementsVersion: run.workRequirementsVersion,
+    ...continueRunClaimFence(run),
+    AND: [{ OR: [{ wakeAt: null }, { wakeAt: { lte: now } }] }],
+    OR: [
+      // Answer transactions queue input waits; a stale wake cannot answer them.
+      { status: "queued" },
+      RESUMABLE_TAKEOVER_WHERE,
+      { status: { in: ["leased", "running"] }, leaseExpiresAt: { lte: now } },
+    ],
+  };
+  const managed = run.ticketId && run.workControlEpoch != null;
+  const claim = await deps.prisma.$transaction(
+    async (tx) => {
+      if (!(await spaceTakesWork(tx, run.spaceId))) return null;
+      if (managed) {
+        await tx.$queryRaw`SELECT id FROM threads WHERE id = ${run.threadId} FOR UPDATE`;
+        const reason = await managedRunRejectionInTransaction(tx, run);
+        if (reason) {
+          const cancelled = await cancelRejectedManagedRunInTransaction(tx, run, reason, where);
+          return { cancelled };
+        }
+      }
+      const leased = await tx.run.updateMany({
+        where,
+        data: {
+          status: "leased",
+          leaseOwner: workerId,
+          leaseFence: fence,
+          leaseExpiresAt: new Date(Date.now() + 5 * 60_000),
+          error: null,
+          // Native answers still need their durable binding after this claim.
+          checkpoint: readManagedInputCheckpoint(run.checkpoint) ? run.checkpoint : null,
+          wakeAt: null,
+        },
+      });
+      return { leased: leased.count === 1 };
+    },
+    managed ? THREAD_LOCK_TRANSACTION_OPTIONS : undefined,
   );
-  if (leased.count !== 1) return undefined;
+  if (claim?.cancelled) await deps.events.notify(run.threadId, claim.cancelled.seq);
+  if (!claim?.leased) return undefined;
 
   const current = await deps.prisma.run.findUniqueOrThrow({
     where: { id: run.id },

@@ -109,9 +109,17 @@ export function useThreadAttachments({
   // The chat whose draft this state holds; a warm link to another chat reuses the screen, so
   // the state swaps to that chat's draft instead of writing this chat's over it.
   const liveScopeKey = useRef<string | null | undefined>(undefined);
+  const scopeKey = draftScope ? retainedScopeKey(draftScope) : null;
+  const pickerOwner = useRef<object | null>(null);
+  useLayoutEffect(() => {
+    pickerOwner.current = threadKey && !readOnly ? {} : null;
+    return () => {
+      pickerOwner.current = null;
+    };
+  }, [threadKey, scopeKey, readOnly]);
 
   useEffect(() => {
-    const key = draftScope ? retainedScopeKey(draftScope) : null;
+    const key = scopeKey;
     if (liveScopeKey.current !== key) {
       liveScopeKey.current = key;
       if (key !== null) setPendingAttachments(retainedDraftAttachments.get(key) ?? []);
@@ -143,7 +151,7 @@ export function useThreadAttachments({
       retainedShareCopies.delete(id);
       releaseShareCopy(uri);
     }
-  }, [pendingAttachments, draftScope, uploadConfig]);
+  }, [pendingAttachments, scopeKey, uploadConfig]);
 
   const attachActions: MenuAction[] = [
     { id: "library", title: t`Photo library`, image: "photo.on.rectangle" },
@@ -168,8 +176,9 @@ export function useThreadAttachments({
       skipped: Array<{ name: string; reason: string }>;
     }>,
   ) {
-    const targetKey = groupId ?? botId;
-    if (!targetKey) return;
+    const targetKey = threadKey;
+    const owner = pickerOwner.current;
+    if (!targetKey || !owner) return;
     let result: Awaited<ReturnType<typeof picker>>;
     try {
       result = await picker(
@@ -179,10 +188,12 @@ export function useThreadAttachments({
       );
     } catch (error) {
       // A picker that fails to open reports it instead of rejecting unhandled.
-      setAttachmentNotice(errorText(error, t`Could not attach files`));
+      if (pickerOwner.current === owner) {
+        setAttachmentNotice(errorText(error, t`Could not attach files`));
+      }
       return;
     }
-    if ((groupId ?? botId) !== targetKey) return;
+    if (pickerOwner.current !== owner) return;
     // Two drops can overlap, so the room left is settled against the draft as it
     // is now, not as it was when this read began.
     const room = Math.max(

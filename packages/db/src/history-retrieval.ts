@@ -66,7 +66,9 @@ function toolWorkHint(myChats: boolean): string {
 }
 const UNFINISHED_NOTE = "No match in the part searched so far; nextSearch continues the search.";
 const CAPPED_NOTE = "The search stopped early without a match; narrow it by date to continue.";
-function bounded<T extends { messages: ReturnType<typeof reference>[] }>(response: T): T {
+export function boundHistoryResponse<T extends { messages: ReturnType<typeof reference>[] }>(
+  response: T,
+): T {
   const refs = [...response.messages];
   if ("runs" in response) {
     const runs = response.runs as Array<{
@@ -483,7 +485,7 @@ export async function searchHistory(
         : coverageNote;
   const nextBeforeSeq =
     byOffset || !hasMore ? null : rows.length > limit ? page.at(-1)!.seq : (cursor as number);
-  return bounded({
+  return boundHistoryResponse({
     untrusted: true as const,
     query: byOffset ? undefined : query,
     ...(byOffset
@@ -676,7 +678,7 @@ export async function readHistory(
   const outcomes = outcomeRows.slice(0, LINK_PAGE_SIZE);
   const artifacts = artifactRows.slice(0, LINK_PAGE_SIZE);
   const attachments = await messageAttachments(prisma, scope, rows);
-  return bounded({
+  return boundHistoryResponse({
     untrusted: true as const,
     nextRunId: runRows.length > LINK_PAGE_SIZE ? runs.at(-1)!.id : null,
     nextArtifactId: artifactRows.length > LINK_PAGE_SIZE ? artifacts.at(-1)!.id : null,

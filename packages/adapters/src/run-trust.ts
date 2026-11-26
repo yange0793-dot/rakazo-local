@@ -93,16 +93,13 @@ export function createRunTrustLoaders(
       {},
     ));
   let autoReviewPreferencePromise:
-    | Promise<{ enabled: boolean; skipApprovals: boolean }>
+    | Promise<{ mode: import("@rakazo/contracts").ApprovalMode }>
     | undefined;
   const loadAutoReviewPreference = () => {
     autoReviewPreferencePromise ??= findAutoReviewPreference(deps.prisma, {
       userId: run.userId,
       spaceId: run.spaceId,
-    }).then((row) => ({
-      enabled: row?.enabled ?? true,
-      skipApprovals: row?.skipApprovals ?? false,
-    }));
+    }).then((row) => ({ mode: row?.mode ?? "ask" }));
     return autoReviewPreferencePromise;
   };
   // The owner's own words for this run: the message they sent, or the instructions of the

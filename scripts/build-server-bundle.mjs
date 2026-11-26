@@ -15,7 +15,9 @@
 //   api      DATABASE_URL, API_HOST, API_PORT, WEB_ORIGIN,
 //            SCREEN_PROXY_SECRET, DATA_DIR, SANDBOX_PROVIDER (and that provider's settings,
 //            such as LOCAL_VM_CLI), RAKAZO_DESKTOP_STACK_TOKEN
-//   worker   DATABASE_URL, DATA_DIR, SANDBOX_PROVIDER (and that provider's settings)
+//   worker   DATABASE_URL, DATA_DIR, SANDBOX_PROVIDER (and that provider's settings),
+//            WORKER_HEALTH_FILE on a shared host
+//   workerHealth  WORKER_HEALTH_FILE, WORKER_HEALTH_PID on a shared host
 //   web      API_PROXY_TARGET, SCREEN_PROXY_SECRET, WEB_HOST (127.0.0.1), WEB_PORT (5173),
 //            RAKAZO_HOST, RAKAZO_DESKTOP_STACK_TOKEN, RAKAZO_IMAGE_TAG
 import { execFileSync } from "node:child_process";
@@ -35,6 +37,7 @@ const outDir = path.resolve(outArg);
 const ENTRYPOINTS = {
   api: ["apps/api/src/index.ts", "apps/api/dist/index.js"],
   worker: ["apps/worker/src/index.ts", "apps/worker/dist/index.js"],
+  workerHealth: ["apps/worker/src/health-check.ts", "apps/worker/dist/health-check.js"],
   web: ["apps/web/src/standalone-server.ts", "apps/web/dist-server/index.js"],
   migrate: ["apps/api/src/cli/migrate-database.ts", "apps/api/dist/cli/migrate-database.js"],
 };

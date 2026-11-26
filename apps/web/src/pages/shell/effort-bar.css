@@ -50,6 +50,8 @@
 
 .effort-control input {
   position: absolute;
+  /* Let the native range receive drags even when they start on a painted stop. */
+  z-index: 2;
   inset: 0 auto 0 calc(var(--effort-inset) - 8px);
   width: calc(100% - var(--effort-step) + 16px);
   height: 100%;

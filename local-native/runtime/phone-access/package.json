@@ -1,0 +1,15 @@
+{
+  "name": "rakazo-phone-access",
+  "version": "1.0.0",
+  "private": true,
+  "type": "commonjs",
+  "dependencies": {
+    "@ngrok/ngrok": "1.8.0",
+    "qrcode": "1.5.4"
+  },
+  "scripts": {
+    "test": "node --test gateway.test.cjs",
+    "start": "node tunnel.cjs",
+    "qr": "node qr.cjs"
+  }
+}

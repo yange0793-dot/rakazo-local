@@ -1,5 +1,5 @@
 import { useLingui } from "@lingui/react/macro";
-import type { Me, ModelCatalogSourceStatus, SettingsScope, ThinkingLevel } from "@rakazo/contracts";
+import type { Me, ModelCatalogSourceStatus, SettingsScope } from "@rakazo/contracts";
 import {
   compatibleEndpointPresets,
   connectionDisplayName,
@@ -9,7 +9,6 @@ import {
   savedCompatibleEndpointMatches,
 } from "@rakazo/contracts";
 import {
-  clampCatalogThinkingLevel,
   compatibleConnectionReady,
   compatibleModelRows,
   connectionFormFields,
@@ -18,6 +17,7 @@ import {
   modelConnectRequest,
   popularModelProvidersFirst,
   savedCompatibleModelIds,
+  THINKING_LEVEL_OPTIONS,
 } from "@rakazo/core";
 import { fetchFresh, writeSaved } from "@rakazo/core/query";
 import { isCancelledError, useQuery, useQueryClient } from "@tanstack/react-query";
@@ -153,13 +153,15 @@ export function useModelSettings(onClose: () => void, scope: SettingsScope) {
   } = useModelOAuthSignIn({
     onClearError: () => setError(null),
     onError: setError,
-    onFinished: async (_controller, credentialId) => {
+    onFinished: async (controller, credentialId) => {
+      const started = oauthChoiceRef.current;
+      oauthChoiceRef.current = null;
       // A new account's later saves update it rather than adding another.
       setCredentialId(credentialId);
       await refresh();
-      const started = oauthChoiceRef.current;
-      oauthChoiceRef.current = null;
-      if (started) await started.intent?.onConnected?.({ ...started.choice, credentialId });
+      if (started && !controller.signal.aborted) {
+        await started.intent?.onConnected?.({ ...started.choice, credentialId });
+      }
     },
   });
 
@@ -318,10 +320,7 @@ export function useModelSettings(onClose: () => void, scope: SettingsScope) {
   const subscriptionSignIn = selected?.signIn !== undefined;
   // Effort levels for the staged catalog model — "off" stays out, matching the
   // per-bot Thinking picker.
-  const catalogThinkingLevels =
-    !isOpenAiCompatible && selected
-      ? (selected.thinkingLevels ?? []).filter((level) => level !== "off")
-      : [];
+  const catalogThinkingLevels = !isOpenAiCompatible && selected ? THINKING_LEVEL_OPTIONS : [];
   const busy = pending !== null || oauthPending;
   const savedHeaderEndpointMatches = savedCompatibleEndpointMatches(baseUrl, credential?.baseUrl);
   const effectiveBaseUrl = baseUrl.trim();
@@ -513,10 +512,7 @@ export function useModelSettings(onClose: () => void, scope: SettingsScope) {
       credentialId: credential?.id ?? null,
       modelId: selected.id,
       ...(intent ? { makeDefault: intent.makeDefault, scope } : {}),
-      thinkingLevel: clampCatalogThinkingLevel(
-        thinkingLevel,
-        selected.thinkingLevels,
-      ) as ThinkingLevel | null,
+      thinkingLevel: thinkingLevel !== "off" ? thinkingLevel : null,
       label: selected.providerName ?? selected.provider,
     });
   }

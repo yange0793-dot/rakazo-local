@@ -1,4 +1,6 @@
 import { randomUUID } from "node:crypto";
+import { createRouterClient } from "@orpc/server";
+import { prepareWorkEventWake } from "@rakazo/adapters";
 import type { Actor, MessageBlock } from "@rakazo/contracts";
 import type { PrismaClient } from "@rakazo/db";
 import {
@@ -8,16 +10,19 @@ import {
   createPendingSteeringRun,
   createThreadMessage,
   provisionMessagingIdentity,
+  recordWorkEventInTransaction,
   runAsSystem,
   runAsTenant,
   SpaceDeletionInProgressError,
 } from "@rakazo/db";
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
+import type { RouterDeps } from "./router.js";
+import { createRouter } from "./router.js";
 import type { ThreadTarget } from "./thread-target.js";
 import { sendThreadMessage } from "./thread-target.js";
 
 const databaseUrl = process.env.DATABASE_URL;
-const enabled = process.env.VERIFY_DATABASE === "1" && Boolean(databaseUrl);
+const enabled = ["1", "true"].includes(process.env.VERIFY_DATABASE ?? "") && Boolean(databaseUrl);
 
 describe.skipIf(!enabled)("typed replies to waiting cards (PostgreSQL)", () => {
   let prisma: PrismaClient;
@@ -42,7 +47,7 @@ describe.skipIf(!enabled)("typed replies to waiting cards (PostgreSQL)", () => {
   };
 
   beforeAll(() => {
-    const db = createDb(databaseUrl!);
+    const db = createDb(databaseUrl!, { encryptContent: true });
     prisma = db.prisma;
     system = asSystem(prisma);
     close = async () => {
@@ -53,10 +58,10 @@ describe.skipIf(!enabled)("typed replies to waiting cards (PostgreSQL)", () => {
   beforeEach(async () => {
     vi.clearAllMocks();
     const identity = await runAsSystem("test fixture", () =>
-      provisionMessagingIdentity(
-        prisma,
-        { provider: "test", address: `typed-reply-${randomUUID()}` },
-      ),
+      provisionMessagingIdentity(prisma, {
+        provider: "test",
+        address: `typed-reply-${randomUUID()}`,
+      }),
     );
     ({ botId, threadId } = identity);
     actor = { spaceId: identity.spaceId, userId: identity.userId } as Actor;
@@ -93,6 +98,7 @@ describe.skipIf(!enabled)("typed replies to waiting cards (PostgreSQL)", () => {
   });
   afterEach(async () => {
     if (!actor) return;
+    await system.externalAgentExecution.deleteMany({ where: { spaceId: actor.spaceId } });
     await system.messagingIdentity.deleteMany({ where: { userId: actor.userId } });
     await system.organization.deleteMany({ where: { id: actor.spaceId } });
     await system.user.deleteMany({ where: { id: actor.userId } });
@@ -191,6 +197,189 @@ describe.skipIf(!enabled)("typed replies to waiting cards (PostgreSQL)", () => {
       await system.message.findUniqueOrThrow({ where: { id: fixture.message.id } }),
     ).toMatchObject({ blocks: fixture.message.blocks });
   }
+
+  async function managedInput(target: ThreadTarget) {
+    const origin = await createThreadMessage(system, {
+      threadId: target.threadId,
+      authorUserId: actor.userId,
+      role: "user",
+      blocks: [{ kind: "text", text: "Prepare the report with my chosen format and title." }],
+    });
+    const board = await system.board.upsert({
+      where: { spaceId: actor.spaceId },
+      create: { spaceId: actor.spaceId },
+      update: {},
+    });
+    const ticket = await system.ticket.create({
+      data: {
+        spaceId: actor.spaceId,
+        boardId: board.id,
+        number: 1,
+        title: "Prepare report",
+        managedVersion: 1,
+        status: "doing",
+        createdByUserId: actor.userId,
+        createdByBotId: botId,
+        assigneeBotId: peerBotId,
+        originThreadId: target.threadId,
+        originMessageId: origin.id,
+        originGeneration: 0,
+      },
+    });
+    const pending = {
+      turnId: "native-turn",
+      inputRequestId: "native-input",
+      inputResponseSupported: true,
+      resumable: true,
+      questions: [
+        {
+          id: "format",
+          question: "Which format?",
+          options: [{ label: "Markdown" }, { label: "HTML" }],
+        },
+        { id: "title", question: "Which title?" },
+      ],
+    };
+    const execution = await system.externalAgentExecution.create({
+      data: {
+        ...actor,
+        ownerBotId: peerBotId,
+        threadId: peerThreadId,
+        ticketId: ticket.id,
+        operationKey: randomUUID(),
+        provider: "test",
+        route: {},
+        request: {},
+        sessionId: "native-session",
+        turnId: pending.turnId,
+        status: "waiting_input",
+        operationState: "running",
+        result: { session: { connected: true }, pendingInputRequests: [pending] },
+      },
+    });
+    const event = await system.$transaction((tx) =>
+      recordWorkEventInTransaction(tx, {
+        ...actor,
+        ticketId: ticket.id,
+        eventKey: `input:${execution.id}`,
+        kind: "external_input",
+        controlEpoch: 0,
+        targetBotId: peerBotId,
+        targetThreadId: peerThreadId,
+        payload: {
+          ...pending,
+          executionId: execution.id,
+          sessionId: execution.sessionId,
+          requirementsVersion: 1,
+          controlEpoch: 0,
+        },
+      }),
+    );
+    await prepareWorkEventWake(system, { eventId: event.id });
+    const saved = await system.workEvent.findUniqueOrThrow({ where: { id: event.id } });
+    return { event, ticket, runId: saved.wakeRunId! };
+  }
+
+  function sendManaged(target: ThreadTarget, text: string, replyToMessageId?: string) {
+    return runAsTenant(actor, () =>
+      sendThreadMessage(
+        {
+          prisma,
+          sandbox: {} as never,
+          events: { notify } as never,
+          jobs: { enqueue } as never,
+          ticketBoardEnabled: true,
+        },
+        actor,
+        target,
+        { text, replyToMessageId, clientNonce: randomUUID(), noModel: true },
+      ),
+    );
+  }
+
+  it("accepts a native question reply through the send RPC without a chat model", async () => {
+    const { runId } = await managedInput(privateTarget());
+    const deps = {
+      prisma,
+      sandbox: {},
+      events: { notify },
+      jobs: { enqueue },
+      env: { agentRuntime: "pi", deploymentModelConfigured: false, ticketBoardEnabled: true },
+    } as unknown as RouterDeps;
+    const client = createRouterClient(createRouter(deps), { context: { actor } });
+
+    await expect(client.threads.send({ botId, text: "Markdown" })).resolves.toMatchObject({
+      runId,
+    });
+    expect(await system.run.count({ where: { spaceId: actor.spaceId } })).toBe(1);
+  });
+
+  it.each(["bot", "group"] as const)(
+    "collects every native question from the original %s composer and resumes only its existing peer run",
+    async (kind) => {
+      const target = kind === "bot" ? privateTarget() : groupTarget;
+      const fixture = await managedInput(target);
+      const first = await sendManaged(target, "Markdown");
+      expect(first.runId).toBe(fixture.runId);
+      expect((await system.run.findUniqueOrThrow({ where: { id: fixture.runId } })).status).toBe(
+        "waiting_input",
+      );
+      expect(enqueue).not.toHaveBeenCalled();
+      const second = await sendManaged(target, "Chosen report title");
+      expect(second.runId).toBe(fixture.runId);
+      expect(await system.run.count({ where: { spaceId: actor.spaceId } })).toBe(1);
+      expect((await system.run.findUniqueOrThrow({ where: { id: fixture.runId } })).status).toBe(
+        "queued",
+      );
+      expect(enqueue).toHaveBeenCalledTimes(1);
+      const event = await system.workEvent.findUniqueOrThrow({ where: { id: fixture.event.id } });
+      expect(event.payload).toMatchObject({
+        inputResponse: {
+          status: "ready",
+          questionIndex: 2,
+          answers: {
+            format: { answers: ["Markdown"] },
+            title: { answers: ["Chosen report title"] },
+          },
+        },
+      });
+    },
+  );
+
+  it("requires an explicit quote for an older native question and refuses changed requirements without creating a user run", async () => {
+    const target = privateTarget();
+    const fixture = await managedInput(target);
+    await sendManaged(target, "HTML");
+    const card = await system.message.findFirstOrThrow({
+      where: { threadId, runId: fixture.runId, role: "bot" },
+      orderBy: { seq: "desc" },
+    });
+    await createThreadMessage(system, {
+      threadId,
+      botId,
+      role: "bot",
+      blocks: [{ kind: "text", text: "Unrelated update" }],
+    });
+    await expect(sendManaged(target, "A new request")).rejects.toThrow();
+    await system.ticket.update({
+      where: { id: fixture.ticket.id },
+      data: { requirementsVersion: 2 },
+    });
+    await expect(sendManaged(target, "Stale answer", card.id)).rejects.toThrow(
+      "no longer awaiting",
+    );
+    expect(await system.run.count({ where: { spaceId: actor.spaceId } })).toBe(1);
+    await system.ticket.update({
+      where: { id: fixture.ticket.id },
+      data: { requirementsVersion: 1 },
+    });
+    expect((await sendManaged(target, "Explicit answer", card.id)).runId).toBe(fixture.runId);
+    expect(
+      (await system.workEvent.findUniqueOrThrow({ where: { id: fixture.event.id } })).payload,
+    ).toMatchObject({
+      inputResponse: { answers: { title: { answers: ["Explicit answer"] } } },
+    });
+  });
 
   it.each(["bot", "group"] as const)(
     "retires questions that are no longer latest in a %s send and starts one normal run",

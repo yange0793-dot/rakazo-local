@@ -3,6 +3,7 @@
 import { i18n } from "@lingui/core";
 import { ORPCError } from "@orpc/client";
 import type { Bot, BotAvatarSet, Me } from "@rakazo/contracts";
+import { modelOptionKey } from "@rakazo/core";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import type { ComponentProps, ReactNode } from "react";
 import { act } from "react";
@@ -27,6 +28,11 @@ vi.mock("../../lib/rpc", () => {
       connect: vi.fn().mockResolvedValue({}),
       setRole: vi.fn().mockResolvedValue({}),
     },
+    autoReview: {
+      get: vi.fn().mockResolvedValue({ mode: "ask", checkerAvailable: true }),
+      set: vi.fn().mockResolvedValue({ mode: "ask", checkerAvailable: true }),
+    },
+    spaceSettings: { overrides: vi.fn() },
     me: vi.fn().mockResolvedValue(null),
   };
   return {
@@ -315,6 +321,13 @@ beforeEach(() => {
   vi.mocked(rpc.models.credentials).mockReset().mockResolvedValue([]);
   vi.mocked(rpc.models.list).mockReset().mockResolvedValue([]);
   vi.mocked(rpc.models.setRole).mockReset().mockResolvedValue({ primary: null, backups: [] });
+  vi.mocked(rpc.autoReview.get)
+    .mockReset()
+    .mockResolvedValue({ mode: "ask", checkerAvailable: true });
+  vi.mocked(rpc.autoReview.set)
+    .mockReset()
+    .mockImplementation(async ({ mode }) => ({ mode, checkerAvailable: true }));
+  vi.mocked(rpc.spaceSettings.overrides).mockReset().mockResolvedValue([]);
   container = document.createElement("div");
   document.body.append(container);
   root = createRoot(container);
@@ -381,6 +394,93 @@ it("shows the profile and the Advanced tab's controls", async () => {
   ]);
 });
 
+describe("BotSettings approval slider", () => {
+  beforeEach(() => {
+    vi.mocked(rpc.me).mockResolvedValue({ userId: "user-1", spaceId: "space-1" } as Me);
+    vi.mocked(rpc.autoReview.get).mockResolvedValue({ mode: "ask", checkerAvailable: true });
+  });
+
+  const slider = () => container.querySelector<HTMLInputElement>('input[aria-label="Permissions"]');
+  const stop = (label: string) =>
+    slider()!
+      .closest("fieldset")!
+      .querySelector<HTMLButtonElement>(`button[aria-label="${label}"]`)!;
+
+  it.each([
+    ["models", "Account default"],
+    ["confirmations", "This space only"],
+  ] as const)(
+    "labels the effective scope with a %s override and saves only there",
+    async (override, scope) => {
+      vi.mocked(rpc.spaceSettings.overrides).mockResolvedValue([override]);
+      await render("Billing", {}, false, 0, "computer");
+      expect(
+        [...container.querySelectorAll('input[type="range"]')].map((el) =>
+          el.getAttribute("aria-label"),
+        ),
+      ).toEqual(["Effort", "Permissions"]);
+      const mode = slider()!;
+      expect(document.getElementById(mode.getAttribute("aria-describedby")!)?.textContent).toBe(
+        scope,
+      );
+      expect(mode.getAttribute("aria-valuetext")).toBe("Ask");
+      expect(mode.max).toBe("2");
+      await act(async () => stop("Bypass permissions").click());
+      expect(rpc.autoReview.get).toHaveBeenCalledWith({}, expect.anything());
+      expect(rpc.autoReview.set).toHaveBeenCalledExactlyOnceWith({ mode: "bypermission" });
+      expect(mode.getAttribute("aria-valuetext")).toBe("Bypass permissions");
+      expect(
+        queryClient.getQueryData(spaceQueries(null, null).autoReview.get.queryKey({ input: {} }))
+          ?.mode,
+      ).toBe("bypermission");
+      expect(onSave).not.toHaveBeenCalled();
+      expect(rpc.models.setRole).not.toHaveBeenCalled();
+    },
+  );
+
+  it("locks the pending mode, rolls back a rejection and lets the same stop be retried", async () => {
+    let rejectSave!: (error: Error) => void;
+    vi.mocked(rpc.autoReview.set).mockImplementationOnce(
+      () =>
+        new Promise((_, reject) => {
+          rejectSave = reject;
+        }),
+    );
+    await render("Billing", {}, false, 0, "computer");
+    await act(async () => stop("Auto").click());
+    expect(slider()!.getAttribute("aria-valuetext")).toBe("Auto");
+    expect(slider()!.disabled).toBe(true);
+    expect(stop("Bypass permissions").disabled).toBe(true);
+    await act(async () => rejectSave(new Error("Approval save failed")));
+    expect(container.querySelector('[role="alert"]')?.textContent).toBe("Approval save failed");
+    expect(slider()!.getAttribute("aria-valuetext")).toBe("Ask");
+    expect(stop("Ask").getAttribute("aria-pressed")).toBe("true");
+    await act(async () => stop("Auto").click());
+    expect(vi.mocked(rpc.autoReview.set).mock.calls.map(([input]) => input)).toEqual([
+      { mode: "auto" },
+      { mode: "auto" },
+    ]);
+    expect(slider()!.getAttribute("aria-valuetext")).toBe("Auto");
+    expect(container.querySelector('[role="alert"]')).toBeNull();
+  });
+
+  it.each(["mode", "scope"] as const)(
+    "does not invent a permission value when the %s read fails",
+    async (read) => {
+      const error = new Error("Permissions unavailable");
+      if (read === "scope") vi.mocked(rpc.spaceSettings.overrides).mockRejectedValue(error);
+      else vi.mocked(rpc.autoReview.get).mockRejectedValue(error);
+      await render("Billing", {}, false, 0, "computer");
+      expect(slider()).toBeNull();
+      expect(container.querySelector('input[aria-label="Effort"]')).not.toBeNull();
+      expect(container.querySelector('[role="alert"]')?.textContent).toBe(
+        "Permissions unavailable",
+      );
+      expect(rpc.autoReview.set).not.toHaveBeenCalled();
+    },
+  );
+});
+
 describe("BotSettings model choices", () => {
   function connectedModels() {
     vi.mocked(rpc.models.credentials).mockResolvedValue([
@@ -411,7 +511,7 @@ describe("BotSettings model choices", () => {
   async function chooseModel(id: string) {
     const select = container.querySelector<HTMLSelectElement>('select[id$="-model"]')!;
     await act(async () => {
-      select.value = `openai-compatible::${id}`;
+      select.value = modelOptionKey("openai-compatible", id, "connection");
       select.dispatchEvent(new Event("change", { bubbles: true }));
     });
     return select;
@@ -434,14 +534,112 @@ describe("BotSettings model choices", () => {
     expect(onSave).toHaveBeenCalledExactlyOnceWith({
       modelProvider: "openai-compatible",
       modelId: "replacement",
+      modelCredentialId: "connection",
       thinkingLevel: null,
     });
     expect(select.disabled).toBe(true);
     expect(select.getAttribute("aria-busy")).toBe("true");
     await act(async () => complete());
     expect(select.disabled).toBe(false);
-    expect(select.value).toBe("openai-compatible::replacement");
+    expect(select.value).toBe(modelOptionKey("openai-compatible", "replacement", "connection"));
     expect(descriptionField().value).toBe("Unsubmitted profile draft");
+  });
+
+  it("switches two channels exposing the same model and retains the saved channel on reload", async () => {
+    const provider = "openai-compatible";
+    const modelId = "shared";
+    const a = {
+      id: "channel-a",
+      label: "Channel A",
+      provider,
+      modelId,
+      savedModelId: modelId,
+      hasKey: false,
+      isDefault: true,
+      enabledModelIds: [modelId, "a-only"],
+    };
+    const b = {
+      ...a,
+      id: "channel-b",
+      label: "Channel B",
+      savedModelId: null,
+      isDefault: false,
+      enabledModelIds: [modelId, "b-only"],
+    };
+    vi.mocked(rpc.models.credentials).mockResolvedValue([b, a]);
+    await render(
+      "Billing",
+      { modelProvider: provider, modelId, modelCredentialId: a.id },
+      false,
+      0,
+      "computer",
+    );
+    const channel = container.querySelector<HTMLSelectElement>('select[aria-label="Provider"]')!;
+    expect(channel.value).toBe("connection:channel-a");
+    expect([...channel.options].map((entry) => entry.text)).toEqual([
+      "Space default",
+      "Channel B",
+      "Channel A",
+    ]);
+    await act(async () => {
+      channel.value = "connection:channel-b";
+      channel.dispatchEvent(new Event("change", { bubbles: true }));
+    });
+    expect(onSave).toHaveBeenCalledExactlyOnceWith({
+      modelProvider: provider,
+      modelId,
+      modelCredentialId: b.id,
+      thinkingLevel: null,
+    });
+    expect(rpc.models.setRole).not.toHaveBeenCalled();
+    const models = container.querySelector<HTMLSelectElement>('select[aria-label="Model"]')!;
+    expect([...models.options].map((entry) => entry.text)).toEqual(["shared", "b-only"]);
+    expect(models.value).toBe(modelOptionKey(provider, modelId, b.id));
+    await render(
+      "Billing",
+      {
+        modelProvider: provider,
+        modelId,
+        modelCredentialId: b.id,
+        settingsUpdatedAt: "2099-01-01T00:00:00.000Z",
+      },
+      false,
+      0,
+      "computer",
+    );
+    expect(channel.value).toBe("connection:channel-b");
+  });
+
+  it("keeps an unavailable saved channel visible while another serves the same model", async () => {
+    const provider = "openai-compatible";
+    vi.mocked(rpc.models.credentials).mockResolvedValue([
+      {
+        id: "channel-a",
+        provider,
+        label: "Channel A",
+        hasKey: false,
+        isDefault: true,
+        modelId: "shared",
+        enabledModelIds: ["shared"],
+      },
+    ]);
+    await render(
+      "Billing",
+      {
+        modelProvider: provider,
+        modelId: "shared",
+        modelCredentialId: "channel-b",
+      },
+      false,
+      0,
+      "computer",
+    );
+    const channel = container.querySelector<HTMLSelectElement>('select[aria-label="Provider"]')!;
+    const model = container.querySelector<HTMLSelectElement>('select[aria-label="Model"]')!;
+    expect(channel.value).toBe("connection:channel-b");
+    expect(model.selectedOptions[0]?.disabled).toBe(true);
+    expect(model.selectedOptions[0]?.text).toContain("Unavailable");
+    expect(onSave).not.toHaveBeenCalled();
   });
 
   it("restores the last accepted model and effort if an immediate model save fails", async () => {
@@ -455,7 +653,7 @@ describe("BotSettings model choices", () => {
     onSave.mockRejectedValueOnce(new Error("Connection lost"));
     const select = await chooseModel("original");
 
-    expect(select.value).toBe("openai-compatible::replacement");
+    expect(select.value).toBe(modelOptionKey("openai-compatible", "replacement", "connection"));
     expect(select.disabled).toBe(false);
     expect(container.querySelector('[role="alert"]')?.textContent).toContain("Connection lost");
     expect(container.querySelector(".bot-effort-preview")?.getAttribute("data-level")).toBe(
@@ -524,10 +722,15 @@ describe("BotSettings model choices", () => {
     );
     const model = container.querySelector('[id$="-model"]');
     if (!(model instanceof HTMLSelectElement)) throw new Error("Missing model select");
-    const values = [...model.options].map((option) => option.value);
-    expect(values).toContain("deepseek::deepseek-flash");
-    expect(values).toContain("deepseek::deepseek-v4-pro");
-    expect(values).not.toContain("deepseek::DeepSeek-V4.1-Flash");
+    const provider = container.querySelector<HTMLSelectElement>('select[aria-label="Provider"]')!;
+    await act(async () => {
+      provider.value = [...provider.options].find((option) => option.text === "DeepSeek")!.value;
+      provider.dispatchEvent(new Event("change", { bubbles: true }));
+    });
+    const values = [...model.options].map((option) => JSON.parse(option.value)[1]);
+    expect(values).toContain("deepseek-flash");
+    expect(values).toContain("deepseek-v4-pro");
+    expect(values).not.toContain("DeepSeek-V4.1-Flash");
     expect(values.some((value) => value.includes("DeepSeek"))).toBe(false);
   });
 
@@ -585,7 +788,7 @@ describe("BotSettings model choices", () => {
     expect(rpc.models.setRole).toHaveBeenCalledExactlyOnceWith({
       role: "main",
       expectedUserId: "user-1",
-      primary: { provider: "openai-compatible", modelId: "model-2" },
+      primary: { provider: "openai-compatible", modelId: "model-2", credentialId: "connection" },
     });
     // The role and me reads both moved: the panel must not keep painting the replaced model.
     expect(vi.mocked(rpc.models.role).mock.calls).toHaveLength(2);
@@ -626,6 +829,16 @@ describe("BotSettings thinking options", () => {
       thinkingLevel: "high" as const,
       credentialId: "fixture-connection",
     };
+    vi.mocked(rpc.models.credentials).mockResolvedValue([
+      {
+        id: primary.credentialId,
+        provider: primary.provider,
+        label: "Fixture",
+        hasKey: true,
+        isDefault: true,
+        modelId: primary.modelId,
+      },
+    ]);
     vi.mocked(rpc.models.role).mockResolvedValue({ primary, backups: [] });
     let finish!: () => void;
     vi.mocked(rpc.models.setRole).mockImplementationOnce(
@@ -644,7 +857,7 @@ describe("BotSettings thinking options", () => {
     await act(async () =>
       container.querySelector<HTMLButtonElement>('.effort-stops button[aria-label="Max"]')!.click(),
     );
-    expect(container.querySelector<HTMLInputElement>('input[type="range"]')!.value).toBe("4");
+    expect(container.querySelector<HTMLInputElement>('input[type="range"]')!.value).toBe("5");
     expect(container.querySelector(".bot-effort-preview")?.getAttribute("data-level")).toBe("max");
     // No scope: the write lands on the model list that applies in this Space.
     expect(rpc.models.setRole).toHaveBeenCalledExactlyOnceWith({
@@ -672,7 +885,7 @@ describe("BotSettings thinking options", () => {
     await act(async () =>
       container.querySelector<HTMLButtonElement>('.effort-stops button[aria-label="Max"]')!.click(),
     );
-    expect(container.querySelector<HTMLInputElement>('input[type="range"]')!.value).toBe("2");
+    expect(container.querySelector<HTMLInputElement>('input[type="range"]')!.value).toBe("3");
     expect(container.textContent).toContain("Could not save effort");
   });
 
@@ -748,16 +961,16 @@ describe("BotSettings thinking options", () => {
     );
     const model = container.querySelector('[id$="-model"]');
     if (!(model instanceof HTMLSelectElement)) throw new Error("Missing model select");
-    expect(model.value).toBe("openai-compatible::beta");
+    expect(model.value).toBe(modelOptionKey("openai-compatible", "beta", "cred-compatible"));
     const thinking = container.querySelector<HTMLInputElement>('input[type="range"]')!;
     expect(thinking.min).toBe("0");
-    expect(thinking.max).toBe("1");
+    expect(thinking.max).toBe("5");
     expect(
-      [...container.querySelectorAll(".effort-stops button")].map((node) => node.textContent),
-    ).toEqual(["Low", "High"]);
+      [...thinking.closest("fieldset")!.querySelectorAll("button")].map((node) => node.textContent),
+    ).toEqual(["Minimal", "Low", "Medium", "High", "Extra high", "Max"]);
   });
 
-  it("shows the effective effort for an old override and saves only that bot's choice", async () => {
+  it("preserves an effort omitted by metadata and saves only that bot's choice", async () => {
     vi.mocked(rpc.me).mockResolvedValue({ userId: "user-1" } as Me);
     vi.mocked(rpc.models.list).mockResolvedValue([
       {
@@ -786,9 +999,9 @@ describe("BotSettings thinking options", () => {
       0,
       "computer",
     );
-    expect(container.textContent).toContain("Saved Max; using High.");
-    expect(container.querySelector(".bot-effort-preview")?.getAttribute("data-level")).toBe("high");
-    expect(container.querySelector('.effort-stops button[aria-label="Max"]')).toBeNull();
+    expect(container.textContent).not.toContain("Saved Max; using High.");
+    expect(container.querySelector(".bot-effort-preview")?.getAttribute("data-level")).toBe("max");
+    expect(container.querySelector('.effort-stops button[aria-label="Max"]')).not.toBeNull();
     await act(async () =>
       container.querySelector<HTMLButtonElement>('.effort-stops button[aria-label="Low"]')!.click(),
     );
@@ -830,19 +1043,25 @@ describe("BotSettings thinking options", () => {
     ]);
     await render("Billing", {}, false, 0, "computer");
     const select = container.querySelector<HTMLSelectElement>('select[id$="-model"]')!;
-    const retired = select.querySelector<HTMLOptionElement>(
-      'option[value="openai-compatible::provider-a/retired"]',
-    )!;
-    expect(select.value).toBe("openai-compatible::provider-a/retired");
+    const retiredKey = modelOptionKey(
+      "openai-compatible",
+      "provider-a/retired",
+      "fixture-connection",
+    );
+    const retired = [...select.options].find((option) => option.value === retiredKey)!;
+    expect(select.value).toBe(retiredKey);
     expect(select.getAttribute("aria-invalid")).toBe("true");
     expect(retired.disabled).toBe(true);
     expect(retired.textContent).toContain("Unavailable");
     expect(
-      select.querySelector<HTMLOptionElement>(
-        'option[value="openai-compatible::provider-a/current"]',
+      [...select.options].find(
+        (option) =>
+          option.value ===
+          modelOptionKey("openai-compatible", "provider-a/current", "fixture-connection"),
       )?.disabled,
     ).toBe(false);
-    expect(container.querySelector('input[type="range"]')).toBeNull();
+    expect(container.querySelector('input[aria-label="Effort"]')).toBeNull();
+    expect(container.querySelector('input[aria-label="Permissions"]')).not.toBeNull();
   });
 });
 

@@ -13,6 +13,7 @@ const catalog = [
   {
     provider: "anthropic",
     id: "opus",
+    reasoning: true,
     thinkingLevels: ["low", "high"] as ModelCredential["thinkingLevels"],
   },
   { provider: "anthropic", id: "sonnet", recommended: true },
@@ -160,7 +161,7 @@ describe("connectionFormFields", () => {
     ).toBeNull();
   });
 
-  it("keeps a saved protocol and clamps its effort levels to what the protocol runs", () => {
+  it("keeps the shared effort selection when a protocol maps it to a lower wire level", () => {
     const saved = credential({
       provider: COMPATIBLE,
       baseUrl: "http://127.0.0.1:8000/v1",
@@ -173,11 +174,10 @@ describe("connectionFormFields", () => {
       connectionFormFields({ catalog, provider: COMPATIBLE, modelId: "local", credential: saved })
         .apiProtocol,
     ).toBe("anthropic-messages");
-    // Anthropic Messages has no budget above high, so a saved max clamps down.
     expect(
       connectionFormFields({ catalog, provider: COMPATIBLE, modelId: "local", credential: saved })
         .thinkingLevel,
-    ).toBe("high");
+    ).toBe("max");
     const request = modelConnectRequest({
       form: draft({
         baseUrl: "http://127.0.0.1:8000/v1",
@@ -196,7 +196,7 @@ describe("connectionFormFields", () => {
     });
     expect(request.status === "ready" && request.input).toMatchObject({
       apiProtocol: "anthropic-messages",
-      thinkingLevel: "high",
+      thinkingLevel: "xhigh",
     });
   });
 
@@ -231,17 +231,17 @@ describe("connectionFormFields", () => {
       credential: saved,
       credentialId: saved.id,
     });
-    expect(changedEndpoint.status === "ready" && changedEndpoint.input.thinkingLevel).toBe("high");
+    expect(changedEndpoint.status === "ready" && changedEndpoint.input.thinkingLevel).toBe("max");
   });
 
-  it("clamps a catalog connection's effort to its model and leaves the endpoint empty", () => {
+  it("keeps the shared effort selection for a catalog model and leaves the endpoint empty", () => {
     const fields = connectionFormFields({
       catalog,
       provider: "anthropic",
       modelId: "opus",
       credential: credential({ modelId: "opus", thinkingLevel: "medium", baseUrl: "x" }),
     });
-    expect(fields.thinkingLevel).toBe("high");
+    expect(fields.thinkingLevel).toBe("medium");
     expect(fields.baseUrl).toBe("");
     expect(fields.maxTokens).toBe("");
   });
@@ -268,6 +268,7 @@ describe("modelConnectRequest", () => {
     provider: "anthropic",
     providerName: "Anthropic",
     id: "opus",
+    reasoning: true,
     thinkingLevels: ["low", "high"] as ModelCredential["thinkingLevels"],
   };
 
@@ -362,7 +363,7 @@ describe("modelConnectRequest", () => {
     },
   );
 
-  it("connects a catalog key with the clamped effort and the makeDefault target", () => {
+  it("connects a catalog key with the shared effort and the makeDefault target", () => {
     expect(
       modelConnectRequest({
         form: draft({ apiKey: " sk-long-enough ", thinkingLevel: "medium" }),
@@ -378,7 +379,7 @@ describe("modelConnectRequest", () => {
         provider: "anthropic",
         apiKey: "sk-long-enough",
         modelId: "opus",
-        thinkingLevel: "high",
+        thinkingLevel: "medium",
         makeDefault: true,
         scope: "account",
         maxTokens: null,

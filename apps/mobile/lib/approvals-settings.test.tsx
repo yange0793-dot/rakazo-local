@@ -19,7 +19,7 @@ type Rule = {
 const state = vi.hoisted(() => ({
   rpc: vi.fn(),
   spaceId: undefined as string | undefined,
-  settings: { mode: "ask", enabled: false, skipApprovals: false, checkerAvailable: false },
+  settings: { mode: "ask", checkerAvailable: false },
   rules: [] as Rule[],
   headerItems: [] as { label: string; onPress: () => void }[],
   search: null as null | { onChangeText: (event: { nativeEvent: { text: string } }) => void },
@@ -176,7 +176,7 @@ beforeEach(() => {
   vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
   queryClient.clear();
   state.spaceId = undefined;
-  state.settings = { mode: "ask", enabled: false, skipApprovals: false, checkerAvailable: false };
+  state.settings = { mode: "ask", checkerAvailable: false };
   state.rules = [];
   state.headerItems = [];
   state.search = null;
@@ -208,7 +208,7 @@ beforeEach(() => {
   root = createRoot(container);
 });
 
-it("lists only the rules, grouped by what they do; the mode is a row in settings", async () => {
+it("lists only the rules, grouped by what they do", async () => {
   state.rules = [rule({ id: "tool", matchValue: "send_email" })];
   await render();
   expect(rows()).toEqual(["Always allow: Send email"]);
@@ -263,8 +263,8 @@ it("offers Ask and Block, not Allow, for a tool a person approves every time", a
   expect(menuButton("Create space", "Always allow")).toBeUndefined();
 });
 
-it("dims every rule but blocks in Never ask, where only blocks apply", async () => {
-  state.settings = { ...state.settings, mode: "never" };
+it("dims Allow and Ask rules in bypass mode while keeping explicit blocks active", async () => {
+  state.settings = { ...state.settings, mode: "bypermission" };
   state.rules = [
     rule({ id: "allow", matchValue: "send_email" }),
     rule({ id: "ask", effect: "require_approval", matchValue: "write_file" }),
@@ -369,8 +369,8 @@ it("opens the rules after saving when the picker was the first screen", async ()
   });
 });
 
-it("drops Never ask dimming when a later mode read fails", async () => {
-  state.settings = { ...state.settings, mode: "never" };
+it("keeps bypass-mode rule state when a later mode read fails", async () => {
+  state.settings = { ...state.settings, mode: "bypermission" };
   state.rules = [rule({ id: "allow", matchValue: "send_email" })];
   await render();
   expect(container.querySelector("span[data-dimmed]")).not.toBeNull();

@@ -1,6 +1,5 @@
 import type { AdapterContext, AgentRunRequest, AgentRuntime } from "@rakazo/adapter-kit";
 import type {
-  Actor,
   LessonEvidenceKind,
   MemorySourceFact,
   MessageBlock,
@@ -20,11 +19,13 @@ import {
   isOwnerStartedRun,
   isTerminal,
 } from "@rakazo/core";
-import type { LessonWriteInput, Prisma, PrismaClient, ThreadEvents } from "@rakazo/db";
+import type { LessonWriteInput, PrismaClient, ReflectionSource, ThreadEvents } from "@rakazo/db";
 import {
   appendEventInTransaction,
   createThreadMessageInTransaction,
   listClaimedUserSteering,
+  lockReflectionSource,
+  readReflectionSource,
   recordUsage,
   runAsTenant,
   SemanticFactStore,
@@ -37,7 +38,7 @@ import type { MemoryProviderResolver } from "./memory-provider-factory.js";
 import { TOOL_ERROR_SIGNAL_MIN } from "./run-learning.js";
 import { selfEvolutionEnabled } from "./self-evolution.js";
 import { listAgentSkillRecords } from "./skill-tools.js";
-import { emitSkillDraftMessages, parsePlaybook } from "./teaching-session.js";
+import { emitSkillDraftMessagesInTransaction, parsePlaybook } from "./teaching-session.js";
 import { ticketReceiptsEnabled } from "./ticket-receipt-config.js";
 
 /** The host lesson surface the review writes to; a store instance satisfies it. */
@@ -66,10 +67,11 @@ export interface ReflectionDeps {
 /** What one `harness.reflect` job was asked to review. */
 export interface ReflectionPayload {
   runId: string;
-  /** A signal-triggered review: lessons only, never a skill card. */
+  /** A signal-triggered review: private lessons only, never chat status or draft cards. */
   auto?: true;
   /** Legacy wire name for the manual request. Its author and thread are checked before use. */
   exceptMessageId?: string;
+  source?: ReflectionSource;
 }
 
 const MAX_FOLLOW_UP_CHARS = 1_000;
@@ -452,13 +454,15 @@ function existingLessonLines(facts: readonly SemanticFact[], domainKey: string):
 async function upsertReviewStatus(
   deps: ReflectionDeps,
   run: { id: string; spaceId: string; botId: string },
+  source: ReflectionSource,
   threadId: string | null,
   text: string,
-): Promise<void> {
-  if (!threadId) return;
+): Promise<boolean> {
+  if (!threadId) return true;
   const blocks: MessageBlock[] = [{ kind: "meta", text }];
   const clientNonce = `reflect-status:${run.id}`;
   const seq = await deps.prisma.$transaction(async (tx) => {
+    if (!(await lockReflectionSource(tx, run, source, threadId))) return null;
     const existing = await tx.message.findUnique({
       where: { threadId_clientNonce: { threadId, clientNonce } },
       select: { id: true },
@@ -491,13 +495,16 @@ async function upsertReviewStatus(
     });
     return event.seq;
   });
+  if (seq == null) return false;
   await deps.events.notify(threadId, seq);
+  return true;
 }
 
 /** Puts lessons that did not meet the auto-apply bar in front of the person, unsaved. */
 async function writeLessonDrafts(
   deps: ReflectionDeps,
   run: { id: string; spaceId: string; botId: string },
+  source: ReflectionSource,
   threadId: string | null,
   lessons: readonly ParsedLesson[],
   domainKey: string,
@@ -534,6 +541,7 @@ async function writeLessonDrafts(
   });
   const clientNonce = `reflect-lesson:${key}`;
   const seq = await deps.prisma.$transaction(async (tx) => {
+    if (!(await lockReflectionSource(tx, run, source, threadId))) return null;
     const existing = await tx.message.findUnique({
       where: { threadId_clientNonce: { threadId, clientNonce } },
       select: { id: true },
@@ -568,7 +576,7 @@ function reviewFailureText(error: unknown): string {
 /**
  * Reviews one finished run with one model completion: it saves short private lessons for later
  * runs, and — for a review a person asked for — leaves an editable draft skill card. Lessons
- * apply automatically only when nothing outside entered the run and its owner started it.
+ * apply automatically after evidence verification for private runs their owner started.
  */
 export async function reflectRun(deps: ReflectionDeps, payload: ReflectionPayload): Promise<void> {
   const runId = payload.runId;
@@ -601,6 +609,8 @@ export async function reflectRun(deps: ReflectionDeps, payload: ReflectionPayloa
   if (!isTerminal(run.status)) {
     throw new Error(`harness.reflect run ${runId} is not finished (${run.status})`);
   }
+  const source = await readReflectionSource(deps.prisma, run, payload.source);
+  if (!source) return;
   const existing = await findSkillForRun(deps.prisma, run.botId, run.id);
   if (existing && !payload.auto && !payload.exceptMessageId) {
     getLogger().info(
@@ -653,12 +663,13 @@ export async function reflectRun(deps: ReflectionDeps, payload: ReflectionPayloa
   if (!bot) return;
   const botThreadId = bot.thread?.id ?? null;
 
-  await upsertReviewStatus(deps, run, botThreadId, "Reviewing this run…");
+  if (manual && !(await upsertReviewStatus(deps, run, source, botThreadId, "Reviewing this run…")))
+    return;
   try {
     await reviewAndRecord(deps, {
       run,
+      source,
       botThreadId,
-      bot,
       payload,
       manual,
       draftSkill: manual && !existing,
@@ -666,11 +677,12 @@ export async function reflectRun(deps: ReflectionDeps, payload: ReflectionPayloa
       model,
       operationId,
     });
-    await upsertReviewStatus(deps, run, botThreadId, "Review finished.");
+    if (manual) await upsertReviewStatus(deps, run, source, botThreadId, "Review finished.");
   } catch (error) {
-    await upsertReviewStatus(deps, run, botThreadId, reviewFailureText(error)).catch(
-      (statusError) => getLogger().error("harness.reflect status write failed", statusError),
-    );
+    if (manual)
+      await upsertReviewStatus(deps, run, source, botThreadId, reviewFailureText(error)).catch(
+        (statusError) => getLogger().error("harness.reflect status write failed", statusError),
+      );
     throw error;
   }
 }
@@ -678,6 +690,7 @@ export async function reflectRun(deps: ReflectionDeps, payload: ReflectionPayloa
 async function reviewAndRecord(
   deps: ReflectionDeps,
   input: {
+    source: ReflectionSource;
     run: {
       id: string;
       spaceId: string;
@@ -697,7 +710,6 @@ async function reviewAndRecord(
       thread: { groupId: string | null; externalConversationId: string | null } | null;
     };
     botThreadId: string | null;
-    bot: { id: string; thread: { id: string } | null };
     payload: ReflectionPayload;
     manual: boolean;
     draftSkill: boolean;
@@ -882,6 +894,7 @@ async function reviewAndRecord(
     `<skill_requested>${input.draftSkill}</skill_requested>`,
   ];
   const prompt = sections.join("\n\n");
+  if (!(await readReflectionSource(deps.prisma, run, input.source))) return;
 
   const usage = {
     spaceId,
@@ -924,6 +937,8 @@ async function reviewAndRecord(
     if (event.type === "done" && event.text) finished = event.text;
   }
 
+  if (!(await readReflectionSource(deps.prisma, run, input.source))) return;
+
   const text = finished.trim() || streamed.trim();
   const parsed = text ? parseReflection(text) : null;
   if (!parsed) {
@@ -942,7 +957,7 @@ async function reviewAndRecord(
   }
 
   const evidence = {
-    run_failed: run.error ? [run.error] : [],
+    run_failed: run.error ? [run.error.slice(0, MAX_ERROR_CHARS)] : [],
     tool_error: [...digest.errors, ...digest.errorLines],
     approval_denied: denialLines,
   };
@@ -972,18 +987,21 @@ async function reviewAndRecord(
     });
   }
   if (lessonsEnabled && lessons.length > 0 && memoryReads.complete) {
-    // Auto-apply needs a run nobody outside started and whose source words are their owner's.
-    const autoApplied =
-      run.learningSourceChecked &&
-      !run.tainted &&
+    const ownerRun =
       isOwnerStartedRun(run.trigger, sourceMessage?.role === "user") &&
       run.thread?.groupId == null &&
       run.thread?.externalConversationId == null &&
       sourceMessage?.role === "user" &&
       sourceMessage.authorUserId === run.userId &&
       sourceMessage.threadId === run.threadId;
-    if (autoApplied) {
-      for (const lesson of lessons) {
+    const drafts: ParsedLesson[] = [];
+    for (const lesson of lessons) {
+      // Reading outside content does not revoke the owner's verified correction.
+      const ownerCorrection =
+        lesson.evidence.kind === "user_feedback" || lesson.evidence.kind === "user_steering";
+      const autoApplied =
+        ownerRun && (manual || (run.learningSourceChecked && (!run.tainted || ownerCorrection)));
+      if (autoApplied) {
         const derivedFrom = memoryReads.sources.filter(
           (source) => source.kind !== "lesson" || source.id !== lesson.replaces?.id,
         );
@@ -992,6 +1010,7 @@ async function reviewAndRecord(
             botId,
             cue: lesson.cue,
             lesson: lesson.lesson,
+            reflectionSource: input.source,
             provenance: {
               kind: "run",
               runId: run.id,
@@ -1015,18 +1034,31 @@ async function reviewAndRecord(
             "run.id": run.id,
           });
         }
+      } else {
+        drafts.push(lesson);
       }
-    } else {
+    }
+    if (drafts.length && manual) {
       await writeLessonDrafts(
         deps,
         run,
+        input.source,
         input.botThreadId,
-        lessons,
+        drafts,
         domainKey,
         signals,
         memoryReads.sources,
         feedback[0]?.id,
       );
+    } else if (drafts.length) {
+      getLogger().info("harness.reflect left automatic lessons unapplied", {
+        "run.id": run.id,
+        "lesson.count": drafts.length,
+        "lesson.evidence_kinds": drafts.map((lesson) => lesson.evidence.kind),
+        "run.owner_started": ownerRun,
+        "run.tainted": run.tainted,
+        "run.learning_source_checked": run.learningSourceChecked,
+      });
     }
   }
 
@@ -1034,30 +1066,36 @@ async function reviewAndRecord(
   const draft = input.draftSkill ? parsed.draft : null;
   if (!draft) return;
 
-  let row: Prisma.TaughtSkillGetPayload<object>;
+  let published: number | null;
   try {
-    row = await deps.prisma.taughtSkill.create({
-      data: {
-        // One skill exists per reviewed run, so the primary key settles the race between two
-        // reviews that both started before either one wrote its draft.
-        id: `reflect-${run.id}`,
-        spaceId,
-        botId,
-        userId,
-        name: draft.name,
-        goal: draft.goal,
-        status: "draft",
-        playbook: draft.playbook as never,
-        recording: {
-          events: [],
-          snapshots: [],
-          evidence: {
-            runIds: [run.id],
-            origin: run.trigger,
-            quote: taskPrompt.slice(0, MAX_QUOTE_CHARS),
-          },
-        } as never,
-      },
+    published = await deps.prisma.$transaction(async (tx) => {
+      if (!(await lockReflectionSource(tx, run, input.source, input.botThreadId ?? undefined)))
+        return null;
+      const row = await tx.taughtSkill.create({
+        data: {
+          // One skill exists per reviewed run, so the primary key settles concurrent reviews.
+          id: `reflect-${run.id}`,
+          spaceId,
+          botId,
+          userId,
+          name: draft.name,
+          goal: draft.goal,
+          status: "draft",
+          playbook: draft.playbook as never,
+          recording: {
+            events: [],
+            snapshots: [],
+            evidence: {
+              runIds: [run.id],
+              origin: run.trigger,
+              quote: taskPrompt.slice(0, MAX_QUOTE_CHARS),
+            },
+          } as never,
+        },
+      });
+      return input.botThreadId
+        ? emitSkillDraftMessagesInTransaction(tx, row, input.botThreadId)
+        : null;
     });
   } catch (error) {
     if ((error as { code?: string }).code === "P2002") {
@@ -1068,11 +1106,6 @@ async function reviewAndRecord(
     }
     throw error;
   }
-  try {
-    await emitSkillDraftMessages(deps, { spaceId, userId } as Actor, row, input.bot);
-  } catch (error) {
-    // A retry must start clean: without the card the draft row would only hide the run.
-    await deps.prisma.taughtSkill.delete({ where: { id: row.id } });
-    throw error;
-  }
+  if (published != null && input.botThreadId)
+    await deps.events.notify(input.botThreadId, published);
 }

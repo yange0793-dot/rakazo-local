@@ -206,10 +206,10 @@ function world(printed = "") {
           }),
         },
         actionAutoReviewPreference: {
-          findUnique: async () => ({ enabled: false, skipApprovals: true }),
+          findUnique: async () => ({ mode: "bypermission" }),
         },
         userActionAutoReviewPreference: {
-          findUnique: async () => ({ enabled: false, skipApprovals: true }),
+          findUnique: async () => ({ mode: "bypermission" }),
         },
         externalEffect: {
           findUnique: async ({ where }: { where: Row }) =>

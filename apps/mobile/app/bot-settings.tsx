@@ -9,12 +9,15 @@ import {
 } from "@rakazo/contracts";
 import {
   botLookState,
-  credentialForModel,
+  botModelPickerKey,
+  connectedModelChoices,
   DEFAULT_BOT_AVATAR_COLOR,
   MODEL_SEARCH_THRESHOLD,
+  modelChoiceChannelKey,
   modelOptionKey,
   parseModelOptionKey,
   resolveSelectableModelId,
+  THINKING_LEVEL_OPTIONS,
 } from "@rakazo/core";
 import { typeScale } from "@rakazo/ui-tokens";
 import { Stack, useFocusEffect, useLocalSearchParams, useRouter } from "expo-router";
@@ -22,6 +25,7 @@ import type { Voice } from "expo-speech";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { ScrollViewInstance } from "react-native";
 import { Alert, Modal, Pressable, ScrollView, Share, StyleSheet, Text, View } from "react-native";
+import { ApprovalModeRow } from "../components/approval-settings-rows";
 import { BotAvatar } from "../components/bot-avatar";
 import { BotContextCards } from "../components/bot-context-cards";
 import { BotLookPicker } from "../components/bot-look-picker";
@@ -41,8 +45,9 @@ import {
   SettingsSwitch,
 } from "../components/settings-group";
 import { currentApiBase, rpc, selectedSpaceId } from "../lib/api";
+import { useApprovalSettings } from "../lib/approval-settings";
 import { deviceVoices, setVoiceForBot, voiceForBot, voiceLabel } from "../lib/bot-voices";
-import { chatModelPickerChoices } from "../lib/chat-model";
+import { chatModelChannels, chatModelPickerChoices } from "../lib/chat-model";
 import { COMPUTER_LIFECYCLE_TIMEOUT_MS } from "../lib/computer";
 import { notifyConversationCleared } from "../lib/conversation-cleared";
 import { loadDeviceVoiceEnabled } from "../lib/device-voice";
@@ -78,6 +83,7 @@ export default function BotSettingsScreen() {
   const [avatarSet, setAvatarSet] = useState<BotAvatarSet>("organic");
   const [avatarOpen, setAvatarOpen] = useState(false);
   const [advancedOpen, setAdvancedOpen] = useState(focus === "model" || pickedModel !== undefined);
+  const approvals = useApprovalSettings(undefined, advancedOpen);
   const [modelKey, setModelKey] = useState("");
   const [thinkingLevel, setThinkingLevel] = useState("");
   const [notifyOnFinish, setNotifyOnFinish] = useState(true);
@@ -202,7 +208,7 @@ export default function BotSettingsScreen() {
         setComputerMode(next.computerMode);
         setModelKey(
           next.modelProvider && next.modelId
-            ? modelOptionKey(next.modelProvider, next.modelId)
+            ? modelOptionKey(next.modelProvider, next.modelId, next.modelCredentialId)
             : "",
         );
         setThinkingLevel(next.thinkingLevel ?? "");
@@ -239,33 +245,31 @@ export default function BotSettingsScreen() {
   const selectedModel = storedModel
     ? {
         provider: storedModel.provider,
+        connectionId: storedModel.connectionId,
         modelId: resolveSelectableModelId(catalog, storedModel.provider, storedModel.modelId),
       }
     : null;
   const selectedModelKey = selectedModel
-    ? modelOptionKey(selectedModel.provider, selectedModel.modelId)
+    ? modelOptionKey(selectedModel.provider, selectedModel.modelId, selectedModel.connectionId)
     : "";
 
-  const effectiveProvider = selectedModel?.provider ?? me?.defaultProvider ?? null;
-  const effectiveModelId = selectedModel?.modelId ?? me?.defaultModel ?? null;
-  const effectiveEntry =
-    effectiveProvider && effectiveModelId
-      ? catalog.find(
-          (entry) =>
-            entry.provider === effectiveProvider &&
-            resolveSelectableModelId(catalog, entry.provider, entry.id) === effectiveModelId,
-        )
-      : undefined;
-  const effectiveCredential = credentialForModel(credentials, effectiveProvider, effectiveModelId);
-  const thinkingOptions = (
-    effectiveCredential?.thinkingLevels ??
-    effectiveEntry?.thinkingLevels ??
-    []
-  ).filter((level) => level !== "off");
+  const thinkingOptions = THINKING_LEVEL_OPTIONS;
 
   const modelChoices = useMemo(
     () => chatModelPickerChoices(me, catalog, credentials, selectedModelKey),
     [catalog, credentials, me, selectedModelKey, t],
+  );
+  const modelValue = botModelPickerKey(
+    selectedModelKey,
+    credentials,
+    connectedModelChoices(credentials, catalog, true),
+  );
+  const modelChannels = chatModelChannels(modelChoices);
+  const modelChannel = modelChoiceChannelKey(
+    modelChoices.find((choice) => choice.key === modelValue),
+  );
+  const filteredModelChoices = modelChoices.filter(
+    (choice) => modelChoiceChannelKey(choice) === modelChannel,
   );
 
   const thinkingChoices: MenuPickerChoice[] = useMemo(
@@ -284,7 +288,8 @@ export default function BotSettingsScreen() {
   }, [focus]);
 
   function selectModel(key: string) {
-    if (key === selectedModelKey) return;
+    if (key === selectedModelKey || modelChoices.find((choice) => choice.key === key)?.unavailable)
+      return;
     setModelKey(key);
     setThinkingLevel("");
   }
@@ -404,6 +409,7 @@ export default function BotSettingsScreen() {
         avatarSet?: BotAvatarSet;
         modelProvider?: string | null;
         modelId?: string | null;
+        modelCredentialId?: string | null;
         thinkingLevel?: ThinkingLevel | null;
         autoSpeak?: boolean;
       } = { botId };
@@ -418,16 +424,16 @@ export default function BotSettingsScreen() {
       if (avatarSet !== resolveBotAvatarSet(bot.avatarSet)) input.avatarSet = avatarSet;
       const modelChanged =
         (selected?.provider ?? null) !== (bot.modelProvider ?? null) ||
-        (selected?.modelId ?? null) !== (bot.modelId ?? null);
+        (selected?.modelId ?? null) !== (bot.modelId ?? null) ||
+        (selected?.connectionId ?? null) !== (bot.modelCredentialId ?? null);
       const thinkingChanged = (thinkingLevel || null) !== (bot.thinkingLevel ?? null);
       if (modelChanged) {
         input.modelProvider = selected?.provider ?? null;
         input.modelId = selected?.modelId ?? null;
+        input.modelCredentialId = selected?.connectionId ?? null;
       }
       if (modelMetaReady && (modelChanged || thinkingChanged)) {
-        input.thinkingLevel = thinkingOptions.length
-          ? ((thinkingLevel || null) as ThinkingLevel | null)
-          : null;
+        input.thinkingLevel = (thinkingLevel || null) as ThinkingLevel | null;
       }
       if (autoSpeak !== bot.autoSpeak) input.autoSpeak = autoSpeak;
       if (computerMode !== bot.computerMode) {
@@ -472,6 +478,7 @@ export default function BotSettingsScreen() {
       autoSpeak !== bot.autoSpeak ||
       (selectedModel?.provider ?? null) !== (bot.modelProvider ?? null) ||
       (selectedModel?.modelId ?? null) !== (bot.modelId ?? null) ||
+      (selectedModel?.connectionId ?? null) !== (bot.modelCredentialId ?? null) ||
       (thinkingLevel || null) !== (bot.thinkingLevel ?? null));
 
   const hasVoiceMenu = !voiceError && voices.length > 1;
@@ -609,20 +616,43 @@ export default function BotSettingsScreen() {
           >
             <SettingsGroup label={t`Model`} footer={modelMetaError ?? undefined}>
               <MenuPicker
-                choices={modelChoices}
+                choices={modelChannels}
+                label={t`Provider`}
+                onChange={(channel) => {
+                  const candidates = modelChoices.filter(
+                    (choice) => !choice.unavailable && modelChoiceChannelKey(choice) === channel,
+                  );
+                  const next =
+                    candidates.find(
+                      (choice) => choice.modelId === (selectedModel?.modelId ?? me?.defaultModel),
+                    ) ?? candidates[0];
+                  if (next) selectModel(next.key);
+                }}
+                value={modelChannel}
+              />
+              <MenuPicker
+                choices={filteredModelChoices.map((choice) => ({
+                  ...choice,
+                  label: choice.modelLabel ?? choice.label,
+                  disabled: choice.unavailable,
+                }))}
                 label={t`Model`}
                 showLabel={false}
                 onChange={selectModel}
                 onPress={
-                  modelChoices.length > MODEL_SEARCH_THRESHOLD
+                  filteredModelChoices.length > MODEL_SEARCH_THRESHOLD
                     ? () =>
                         router.push({
                           pathname: "/bot-model",
-                          params: { botId, value: selectedModelKey },
+                          params: {
+                            botId,
+                            value: modelValue,
+                            channel: modelChannel,
+                          },
                         })
                     : undefined
                 }
-                value={selectedModelKey}
+                value={modelValue}
               />
               {thinkingOptions.length ? (
                 <MenuPicker
@@ -632,6 +662,7 @@ export default function BotSettingsScreen() {
                   value={thinkingLevel}
                 />
               ) : null}
+              <ApprovalModeRow approvals={approvals} />
             </SettingsGroup>
             <SettingsGroup label={t`Computer`}>
               <View style={styles.cardContent}>

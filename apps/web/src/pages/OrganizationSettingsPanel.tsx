@@ -10,6 +10,7 @@ import type { Organization } from "../lib/organizations";
 import { organizationsQuery, useOrganizations } from "../lib/organizations";
 import { queryClient, useQueryUserId } from "../lib/query";
 import { clearSpaceSelection, rpc, selectSpace } from "../lib/rpc";
+import { useSpaceRpc } from "../lib/space-rpc";
 import { errorText } from "../lib/user-error";
 
 /** The organization the app is showing: its name, and, for its owner, renaming and deletion. */
@@ -41,29 +42,38 @@ function OrganizationSettings({
   onBusyChange?: (busy: boolean) => void;
 }) {
   const userId = useQueryUserId();
+  const client = useSpaceRpc();
   const nameId = useId();
   const [draft, setDraft] = useState(organization.name);
+  const [sourceName, setSourceName] = useState(organization.name);
+  const [edited, setEdited] = useState(false);
   const [pending, setPending] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [confirmingDelete, setConfirmingDelete] = useState(false);
   const [creating, setCreating] = useState(false);
+  if (sourceName !== organization.name) {
+    setSourceName(organization.name);
+    if (!edited) setDraft(organization.name);
+  }
   useEffect(() => {
     onBusyChange?.(pending);
   }, [pending, onBusyChange]);
 
   async function save() {
+    if (pending || !edited) return;
     const trimmed = draft.trim();
-    if (pending) return;
     if (!trimmed || trimmed === organization.name) {
       setDraft(organization.name);
+      setEdited(false);
       setError(null);
       return;
     }
     setPending(true);
     setError(null);
     try {
-      await rpc.organizations.rename({ organizationId: organization.id, name: trimmed });
+      await client.organizations.rename({ organizationId: organization.id, name: trimmed });
       setDraft(trimmed);
+      setEdited(false);
       await queryClient.invalidateQueries({ queryKey: organizationsQuery(userId).queryKey });
     } catch (reason) {
       setError(errorText(reason));
@@ -95,6 +105,7 @@ function OrganizationSettings({
                 disabled={pending}
                 onChange={(event) => {
                   setDraft(event.target.value);
+                  setEdited(true);
                   setError(null);
                 }}
                 onBlur={() => void save()}
@@ -104,6 +115,7 @@ function OrganizationSettings({
                   if (event.key === "Enter") event.currentTarget.blur();
                   if (event.key === "Escape") {
                     setDraft(organization.name);
+                    setEdited(false);
                     setError(null);
                   }
                 }}
@@ -140,7 +152,7 @@ function OrganizationSettings({
         <DeleteOrganizationDialog
           organization={organization}
           onCancel={() => setConfirmingDelete(false)}
-          onConfirm={() => removeOrganization(organization)}
+          onConfirm={() => removeOrganization(organization, client)}
         />
       ) : null}
     </div>
@@ -148,8 +160,8 @@ function OrganizationSettings({
 }
 
 /** Deletes it, then reloads into the Space the server chose. */
-export async function removeOrganization(organization: Organization): Promise<void> {
-  const { activeSpaceId } = await rpc.organizations.remove({ organizationId: organization.id });
+export async function removeOrganization(organization: Organization, client = rpc): Promise<void> {
+  const { activeSpaceId } = await client.organizations.remove({ organizationId: organization.id });
   if (!selectSpace(activeSpaceId)) clearSpaceSelection();
   window.location.assign("/");
 }

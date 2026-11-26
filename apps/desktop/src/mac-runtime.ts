@@ -225,7 +225,7 @@ async function installVersion(
 
 export interface ServerManifest {
   version: string;
-  entrypoints: Record<"api" | "worker" | "web" | "migrate", string>;
+  entrypoints: Record<"api" | "worker" | "web" | "migrate", string> & { workerHealth?: string };
 }
 
 /** Returns the unpacked `rakazo-server/` directory and its manifest. */
@@ -244,7 +244,9 @@ export async function installServerBundle(
   const manifest = JSON.parse(
     await readFile(path.join(dir, "manifest.json"), "utf8"),
   ) as ServerManifest;
-  for (const entry of ["api", "worker", "web", "migrate"] as const) {
+  const entries: (keyof ServerManifest["entrypoints"])[] = ["api", "worker", "web", "migrate"];
+  if (manifest.entrypoints?.workerHealth !== undefined) entries.push("workerHealth");
+  for (const entry of entries) {
     const file = manifest.entrypoints?.[entry];
     const resolved = typeof file === "string" ? path.resolve(dir, file) : "";
     if (!resolved.startsWith(`${dir}${path.sep}`)) {

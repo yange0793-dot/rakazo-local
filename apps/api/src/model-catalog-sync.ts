@@ -5,14 +5,21 @@ import type {
   ModelCatalogSourceAdapter,
   StoredModelSecret,
 } from "@rakazo/adapters";
-import { holdSecretNotifications, parseModelSecret, serializeModelSecret } from "@rakazo/adapters";
+import {
+  findConnectedModelCredential,
+  holdSecretNotifications,
+  parseModelSecret,
+  serializeModelSecret,
+} from "@rakazo/adapters";
 import type { Actor, ManagedModelCatalog, ModelCatalogSourceStatus } from "@rakazo/contracts";
 import { OPENAI_COMPATIBLE_PROVIDER_ID } from "@rakazo/contracts";
 import type { PrismaClient } from "@rakazo/db";
 import {
   deleteUnreferencedCredentialSecret,
+  lockAccountModels,
   Prisma,
   runAsSystem,
+  runAsSystemInTransaction,
   withTransactionRetry,
 } from "@rakazo/db";
 
@@ -95,17 +102,27 @@ export function projectCatalogChannel(
 /** Rewrites saved choices only when their former route still names this exact channel/model. */
 async function updateModelReferences(
   tx: Prisma.TransactionClient,
-  userId: string,
+  secrets: SecretStore,
+  actor: Pick<Actor, "userId" | "spaceId">,
   credentialId: string,
   catalog: ManagedModelCatalog,
 ) {
+  const { userId } = actor;
   for (const [before, after] of Object.entries(catalog.aliases)) {
     if (before === after || !catalog.availableModelIds.includes(after)) continue;
+    const resolved = await findConnectedModelCredential(
+      tx,
+      secrets,
+      actor,
+      OPENAI_COMPATIBLE_PROVIDER_ID,
+      before,
+    );
+    const ownsUnpinned = resolved?.id === credentialId;
     const roleWhere = {
       userId,
       provider: OPENAI_COMPATIBLE_PROVIDER_ID,
       modelId: before,
-      OR: [{ credentialId }, { credentialId: null }],
+      ...(ownsUnpinned ? { OR: [{ credentialId }, { credentialId: null }] } : { credentialId }),
     };
     await tx.userModelPreference.updateMany({
       where: { userId, credentialId, modelId: before },
@@ -118,7 +135,16 @@ async function updateModelReferences(
     await tx.userModelRoleChoice.updateMany({ where: roleWhere, data: { modelId: after } });
     await tx.spaceModelRoleChoice.updateMany({ where: roleWhere, data: { modelId: after } });
     const where = { userId, modelProvider: OPENAI_COMPATIBLE_PROVIDER_ID, modelId: before };
-    await tx.bot.updateMany({ where, data: { modelId: after } });
+    await tx.bot.updateMany({
+      where: {
+        ...where,
+        ...(ownsUnpinned
+          ? { OR: [{ modelCredentialId: credentialId }, { modelCredentialId: null }] }
+          : { modelCredentialId: credentialId }),
+      },
+      data: { modelId: after },
+    });
+    if (!ownsUnpinned) continue;
     await tx.routine.updateMany({ where, data: { modelId: after } });
     await tx.steeringMessage.updateMany({
       where: { ...where, claimedAt: null },
@@ -178,7 +204,7 @@ export class ModelCatalogSync {
     const source = await this.prisma.modelCatalogSource.findUnique({
       where: { userId_sourceKey: { userId: actor.userId, sourceKey: adapter.key } },
     });
-    if (!source) return [];
+    if (!source) return undefined;
     if (source.error) throw new Error(source.error);
     const rows = await this.prisma.userModelCredential.findMany({
       where: {
@@ -250,11 +276,18 @@ export class ModelCatalogSync {
           withTransactionRetry(() =>
             this.prisma.$transaction(
               async (tx) => {
+                await lockAccountModels(tx, actor.userId);
                 const [current] = await tx.$queryRaw<SourceRow[]>`
                 SELECT * FROM model_catalog_sources WHERE id = ${source.id} FOR UPDATE`;
                 if (current?.lastAttemptAt?.getTime() !== attemptedAt.getTime()) return;
-                if (current.fingerprint !== fingerprint)
-                  await this.apply(tx, actor, source, adapter, channels, signal);
+                if (current.fingerprint !== fingerprint) {
+                  // A connection and its catalog are account-wide, as are references to it.
+                  await runAsSystemInTransaction(
+                    tx,
+                    "synchronize an account's model references",
+                    () => this.apply(tx, actor, source, adapter, channels, signal),
+                  );
+                }
                 await tx.modelCatalogSource.update({
                   where: { id: source.id },
                   data: {
@@ -265,7 +298,7 @@ export class ModelCatalogSync {
                   },
                 });
               },
-              { timeout: 30_000, isolationLevel: Prisma.TransactionIsolationLevel.Serializable },
+              { timeout: 30_000, isolationLevel: Prisma.TransactionIsolationLevel.ReadCommitted },
             ),
           ),
         );
@@ -310,16 +343,21 @@ export class ModelCatalogSync {
         saved.set(row.id, secret);
     }
     const consumed = new Set<string>();
+    const channelIds = new Set(channels.map((channel) => channel.id));
     for (const channel of channels) {
       let row = rows.find(
         (item) => item.catalogSourceId === source.id && item.catalogProviderId === channel.id,
       );
-      if (!row) {
+      if (!row && !channel.id.startsWith("key:")) {
         // A channel re-created under a new id keeps the connection saved for its previous
         // id when exactly one connection under this source (or an unmanaged one on the same
         // endpoint) carries the same label.
         const matches = rows.filter(
-          (item) => !consumed.has(item.id) && saved.has(item.id) && item.label === channel.label,
+          (item) =>
+            !consumed.has(item.id) &&
+            saved.has(item.id) &&
+            item.label === channel.label &&
+            !(item.catalogProviderId && channelIds.has(item.catalogProviderId)),
         );
         if (matches.length === 1) row = matches[0];
       }
@@ -337,6 +375,7 @@ export class ModelCatalogSync {
         row?.label ?? channel.label,
         channel.id,
       );
+      if (row) await updateModelReferences(tx, this.secrets, actor, row.id, next.managedCatalog!);
       const result = await this.writeConnection(
         tx,
         actor,
@@ -347,7 +386,6 @@ export class ModelCatalogSync {
         !previous?.managedCatalog || row?.label === previous.managedCatalog.providerLabel,
       );
       consumed.add(result.id);
-      await updateModelReferences(tx, actor.userId, result.id, next.managedCatalog!);
       if (!row && next.enabledModelIds?.[0])
         await tx.userModelPreference.create({
           data: { userId: actor.userId, credentialId: result.id, modelId: next.enabledModelIds[0] },
@@ -427,12 +465,21 @@ export class ModelCatalogSync {
         distinct: ["userId"],
         select: { userId: true },
       });
-      await Promise.all(
-        users.map(async ({ userId }) => {
-          const member = await this.prisma.spaceMember.findFirst({ where: { userId } });
-          if (member) await this.sync({ userId, spaceId: member.spaceId }, undefined, signal);
-        }),
-      );
+      let next = 0;
+      const worker = async () => {
+        for (;;) {
+          const index = next++;
+          const user = users[index];
+          if (!user) return;
+          const member = await this.prisma.spaceMember.findFirst({
+            where: { userId: user.userId },
+          });
+          if (member)
+            await this.sync({ userId: user.userId, spaceId: member.spaceId }, undefined, signal);
+        }
+      };
+      // Leave connections in the four-slot local pool for RPC and readiness checks.
+      await Promise.all(Array.from({ length: Math.min(2, users.length) }, worker));
     });
   }
 }

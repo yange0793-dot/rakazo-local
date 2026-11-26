@@ -82,5 +82,11 @@ function PageThumb({ pageId, title }: { pageId: string; title: string }) {
   const queries = useSpaceQueries();
   const detail = useQuery(queries.pages.get.queryOptions({ input: { pageId } }));
   const viewer = usePageDocument(detail.data?.code);
-  return <PagePreview document={viewer.document} title={title} failed={detail.isError} />;
+  return (
+    <PagePreview
+      document={viewer.document}
+      title={title}
+      failed={detail.isError || viewer.failed}
+    />
+  );
 }

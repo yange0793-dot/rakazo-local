@@ -17,6 +17,8 @@ const stamp = randomUUID();
 const actor = { userId: `catalog-user-${stamp}`, spaceId: `catalog-space-${stamp}` };
 const orgId = `catalog-org-${stamp}`;
 const credentialId = `catalog-credential-${stamp}`;
+const secondSpaceId = `catalog-second-space-${stamp}`;
+const secondBotId = `catalog-second-bot-${stamp}`;
 const baseUrl = "http://127.0.0.1:9000/v1";
 
 postgres("managed model catalog (isolated PostgreSQL)", () => {
@@ -77,6 +79,20 @@ postgres("managed model catalog (isolated PostgreSQL)", () => {
           organizationId: orgId,
           role: "owner",
           createdAt: new Date(),
+        },
+      });
+      await db.prisma.space.create({
+        data: { id: secondSpaceId, organizationId: orgId, name: "Second fixture space" },
+      });
+      await db.prisma.bot.create({
+        data: {
+          id: secondBotId,
+          spaceId: secondSpaceId,
+          userId: actor.userId,
+          name: "Second fixture bot",
+          color: "primary",
+          modelProvider: "openai-compatible",
+          modelId: "Channel/model-a",
         },
       });
       const stored = await secrets.put(
@@ -161,6 +177,14 @@ postgres("managed model catalog (isolated PostgreSQL)", () => {
         (await db.prisma.userModelRoleChoice.findFirstOrThrow({ where: { userId: actor.userId } }))
           .modelId,
       ).toBe("provider-id/model-a");
+      await expect(
+        runAsSystem("read the fixture bot in the other space", () =>
+          db.prisma.bot.findUniqueOrThrow({
+            where: { id: secondBotId },
+            select: { modelId: true },
+          }),
+        ),
+      ).resolves.toEqual({ modelId: "provider-id/model-a" });
       await sync.sync(actor);
       expect(await db.prisma.userModelCredential.count({ where: { userId: actor.userId } })).toBe(
         1,
@@ -271,8 +295,12 @@ postgres("managed model catalog (isolated PostgreSQL)", () => {
   });
 
   it("does not expose another account's source", async () => {
-    await runAsTenant({ ...actor, userId: "another-user" }, async () => {
+    const other = { ...actor, userId: "another-user" };
+    await runAsTenant(other, async () => {
       expect(await sync.list(actor.userId)).toEqual([]);
+      expect(
+        await sync.models(other, { baseUrl, apiProtocol: "anthropic-messages" }),
+      ).toBeUndefined();
     });
   });
 
@@ -298,6 +326,29 @@ postgres("managed model catalog (isolated PostgreSQL)", () => {
       expect(
         await db.prisma.userModelRoleChoice.findFirstOrThrow({ where: { userId: actor.userId } }),
       ).toMatchObject({ credentialId, modelId: "replacement-id/model-a" });
+    });
+  });
+
+  it("adds a new channel whose label matches a channel still present in the response", async () => {
+    await runAsTenant(actor, async () => {
+      const existing = channels[0]!;
+      channels = [
+        {
+          ...existing,
+          id: "same-label-id",
+          models: [
+            { id: "same-label-id/model-a", label: "model-a", capabilities: { source: "unknown" } },
+          ],
+        },
+        ...channels,
+      ];
+      await sync.sync(actor);
+      expect(
+        await db.prisma.userModelCredential.findUniqueOrThrow({ where: { id: credentialId } }),
+      ).toMatchObject({ catalogProviderId: existing.id });
+      expect(await sync.models(actor, { baseUrl, apiProtocol: "anthropic-messages" })).toContain(
+        "same-label-id/model-a",
+      );
     });
   });
 });

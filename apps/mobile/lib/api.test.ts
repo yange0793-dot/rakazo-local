@@ -9,10 +9,12 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { promptAiConsent } from "./ai-consent";
 import {
   captureApiRequestContext,
+  currentApiBase,
   isServerReachable,
   MAX_MOBILE_RPC_RESPONSE_BYTES,
   rpc,
   selectedSpaceId,
+  setCachedApiBase,
   subscribeServerReachable,
 } from "./api.js";
 import { subscribeThread } from "./api-live.js";
@@ -41,6 +43,16 @@ afterEach(() => {
 
 import { deferredFetch, jsonResponse, mockSecureStore, rpcErrorResponse } from "./api-test-helpers";
 
+// whatwg-fetch exposes the buffered payload through Body methods without a body stream.
+function bufferedResponse(body: string, { status = 200, headers }: ResponseInit = {}) {
+  return {
+    ok: status >= 200 && status < 300,
+    status,
+    headers: new Headers(headers),
+    arrayBuffer: vi.fn(async () => new TextEncoder().encode(body).buffer),
+  };
+}
+
 describe("mobile API requests", () => {
   beforeEach(async () => {
     vi.restoreAllMocks();
@@ -57,6 +69,48 @@ describe("mobile API requests", () => {
     vi.stubGlobal("fetch", fetch);
     await expect(rpc("bots/list", {}, { requestContext: context })).rejects.toThrow();
     expect(fetch).not.toHaveBeenCalled();
+  });
+
+  it("does not move an ordinary request to a server selected during auth setup", async () => {
+    const previous = currentApiBase();
+    const fetch = vi.fn();
+    vi.stubGlobal("fetch", fetch);
+    const request = rpc("bots/list");
+    try {
+      setCachedApiBase("https://other.example.test");
+      await expect(request).rejects.toThrow();
+      expect(fetch).not.toHaveBeenCalled();
+    } finally {
+      setCachedApiBase(previous);
+    }
+  });
+
+  it("rejects a successful HTTP response that has no RPC result", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => new Response("{}")),
+    );
+    await expect(rpc("preferences/update", { locale: "en" })).rejects.toThrow();
+  });
+
+  it("reads a valid ordinary buffered RPC without a declared length", async () => {
+    const response = bufferedResponse('{"json":[]}');
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => response),
+    );
+
+    await expect(rpc("bots/list")).resolves.toEqual([]);
+    expect(response.arrayBuffer).toHaveBeenCalledOnce();
+  });
+
+  it("rejects an empty buffered 204 as an invalid RPC result", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => bufferedResponse("", { status: 204 })),
+    );
+
+    await expect(rpc("bots/list")).rejects.toMatchObject({ cause: { name: "SyntaxError" } });
   });
 
   it("reports an rpc that hit its timeout as a timeout, not as a canceled fetch", async () => {
@@ -122,7 +176,7 @@ describe("mobile API requests", () => {
   it("reads a slowly delivered Files detail body", async () => {
     vi.useFakeTimers();
     vi.mocked(SecureStore.getItemAsync).mockResolvedValue("session-token");
-    const artifact = { id: "artifact-1", contentBase64: "aGVsbG8=" };
+    const artifact = { id: "artifact-1", size: 5, contentBase64: "aGVsbG8=" };
     vi.stubGlobal(
       "fetch",
       vi.fn(async () => {
@@ -149,6 +203,176 @@ describe("mobile API requests", () => {
     );
     await vi.advanceTimersByTimeAsync(20_000);
     expect(await result).toEqual({ value: artifact });
+  });
+
+  describe.each([
+    ["streaming", (body: string) => new Response(body)],
+    ["buffered", bufferedResponse],
+  ] as const)("%s artifact responses", (_mode, response) => {
+    it.each([
+      ["AQ==", 1],
+      ["AQI=", 2],
+      ["AQID", 3],
+    ] as const)("accepts %s as a complete %i-byte file", async (contentBase64, size) => {
+      const artifact = { id: "artifact-1", size, contentBase64 };
+      vi.stubGlobal(
+        "fetch",
+        vi.fn(async () => response(JSON.stringify({ json: artifact }))),
+      );
+
+      await expect(getArtifactById("artifact-1")).resolves.toEqual(artifact);
+    });
+
+    it.each([
+      ["size mismatch", { size: 6, contentBase64: "AQID" }],
+      ["same encoded length with different padding", { size: 3, contentBase64: "AQI=" }],
+      ["malformed encoding with matching apparent length", { size: 3, contentBase64: "AQ?D" }],
+      ["missing size", { contentBase64: "AQID" }],
+    ] as const)("rejects a small artifact with %s", async (_description, artifact) => {
+      vi.stubGlobal(
+        "fetch",
+        vi.fn(async () => response(JSON.stringify({ json: artifact }))),
+      );
+
+      await expect(getArtifactById("artifact-1")).rejects.toMatchObject({
+        message: "Incomplete artifact download",
+        cause: { message: "Incomplete artifact download" },
+      });
+    });
+
+    it.each([
+      ["Files detail", () => getArtifactById("artifact-1")],
+      ["direct chat", () => rpc("artifacts/get", { artifactId: "artifact-1", botId: "bot-1" })],
+      ["group chat", () => rpc("artifacts/get", { artifactId: "artifact-1", groupId: "group-1" })],
+    ] as const)("downloads a stored 13 MiB artifact from %s", async (_path, download) => {
+      const bytes = Buffer.alloc(13 * 1024 * 1024, 123);
+      bytes[bytes.length - 1] = 231;
+      const artifact = {
+        id: "artifact-1",
+        name: '報告 ,"contentBase64": draft.pdf',
+        size: bytes.length,
+        contentBase64: bytes.toString("base64"),
+      };
+      const body = JSON.stringify({ json: artifact });
+      expect(Buffer.byteLength(body)).toBeGreaterThan(MAX_MOBILE_RPC_RESPONSE_BYTES);
+      const fetch = vi.fn(async () => response(body));
+      vi.stubGlobal("fetch", fetch);
+
+      const result = await download();
+      expect(result.name).toBe(artifact.name);
+      expect(Buffer.from(result.contentBase64, "base64").equals(bytes)).toBe(true);
+      // No current upload-limit lookup is needed for an artifact that was already stored.
+      expect(fetch).toHaveBeenCalledOnce();
+    });
+
+    it.each([
+      ["missing quartet", 4, 0],
+      ["shorter decoded length with the same encoded length", 0, 1],
+    ] as const)(
+      "rejects a large incomplete artifact with %s",
+      async (_description, missingCharacters, sizeIncrease) => {
+        const bytes = Buffer.alloc(13 * 1024 * 1024);
+        const encoded = bytes.toString("base64");
+        const contentBase64 = encoded.slice(0, encoded.length - missingCharacters);
+        const size = bytes.length + sizeIncrease;
+        vi.stubGlobal(
+          "fetch",
+          vi.fn(async () => response(JSON.stringify({ json: { size, contentBase64 } }))),
+        );
+
+        await expect(getArtifactById("artifact-1")).rejects.toMatchObject({
+          message: "Incomplete artifact download",
+          cause: { message: "Incomplete artifact download" },
+        });
+      },
+    );
+
+    it("preserves a null JSON envelope", async () => {
+      vi.stubGlobal(
+        "fetch",
+        vi.fn(async () => response(JSON.stringify({ json: null }))),
+      );
+      await expect(getArtifactById("artifact-1")).resolves.toBeNull();
+    });
+  });
+
+  it("bounds ordinary RPCs even when the reply looks like an artifact", async () => {
+    const size = 13 * 1024 * 1024;
+    const contentBase64 = Buffer.alloc(size).toString("base64");
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => jsonResponse({ json: { size, contentBase64 } })),
+    );
+
+    await expect(rpc("bots/list")).rejects.toMatchObject({
+      message: "Something went wrong. Try again.",
+      cause: {
+        name: "ResponseBodyTooLargeError",
+        message: `Response body exceeds ${MAX_MOBILE_RPC_RESPONSE_BYTES} bytes`,
+      },
+    });
+  });
+
+  it("keeps the ordinary content-length cap for a buffered response", async () => {
+    const response = bufferedResponse('{"json":[]}', {
+      headers: { "content-length": String(MAX_MOBILE_RPC_RESPONSE_BYTES + 1) },
+    });
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => response),
+    );
+
+    await expect(rpc("bots/list")).rejects.toMatchObject({
+      cause: { name: "ResponseBodyTooLargeError" },
+    });
+    expect(response.arrayBuffer).not.toHaveBeenCalled();
+  });
+
+  it("bounds a buffered ordinary response by actual bytes without a declared length", async () => {
+    const size = 13 * 1024 * 1024;
+    const contentBase64 = Buffer.alloc(size).toString("base64");
+    const response = bufferedResponse(JSON.stringify({ json: { size, contentBase64 } }));
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => response),
+    );
+
+    await expect(rpc("bots/list")).rejects.toMatchObject({
+      message: "Something went wrong. Try again.",
+      cause: {
+        name: "ResponseBodyTooLargeError",
+        message: `Response body exceeds ${MAX_MOBILE_RPC_RESPONSE_BYTES} bytes`,
+      },
+    });
+    expect(response.arrayBuffer).toHaveBeenCalledOnce();
+  });
+
+  it("preserves a structured error from a buffered artifact response", async () => {
+    const error = { code: "FORBIDDEN", status: 403, message: "You cannot open this artifact." };
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () =>
+        bufferedResponse(JSON.stringify({ json: error }), { status: error.status }),
+      ),
+    );
+    await expect(getArtifactById("artifact-1")).rejects.toMatchObject(error);
+  });
+
+  it("times out while reading a stalled buffered artifact", async () => {
+    vi.useFakeTimers();
+    const response = bufferedResponse('{"json":null}');
+    response.arrayBuffer.mockImplementation(() => new Promise(() => {}));
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => response),
+    );
+
+    const pending = getArtifactById("artifact-1");
+    const rejection = expect(pending).rejects.toThrow("Request timed out");
+    await vi.advanceTimersByTimeAsync(119_999);
+    expect(response.arrayBuffer).toHaveBeenCalledOnce();
+    await vi.advanceTimersByTimeAsync(1);
+    await rejection;
   });
 
   it("times out and cancels a stalled Files detail body after the download budget", async () => {
@@ -257,7 +481,9 @@ describe("mobile API requests", () => {
       1,
       "http://127.0.0.1:3100/rpc/bots/get",
       expect.objectContaining({
-        headers: expect.objectContaining({ "x-rakazo-install-id": await loadLocalInstallSessionId() }),
+        headers: expect.objectContaining({
+          "x-rakazo-install-id": await loadLocalInstallSessionId(),
+        }),
         body: JSON.stringify({ json: { botId: "bot-1" } }),
       }),
     );
@@ -755,7 +981,7 @@ describe("mobile API requests", () => {
     mockSecureStore(store);
     await loadApiBase();
     vi.stubGlobal("fetch", vi.fn(respond));
-      await expect(rpc("bots/list")).rejects.toThrow();
+    await expect(rpc("bots/list")).rejects.toThrow();
   });
 
   it("re-persists a Space selected while recovery cleanup is in flight", async () => {

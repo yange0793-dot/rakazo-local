@@ -1,4 +1,4 @@
-import { BotSettingsValuesSchema } from "@rakazo/contracts";
+import { BotSettingsValuesSchema, OPENAI_COMPATIBLE_PROVIDER_ID } from "@rakazo/contracts";
 import {
   appendEventInTransaction,
   commitBotUpdate,
@@ -6,6 +6,7 @@ import {
   InstructionConflictError,
   InvalidSpaceNameError,
   isRecordNotFound,
+  lockAccountModels,
   runAsSystem,
   SpaceLimitError,
   THREAD_LOCK_TRANSACTION_OPTIONS,
@@ -14,6 +15,7 @@ import {
 import { getLogger } from "@rakazo/logging";
 import { uncertainEffectResult } from "./approval-effect.js";
 import { archiveSpawnedBot, spawnBot } from "./child-bots.js";
+import { validateCompatibleModelChoice } from "./model-selection.js";
 import {
   createChildRoutine,
   createFleetGroup,
@@ -289,6 +291,8 @@ export const fleetTools: ToolHandlers = {
         dailyCheckIns: true,
         modelProvider: true,
         modelId: true,
+        modelCredentialId: true,
+        userId: true,
         thinkingLevel: true,
         autoSpeak: true,
         voiceId: true,
@@ -329,6 +333,8 @@ export const fleetTools: ToolHandlers = {
       () => listDefaultVoices(deps, run, context),
     );
     if ("error" in settings) return call.finish(settings);
+    if (settings.data.modelCredentialId === null && live.userId !== run.userId)
+      return call.finish({ error: "Only the bot's owner can change its model connection." });
     const before = BotSettingsValuesSchema.parse(
       Object.fromEntries(
         Object.keys(settings.data).map((key) => [key, live[key as keyof typeof settings.data]]),
@@ -344,6 +350,13 @@ export const fleetTools: ToolHandlers = {
         ([key, value]) => before[key as keyof typeof before] !== value,
       )
     ) {
+      let pinError: string | undefined;
+      const compatiblePin =
+        settings.data.modelProvider === OPENAI_COMPATIBLE_PROVIDER_ID &&
+        (settings.data.modelProvider !== live.modelProvider ||
+          settings.data.modelId !== live.modelId)
+          ? settings.data.modelId
+          : null;
       try {
         await commitBotUpdate({
           prisma: deps.prisma,
@@ -352,10 +365,26 @@ export const fleetTools: ToolHandlers = {
           threadId: thread.id,
           botId: bot.id,
           emitBotUpdated: true,
-          expectedSettings: before,
+          expectedSettings:
+            settings.data.modelProvider !== undefined
+              ? { ...before, modelCredentialId: live.modelCredentialId }
+              : before,
           data: settings.data,
+          validateModelPin: compatiblePin
+            ? async (tx) => {
+                await lockAccountModels(tx, run.userId);
+                pinError = await validateCompatibleModelChoice(
+                  tx,
+                  modelDeps.modelChange.secretStore,
+                  run,
+                  compatiblePin,
+                );
+                if (pinError) throw new Error(pinError);
+              }
+            : undefined,
         });
       } catch (error) {
+        if (pinError) return call.finish({ error: pinError });
         if (!isRecordNotFound(error)) throw error;
         return call.finish({ error: "Your settings changed meanwhile; read them and try again." });
       }

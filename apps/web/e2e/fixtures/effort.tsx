@@ -1,5 +1,5 @@
 import { I18nProvider } from "@lingui/react";
-import type { BotAvatarSet, ThinkingLevel } from "@rakazo/contracts";
+import type { ApprovalMode, BotAvatarSet, ThinkingLevel } from "@rakazo/contracts";
 import { BOT_COLOR_LIST } from "@rakazo/contracts";
 import { botLookState, organicAvatarSampleIdentity } from "@rakazo/core";
 import type { CSSProperties } from "react";
@@ -12,12 +12,44 @@ import { ModelSection } from "../../src/pages/shell/bot-settings-sections";
 import { EffortAvatar } from "../../src/pages/shell/effort-avatar";
 import "../../src/styles.css";
 
+const MODEL_CHOICES = [
+  {
+    key: "openrouter::anthropic/claude-sonnet",
+    label: "Claude Sonnet (OpenRouter)",
+    provider: "openrouter",
+    providerLabel: "OpenRouter",
+    modelLabel: "Claude Sonnet",
+    modelId: "anthropic/claude-sonnet",
+  },
+  {
+    key: "openrouter::anthropic/claude-opus",
+    label: "Claude Opus (OpenRouter)",
+    provider: "openrouter",
+    providerLabel: "OpenRouter",
+    modelLabel: "Claude Opus",
+    modelId: "anthropic/claude-opus",
+  },
+  {
+    key: "openai-compatible::gpt-mini",
+    label: "GPT mini (OpenAI-compatible)",
+    provider: "openai-compatible",
+    providerLabel: "OpenAI-compatible",
+    modelLabel: "GPT mini",
+    modelId: "gpt-mini",
+  },
+] as const;
+
 const params = new URLSearchParams(location.search);
 applyResolvedAppearance(params.get("theme") === "light" ? "light" : "dark");
 await bootstrapI18n(params.get("locale") === "en" ? "en" : "zh-CN");
 
 function EffortFixture() {
+  const [model, setModel] = useState<string>(MODEL_CHOICES[0]!.key);
   const [level, setLevel] = useState<ThinkingLevel>("high");
+  const [approval, setApproval] = useState<{ mode: ApprovalMode; saves: number }>({
+    mode: "ask",
+    saves: 0,
+  });
   const [preview, setPreview] = useState<ThinkingLevel | null>(null);
   const [saves, setSaves] = useState(0);
   const [color, setColor] = useState(BOT_COLOR_LIST.find((entry) => entry.id === "orange")!.hex);
@@ -29,6 +61,8 @@ function EffortFixture() {
       className="mx-auto flex min-h-dvh w-full max-w-96 flex-col px-5 py-12"
       data-saved-level={level}
       data-save-count={saves}
+      data-saved-approval={approval.mode}
+      data-approval-save-count={approval.saves}
       style={{ "--effort-color": botLookState(color).color } as CSSProperties}
     >
       <EffortAvatar color={botLookState(color).color} level={glowLevel} active>
@@ -47,11 +81,13 @@ function EffortFixture() {
       <ModelSection
         ids="effort-fixture"
         containerRef={modelRef}
-        choices={[{ key: "fixture::balanced", label: "Balanced" }]}
-        value="fixture::balanced"
-        onModelChange={() => {}}
+        choices={MODEL_CHOICES}
+        value={model}
+        onModelChange={(next) => setModel(next)}
         effortLevel={level}
-        effortLevels={["low", "medium", "high", "xhigh", "max"]}
+        approvalMode={approval.mode}
+        approvalScope="account"
+        onApprovalModeChange={(mode) => setApproval(({ saves }) => ({ mode, saves: saves + 1 }))}
         onEffortChange={(next) => {
           setLevel(next);
           setSaves((count) => count + 1);

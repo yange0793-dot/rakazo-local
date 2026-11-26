@@ -3,6 +3,7 @@ import type { FileHandle } from "node:fs/promises";
 import { lstat, mkdir, open, readdir, realpath } from "node:fs/promises";
 import path from "node:path";
 import { WorkspaceTooLargeError } from "@rakazo/adapter-kit";
+import { normalizeDesktopWorkspacePath } from "./desktop-sandbox-paths.js";
 import { fileHandlePath } from "./file-handle-path.js";
 import { isContained } from "./home.js";
 import {
@@ -205,6 +206,13 @@ function countEntry(
 function isArchivePath(relative: string) {
   const bytes = Buffer.byteLength(relative, "utf8");
   if (bytes === 0 || bytes > MAX_PATH_BYTES || relative.includes("\0")) return false;
+  if (process.platform === "win32") {
+    try {
+      if (normalizeDesktopWorkspacePath(relative) !== relative) return false;
+    } catch {
+      return false;
+    }
+  }
   return relative
     .split("/")
     .every(
@@ -280,39 +288,44 @@ async function readArchive(
   },
 ): Promise<{ entries: number; bytes: number }> {
   const reader = new ByteReader(source);
-  if (!(await reader.read(MAGIC.length)).equals(MAGIC))
-    throw new HomeArchiveError("Not a home archive");
-  const counts = { bytes: 0, entries: 0 };
-  const seen = new Set<string>();
-  const decoder = new TextDecoder("utf-8", { fatal: true });
-  for (;;) {
-    const kind = (await reader.read(1))[0];
-    if (kind === END) break;
-    if (kind !== DIRECTORY && kind !== FILE)
-      throw new HomeArchiveError("Home archive has an unsupported entry");
-    const length = (await reader.read(2)).readUInt16BE(0);
-    let relative: string;
-    try {
-      relative = decoder.decode(await reader.read(length));
-    } catch {
-      throw new HomeArchiveError("Home archive has a path that is not UTF-8");
+  try {
+    if (!(await reader.read(MAGIC.length)).equals(MAGIC))
+      throw new HomeArchiveError("Not a home archive");
+    const counts = { bytes: 0, entries: 0 };
+    const seen = new Set<string>();
+    const decoder = new TextDecoder("utf-8", { fatal: true, ignoreBOM: true });
+    for (;;) {
+      const kind = (await reader.read(1))[0];
+      if (kind === END) break;
+      if (kind !== DIRECTORY && kind !== FILE)
+        throw new HomeArchiveError("Home archive has an unsupported entry");
+      const length = (await reader.read(2)).readUInt16BE(0);
+      const name = await reader.read(length);
+      let relative: string;
+      try {
+        relative = decoder.decode(name);
+      } catch {
+        throw new HomeArchiveError("Home archive has a path that is not UTF-8");
+      }
+      if (!isArchivePath(relative)) throw new HomeArchiveError("Home archive path is not allowed");
+      if (seen.has(relative)) throw new HomeArchiveError("Home archive repeats an entry");
+      seen.add(relative);
+      if (kind === DIRECTORY) {
+        countEntry(counts, 0, limits);
+        await sink.directory(relative);
+        continue;
+      }
+      const meta = await reader.read(10);
+      const size = meta.readBigUInt64BE(2);
+      if (size > BigInt(limits.maxBytes)) throw new WorkspaceTooLargeError("bytes");
+      countEntry(counts, Number(size), limits);
+      await sink.file(relative, meta.readUInt16BE(0) & 0o777, reader.stream(Number(size)));
     }
-    if (!isArchivePath(relative)) throw new HomeArchiveError("Home archive path is not allowed");
-    if (seen.has(relative)) throw new HomeArchiveError("Home archive repeats an entry");
-    seen.add(relative);
-    if (kind === DIRECTORY) {
-      countEntry(counts, 0, limits);
-      await sink.directory(relative);
-      continue;
-    }
-    const meta = await reader.read(10);
-    const size = meta.readBigUInt64BE(2);
-    if (size > BigInt(limits.maxBytes)) throw new WorkspaceTooLargeError("bytes");
-    countEntry(counts, Number(size), limits);
-    await sink.file(relative, meta.readUInt16BE(0) & 0o777, reader.stream(Number(size)));
+    if (!(await reader.atEnd())) throw new HomeArchiveError("Home archive has trailing data");
+    return counts;
+  } finally {
+    await reader.close();
   }
-  if (!(await reader.atEnd())) throw new HomeArchiveError("Home archive has trailing data");
-  return counts;
 }
 
 /** Exact-length reads over a chunked stream, without holding more than one chunk. */
@@ -353,5 +366,9 @@ class ByteReader {
 
   async atEnd(): Promise<boolean> {
     return !(await this.fill());
+  }
+
+  async close(): Promise<void> {
+    await this.iterator.return?.();
   }
 }

@@ -10,6 +10,7 @@ import {
   GROUP_MEMBER_MAX,
   GROUP_MEMBER_MIN,
   isAttachmentImageMimeType,
+  OPENAI_COMPATIBLE_PROVIDER_ID,
   ThinkingLevelSchema,
   TimeZoneSchema,
   UpdateGroupInput,
@@ -23,6 +24,7 @@ import {
   InstructionConflictError,
   IsolationError,
   isRecordNotFound,
+  lockAccountModels,
   SpaceDeletionInProgressError,
 } from "@rakazo/db";
 import { getLogger } from "@rakazo/logging";
@@ -35,7 +37,7 @@ import { asRecord } from "./connector-http.js";
 import type { ExecutorDeps } from "./executor-deps.js";
 import { resolveModelChoice } from "./model-choice.js";
 import type { BotModelChangeDeps } from "./model-selection.js";
-import { validateBotModelChange } from "./model-selection.js";
+import { validateBotModelChange, validateCompatibleModelChoice } from "./model-selection.js";
 import { listPiCatalog, scriptedCatalogEntry } from "./pi-models.js";
 import type { ScheduleToolDeps } from "./schedule-tools.js";
 import {
@@ -265,6 +267,7 @@ async function prepareChildModel(
   const previous = {
     provider: child.modelProvider,
     model: child.modelId,
+    ...(child.modelCredentialId ? { credentialId: child.modelCredentialId } : {}),
     thinkingLevel: child.thinkingLevel ?? null,
   };
   const chosen = model
@@ -942,6 +945,7 @@ export async function setChildBotModel(
   if (
     (previous?.provider ?? null) !== child.modelProvider ||
     (previous?.model ?? null) !== child.modelId ||
+    (previous?.credentialId ?? null) !== (child.modelCredentialId ?? null) ||
     (previous?.thinkingLevel ?? null) !== (child.thinkingLevel ?? null)
   ) {
     return { error: "That bot's model changed since you approved; ask again." };
@@ -958,6 +962,13 @@ export async function setChildBotModel(
     },
   );
   if (!validated.ok) return { error: validated.error };
+  const changesModel =
+    validated.provider !== child.modelProvider || validated.model !== child.modelId;
+  if (changesModel && child.modelCredentialId && child.userId !== run.userId)
+    return { error: "Only the bot's owner can change its model connection." };
+  const compatiblePin =
+    changesModel && validated.provider === OPENAI_COMPATIBLE_PROVIDER_ID ? validated.model : null;
+  let pinError: string | undefined;
   try {
     await commitBotUpdate({
       prisma: deps.prisma,
@@ -969,15 +980,30 @@ export async function setChildBotModel(
       expectedSettings: {
         modelProvider: child.modelProvider,
         modelId: child.modelId,
+        modelCredentialId: child.modelCredentialId,
         thinkingLevel: child.thinkingLevel ?? null,
       },
+      validateModelPin: compatiblePin
+        ? async (tx) => {
+            await lockAccountModels(tx, run.userId);
+            pinError = await validateCompatibleModelChoice(
+              tx,
+              deps.modelChange.secretStore,
+              run,
+              compatiblePin,
+            );
+            if (pinError) throw new Error(pinError);
+          }
+        : undefined,
       data: {
         modelProvider: validated.provider,
         modelId: validated.model,
+        ...(changesModel && child.modelCredentialId ? { modelCredentialId: null } : {}),
         thinkingLevel: validated.thinkingLevel,
       },
     });
   } catch (error) {
+    if (pinError) return { error: pinError };
     if (isRecordNotFound(error))
       return { error: "That bot's model changed since you approved; ask again." };
     throw error;
@@ -1099,9 +1125,11 @@ async function appendGroupEvent(
 
 const botSelect = {
   id: true,
+  userId: true,
   name: true,
   modelProvider: true,
   modelId: true,
+  modelCredentialId: true,
   thinkingLevel: true,
   thread: { select: { id: true } },
 } satisfies Prisma.BotSelect;

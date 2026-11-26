@@ -569,6 +569,7 @@ export function createRuntimeMemoryCompletion(deps: RuntimeMemoryCompletionDeps)
       withChatCompletionsCompatibility(
         completionModel,
         withCloudflareAuth(model, {
+          apiKey: resolved.apiKey,
           ...(toolChoice ? { toolChoice: toolChoice as SimpleStreamOptions["toolChoice"] } : {}),
           ...(reasoning === "off" ? {} : { reasoning }),
           signal: context.signal,

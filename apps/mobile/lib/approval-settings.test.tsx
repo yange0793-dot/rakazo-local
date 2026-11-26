@@ -12,8 +12,6 @@ import { ACCOUNT_SETTINGS } from "./settings-target";
 
 type Settings = {
   mode: string;
-  enabled: boolean;
-  skipApprovals: boolean;
   checkerAvailable: boolean;
 };
 const state = vi.hoisted(() => ({
@@ -174,7 +172,7 @@ async function render(target: SettingsTarget = ACCOUNT_SETTINGS, enabled?: boole
 
 beforeEach(() => {
   vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
-  state.settings = { mode: "ask", enabled: false, skipApprovals: false, checkerAvailable: false };
+  state.settings = { mode: "ask", checkerAvailable: false };
   state.rules = [];
   state.alert.mockReset();
   state.rpc
@@ -207,32 +205,34 @@ it("shows the mode as the row's value and saves a pick from the menu at once", a
   expect(spoken()).toBe(
     "Approvals, Ask, Asks before sending, spending or changing anything in your apps.",
   );
-  expect(choices()).toEqual(["Never ask", "Ask*"]);
+  expect(choices()).toEqual(["Auto", "Ask*", "Bypass permissions"]);
 
-  await act(async () => choice("Never ask").click());
-  expect(sets()).toEqual([["autoReview/set", { scope: "account", mode: "never" }]]);
-  expect(row()).toBe(
-    "Approvals | Never ask | Asks only before purchases and the first use of your computer. Only Block rules apply.",
-  );
-  expect(choices()).toEqual(["Never ask*", "Ask"]);
+  await act(async () => choice("Bypass permissions").click());
+  expect(sets()).toEqual([["autoReview/set", { scope: "account", mode: "bypermission" }]]);
+  expect(row()).toBe("Approvals | Bypass permissions | Do not ask; all permissions are enabled.");
+  expect(choices()).toEqual(["Auto", "Ask", "Bypass permissions*"]);
 
   // Picking the current mode saves nothing.
-  await act(async () => choice("Never ask").click());
+  await act(async () => choice("Bypass permissions").click());
   expect(sets()).toHaveLength(1);
 });
 
 it("offers Auto only once an approval model can decide, and explains a chosen Auto without one", async () => {
   state.settings = { ...state.settings, checkerAvailable: true };
   await render();
-  expect(choices()).toEqual(["Never ask", "Auto", "Ask*"]);
+  expect(choices()).toEqual(["Auto", "Ask*", "Bypass permissions"]);
 
   act(() => root.unmount());
   root = createRoot(container);
   state.settings = { ...state.settings, mode: "auto", checkerAvailable: false };
   await render();
-  expect(choices()).toEqual(["Never ask", "Auto*", "Ask"]);
-  expect(row()).toBe("Approvals | Auto | Add a model in Settings to use this.");
-  expect(spoken()).toBe("Approvals, Auto, Add a model in Settings to use this.");
+  expect(choices()).toEqual(["Auto*", "Ask", "Bypass permissions"]);
+  expect(row()).toBe(
+    "Approvals | Auto | No review model is configured; actions that need review will ask you.",
+  );
+  expect(spoken()).toBe(
+    "Approvals, Auto, No review model is configured; actions that need review will ask you.",
+  );
 });
 
 it("offers a retry in the row when the first load fails", async () => {
@@ -247,7 +247,7 @@ it("offers a retry in the row when the first load fails", async () => {
   expect(row()).toBe(
     "Approvals | Ask | Asks before sending, spending or changing anything in your apps.",
   );
-  expect(choices()).toEqual(["Never ask", "Ask*"]);
+  expect(choices()).toEqual(["Auto", "Ask*", "Bypass permissions"]);
 });
 
 it("goes back to the stored mode and alerts when a save fails", async () => {
@@ -267,39 +267,35 @@ it("goes back to the stored mode and alerts when a save fails", async () => {
     return base(proc, input);
   });
 
-  await act(async () => choice("Never ask").click());
+  await act(async () => choice("Bypass permissions").click());
   expect(state.alert).toHaveBeenCalledWith("Could not save that preference", "Try again.");
   expect(row()).toBe(
     "Approvals | Ask | Asks before sending, spending or changing anything in your apps.",
   );
-  expect(choices()).toEqual(["Never ask", "Ask*"]);
+  expect(choices()).toEqual(["Auto", "Ask*", "Bypass permissions"]);
   // If what is stored can't be read either, the row shows no mode and offers to read it again.
   await act(async () => finishRead());
   expect(row()).toBe("Approvals | Retry | Something went wrong. Try again.");
   expect(choices()).toEqual([]);
 
   // A save that landed before its reply was lost shows as saved.
-  stored = "never";
+  stored = "bypermission";
   await act(async () => container.querySelector("span")!.click());
   await act(async () => finishRead());
-  expect(row()).toBe(
-    "Approvals | Never ask | Asks only before purchases and the first use of your computer. Only Block rules apply.",
-  );
+  expect(row()).toBe("Approvals | Bypass permissions | Do not ask; all permissions are enabled.");
 });
 
 it("shows the saved mode when a read started during the save lands after it", async () => {
   await render();
   const slow = slowSaves();
-  await act(async () => choice("Never ask").click());
+  await act(async () => choice("Bypass permissions").click());
 
   // Back from the rules list mid-save: a read then would answer with the mode being replaced.
   slow.holdReads = true;
   await act(async () => state.refocus());
   await act(async () => slow.finish());
   for (const read of slow.reads.splice(0)) await act(async () => read());
-  expect(row()).toBe(
-    "Approvals | Never ask | Asks only before purchases and the first use of your computer. Only Block rules apply.",
-  );
+  expect(row()).toBe("Approvals | Bypass permissions | Do not ask; all permissions are enabled.");
   // It reads again once the save is done, so the rule count is fresh too.
   expect(reads()).toBe(2);
 });
@@ -308,7 +304,7 @@ it("drops a save that lands after the Space went back to following the account",
   const target: SettingsTarget = { scope: "space", spaceId: "space-1" };
   await render(target, true);
   const slow = slowSaves({ storedAtOnce: true });
-  await act(async () => choice("Never ask").click());
+  await act(async () => choice("Bypass permissions").click());
 
   // Customizing is turned off and on again before the reply comes back; the Space starts again
   // from the account's mode.
@@ -330,7 +326,7 @@ it("tells screen readers the row is unavailable while loading or saving", async 
   await act(async () => slow.reads.splice(0)[0]!());
   expect(held()).toBe("false");
 
-  await act(async () => choice("Never ask").click());
+  await act(async () => choice("Bypass permissions").click());
   expect(held()).toBe("true");
   await act(async () => slow.finish());
   expect(held()).toBe("false");
@@ -361,7 +357,7 @@ it("holds the menu while a save is in flight", async () => {
       : base(proc, input),
   );
   await render();
-  await act(async () => choice("Never ask").click());
+  await act(async () => choice("Bypass permissions").click());
   expect(choice("Ask").disabled).toBe(true);
   await act(async () => choice("Ask").click());
   expect(sets()).toHaveLength(1);
@@ -378,7 +374,7 @@ it("holds the menu while a save is in flight", async () => {
   expect(row()).toBe(
     "Approvals | Ask | Asks before sending, spending or changing anything in your apps.",
   );
-  expect(choice("Never ask").disabled).toBe(false);
+  expect(choice("Bypass permissions").disabled).toBe(false);
 });
 
 it("keeps a saved mode when a read that started before the save lands after it", async () => {
@@ -394,14 +390,12 @@ it("keeps a saved mode when a read that started before the save lands after it",
   );
   const stale = { ...state.settings };
 
-  // Coming back starts a refresh; the owner picks Never ask before it lands with the old mode.
+  // Coming back starts a refresh; the owner picks Bypass permissions before it lands with the old mode.
   state.rules = [{ id: "rule-1" }];
   await act(async () => state.refocus());
-  await act(async () => choice("Never ask").click());
+  await act(async () => choice("Bypass permissions").click());
   await act(async () => resolveRead(stale));
-  expect(row()).toBe(
-    "Approvals | Never ask | Asks only before purchases and the first use of your computer. Only Block rules apply.",
-  );
+  expect(row()).toBe("Approvals | Bypass permissions | Do not ask; all permissions are enabled.");
   // The rules it read are still current, so the count follows them.
   expect(container.querySelector("output")?.textContent).toBe("1");
 });
@@ -421,16 +415,12 @@ it.each(["autoReview/get", "approvalRules/list"])(
     );
 
     await act(async () => state.refocus());
-    await act(async () => choice("Never ask").click());
-    expect(state.settings.mode).toBe("never");
-    expect(row()).toBe(
-      "Approvals | Never ask | Asks only before purchases and the first use of your computer. Only Block rules apply.",
-    );
+    await act(async () => choice("Bypass permissions").click());
+    expect(state.settings.mode).toBe("bypermission");
+    expect(row()).toBe("Approvals | Bypass permissions | Do not ask; all permissions are enabled.");
     await act(async () => rejectRead(new Error("offline")));
-    expect(row()).toBe(
-      "Approvals | Never ask | Asks only before purchases and the first use of your computer. Only Block rules apply.",
-    );
-    expect(choices()).toEqual(["Never ask*", "Ask"]);
+    expect(row()).toBe("Approvals | Bypass permissions | Do not ask; all permissions are enabled.");
+    expect(choices()).toEqual(["Auto", "Ask", "Bypass permissions*"]);
   },
 );
 
@@ -448,31 +438,25 @@ it("ignores an older refresh failure while a save is pending", async () => {
   );
 
   await act(async () => state.refocus());
-  await act(async () => choice("Never ask").click());
+  await act(async () => choice("Bypass permissions").click());
   await act(async () => rejectRead(new Error("offline")));
-  expect(row()).toBe(
-    "Approvals | Never ask | Asks only before purchases and the first use of your computer. Only Block rules apply.",
-  );
+  expect(row()).toBe("Approvals | Bypass permissions | Do not ask; all permissions are enabled.");
   expect(held()).toBe("true");
   await act(async () => slow.finish());
-  expect(state.settings.mode).toBe("never");
-  expect(row()).toBe(
-    "Approvals | Never ask | Asks only before purchases and the first use of your computer. Only Block rules apply.",
-  );
+  expect(state.settings.mode).toBe("bypermission");
+  expect(row()).toBe("Approvals | Bypass permissions | Do not ask; all permissions are enabled.");
 });
 
 it("shows a refresh failure from a read started after a successful save", async () => {
   await render();
-  await act(async () => choice("Never ask").click());
+  await act(async () => choice("Bypass permissions").click());
   state.rpc.mockImplementationOnce(async () => {
     throw new Error("offline");
   });
   await act(async () => state.refocus());
   expect(row()).toBe("Approvals | Retry | Something went wrong. Try again.");
   await act(async () => container.querySelector("span")!.click());
-  expect(row()).toBe(
-    "Approvals | Never ask | Asks only before purchases and the first use of your computer. Only Block rules apply.",
-  );
+  expect(row()).toBe("Approvals | Bypass permissions | Do not ask; all permissions are enabled.");
 });
 
 it("reads and saves a Space's own copy, and nothing while the Space follows the account", async () => {
@@ -485,6 +469,8 @@ it("reads and saves a Space's own copy, and nothing while the Space follows the 
   await render(target, true);
   expect(state.rpc).toHaveBeenCalledWith("autoReview/get", { scope: "space" }, spaceContext);
   expect(state.rpc).toHaveBeenCalledWith("approvalRules/list", { scope: "space" }, spaceContext);
-  await act(async () => choice("Never ask").click());
-  expect(sets()).toEqual([["autoReview/set", { scope: "space", mode: "never" }, spaceContext]]);
+  await act(async () => choice("Bypass permissions").click());
+  expect(sets()).toEqual([
+    ["autoReview/set", { scope: "space", mode: "bypermission" }, spaceContext],
+  ]);
 });

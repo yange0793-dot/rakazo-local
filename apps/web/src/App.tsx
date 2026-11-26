@@ -72,7 +72,17 @@ export function App() {
           {window.location.pathname === "/integrations/callback" ? (
             <IntegrationCallbackPage />
           ) : (
-            <LocalApp />
+            <Routes>
+              <Route
+                path="/p/:slugToken"
+                element={
+                  <MarkdownLinkPrompt>
+                    <SharedPagePage />
+                  </MarkdownLinkPrompt>
+                }
+              />
+              <Route path="*" element={<LocalApp />} />
+            </Routes>
           )}
         </ErrorBoundary>
       </LinkFaviconsContext.Provider>
@@ -174,7 +184,6 @@ function LocalApp() {
             <Suspense fallback={<PageLoading />}>
               <Routes>
                 <Route path="/" element={<Navigate to="/app" replace />} />
-                <Route path="/p/:slugToken" element={<SharedPagePage />} />
                 <Route path={MCP_OAUTH_CALLBACK_PATH} element={<McpOAuthCallbackPage />} />
                 <Route path={SLACK_INSTALL_CALLBACK_PATH} element={<SlackInstallCallbackPage />} />
                 <Route path="/integrations/setup" element={<IntegrationSetupPage />} />

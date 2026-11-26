@@ -4,7 +4,7 @@ import { newClientId } from "@rakazo/core";
 import { Button, Disclosure, Input } from "@rakazo/ui-web";
 import { useEffect, useRef, useState } from "react";
 import { connectMcpOauth } from "../../lib/mcp-connect";
-import { rpc } from "../../lib/rpc";
+import { useSpaceRpc } from "../../lib/space-rpc";
 import type { ErrorDetails } from "../../lib/user-error";
 import { errorDetails } from "../../lib/user-error";
 import { ErrorNotice } from "../ErrorNotice";
@@ -21,6 +21,7 @@ export function IntegrationSetup({
   initialQuery?: string;
 }) {
   const { t } = useLingui();
+  const rpc = useSpaceRpc();
   const [endpoint, setEndpoint] = useState("");
   const [query, setQuery] = useState(initialQuery ?? "");
   const [results, setResults] = useState<IntegrationCatalogResult[]>([]);
@@ -82,7 +83,7 @@ export function IntegrationSetup({
           transport: "streamable_http",
           endpoint: url,
         }));
-      const result = await connectMcpOauth(server.id);
+      const result = await connectMcpOauth(server.id, rpc);
       if (result === "cancelled") return;
       if (botId) await rpc.mcp.assignments.approve({ botId, serverId: server.id });
       setConnected((current) => [...current, url]);

@@ -369,9 +369,13 @@ export async function runTask(
   for (const step of task.steps) {
     if ("navigate" in step) {
       const sep = step.navigate.includes("?") ? "&" : "?";
-      await call({ command: "navigate", url: `${SITE}${step.navigate}${sep}run=${runId}` });
+      const result = await call({
+        command: "navigate",
+        url: `${SITE}${step.navigate}${sep}run=${runId}`,
+      });
+      if (!result.ok) return fail("navigate failed");
     } else if ("snapshot" in step) {
-      await call({ command: "snapshot" });
+      if (!(await call({ command: "snapshot" })).ok) return fail("snapshot failed");
     } else if ("until" in step) {
       for (let attempt = 0; !findRef(latest, step.until) && attempt < step.tries; attempt += 1) {
         await call({ command: "snapshot", ...(step.query ? { query: step.query } : {}) });

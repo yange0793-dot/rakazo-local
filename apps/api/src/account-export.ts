@@ -94,6 +94,9 @@ export function zipStream(
           }
           if (failure) throw failure;
         } catch (error) {
+          await producer.return(undefined).catch((closeError: unknown) => {
+            getLogger().error("account.export.cleanup_failed", closeError);
+          });
           if (error === failure || (!cancelled && !options.signal?.aborted)) {
             getLogger().error("account.export.failed", error);
             throw error;

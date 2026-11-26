@@ -29,7 +29,9 @@ if (!process.env.VERIFY_PROVIDERS) {
   process.env.RAKAZO_LIVE_MODEL_CATALOG = "off";
   delete process.env.MODEL_CATALOG_SOURCES;
   process.env.AGENT_RUNTIME = "scripted";
+  delete process.env.AGENT_RUNTIME_ROUTES;
   process.env.SANDBOX_PROVIDER = "fake";
+  process.env.WEB_PROVIDER = "fake";
   process.env.CLOUD_AGENT_PROVIDER = "emulator";
   process.env.MEDIA_GENERATION_PROVIDER = "disabled";
   delete process.env.MEDIA_GENERATION_API_KEY;

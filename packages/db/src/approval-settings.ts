@@ -1,4 +1,5 @@
-import type { SettingsScope } from "@rakazo/contracts";
+import type { ApprovalMode, SettingsScope } from "@rakazo/contracts";
+import { ApprovalModeSchema } from "@rakazo/contracts";
 import type { PrismaClient } from "./client.js";
 import { Prisma } from "./client.js";
 import { lockSpaceSettings, settingsTarget } from "./space-settings.js";
@@ -24,7 +25,9 @@ export function storedBatchActions(
 }
 
 export type ApprovalRuleInput = { effect: string; matchKind: string; matchValue: string };
-export type AutoReviewPreference = { enabled: boolean; skipApprovals: boolean };
+export type AutoReviewPreference = {
+  mode: ApprovalMode;
+};
 
 /**
  * Approval rules and auto review are confirmations: the account's copy, or the Space's
@@ -121,8 +124,8 @@ export async function findAutoReviewPreference(
   scope: Scope,
   requested?: SettingsScope,
 ): Promise<AutoReviewPreference | null> {
-  const select = { enabled: true, skipApprovals: true } as const;
-  return (await confirmationsTarget(prisma, scope, requested)) === "account"
+  const select = { mode: true } as const;
+  const row = await ((await confirmationsTarget(prisma, scope, requested)) === "account"
     ? prisma.userActionAutoReviewPreference.findUnique({
         where: { userId: scope.userId },
         select,
@@ -130,33 +133,30 @@ export async function findAutoReviewPreference(
     : prisma.actionAutoReviewPreference.findUnique({
         where: { spaceId_userId: { spaceId: scope.spaceId, userId: scope.userId } },
         select,
-      });
+      }));
+  return row ? { mode: ApprovalModeSchema.parse(row.mode) } : null;
 }
 
 /** Updates the given fields; a first save fills the rest from `defaults`. */
 export async function saveAutoReviewPreference(
   prisma: ConfirmationsTx,
   scope: Scope,
-  update: Partial<AutoReviewPreference>,
-  defaults: AutoReviewPreference,
+  update: AutoReviewPreference,
   requested?: SettingsScope,
 ) {
-  const create = {
-    enabled: update.enabled ?? defaults.enabled,
-    skipApprovals: update.skipApprovals ?? defaults.skipApprovals,
-  };
+  const create = { mode: update.mode };
   await lockSpaceSettings(prisma, scope);
   if ((await confirmationsTarget(prisma, scope, requested)) === "account") {
     await prisma.userActionAutoReviewPreference.upsert({
       where: { userId: scope.userId },
       create: { userId: scope.userId, ...create },
-      update,
+      update: create,
     });
   } else {
     await prisma.actionAutoReviewPreference.upsert({
       where: { spaceId_userId: { spaceId: scope.spaceId, userId: scope.userId } },
       create: { spaceId: scope.spaceId, userId: scope.userId, ...create },
-      update,
+      update: create,
     });
   }
 }

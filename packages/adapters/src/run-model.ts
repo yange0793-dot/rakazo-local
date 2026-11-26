@@ -163,7 +163,11 @@ export async function resolveModelKey(...args: Parameters<typeof resolveModelKey
   const [deps, userId, spaceId, , provider] = args;
   const billingEnabled = await modelCreditBillingEnabled(deps);
   const scope = { userId, spaceId };
-  if (billingEnabled && (await hasHostedModelCredits(deps.prisma, scope, provider))) {
+  if (
+    !args[7]?.pinnedConnection &&
+    billingEnabled &&
+    (await hasHostedModelCredits(deps.prisma, scope, provider))
+  ) {
     args[3] = null;
     // Funded managed backups use deployment credentials just like the primary.
     args[7] = { ...args[7], requireStoredSecret: false };
@@ -205,7 +209,9 @@ async function resolveModelKeyMaterial(
   provider: string,
   modelId: string,
   registerSecrets?: (values: string[]) => void,
-  { requireStoredSecret = false }: { requireStoredSecret?: boolean } = {},
+  {
+    requireStoredSecret = false,
+  }: { requireStoredSecret?: boolean; pinnedConnection?: boolean } = {},
 ): Promise<{
   routingModelId?: string;
   apiKey?: string;
@@ -241,9 +247,12 @@ async function resolveModelKeyMaterial(
         where: { id: credential.secretId, userId, spaceId: null },
       });
       if (!row) {
+        if (requireStoredSecret)
+          throw new UnavailableModelForAuthError(
+            "The selected model connection is no longer available",
+          );
         if (await modelCreditBillingEnabled(deps))
           throw new Error("Connect that model provider again.");
-        if (requireStoredSecret) throw new Error("Backup model credential is no longer available");
         if (credential.provider === OPENAI_COMPATIBLE_PROVIDER_ID) {
           throw new UnavailableModelForAuthError("Unknown model for that provider");
         }
@@ -328,6 +337,7 @@ async function resolveModelKeyMaterial(
       cloudflareProviderEnv({ provider, accountId, gatewayId });
       const catalog =
         resolved.secret.kind === "openai_compatible" ? resolved.secret.managedCatalog : undefined;
+      // Pass the channel-qualified ID; the gateway sets the service tier on each upstream attempt.
       const routingModelId = catalog?.aliases[modelId] ?? (catalog ? modelId : undefined);
       const capabilities = catalog?.capabilities[routingModelId ?? modelId];
       return {
@@ -484,7 +494,8 @@ export async function resolveConnectedModelKey(
     modelId,
     { credentialId },
   );
-  if (!credential && provider !== hostedProvider) throw new Error(PINNED_PROVIDER_NOT_CONNECTED);
+  if (!credential && (credentialId || provider !== hostedProvider))
+    throw new Error(PINNED_PROVIDER_NOT_CONNECTED);
   const resolved = await resolveModelKey(
     deps,
     scope.userId,
@@ -493,7 +504,10 @@ export async function resolveConnectedModelKey(
     provider,
     modelId,
     registerSecrets,
-    { requireStoredSecret },
+    {
+      requireStoredSecret: requireStoredSecret || Boolean(credentialId),
+      pinnedConnection: Boolean(credentialId),
+    },
   );
   return { credential, resolved };
 }
@@ -547,7 +561,12 @@ export async function resolveRunModel(
   const override = scope.botId
     ? await deps.prisma.bot.findFirst({
         where: { id: scope.botId, spaceId: scope.spaceId },
-        select: { modelProvider: true, modelId: true, thinkingLevel: true },
+        select: {
+          modelProvider: true,
+          modelId: true,
+          modelCredentialId: true,
+          thinkingLevel: true,
+        },
       })
     : null;
   const hasOverride = Boolean(override?.modelProvider && override.modelId);
@@ -559,6 +578,7 @@ export async function resolveRunModel(
           scope,
           override!.modelProvider!,
           override!.modelId,
+          { credentialId: override!.modelCredentialId },
         )
       : Promise.resolve(null),
     resolveMemberMainModel(deps, scope),
@@ -566,6 +586,8 @@ export async function resolveRunModel(
       where: { id: "default" },
     }),
   ]);
+  if (override?.modelCredentialId && !overrideCredential)
+    throw new Error(PINNED_PROVIDER_NOT_CONNECTED);
   const selected = selectConfiguredModel({
     override,
     overrideCredential,
@@ -594,6 +616,8 @@ export async function resolveRunModel(
     credential,
     provider,
     id,
+    undefined,
+    override?.modelCredentialId ? { requireStoredSecret: true, pinnedConnection: true } : undefined,
   );
   return {
     provider,

@@ -25,7 +25,12 @@ import type {
   VoiceStatus,
 } from "@rakazo/contracts";
 import { SettingsScopeSchema } from "@rakazo/contracts";
-import { speakable, toUtterances } from "@rakazo/core";
+import {
+  AttachmentValidationError,
+  decodeAttachmentBase64,
+  speakable,
+  toUtterances,
+} from "@rakazo/core";
 import type { PrismaClient } from "@rakazo/db";
 import {
   deleteUnreferencedCredentialSecret,
@@ -766,7 +771,7 @@ export function mountVoiceHttpRoutes(
     const raw = await readBoundedBody(c.req.raw, MAX_TRANSCRIBE_REQUEST_BYTES);
     if (raw === null) return c.json({ error: "Request body is too large." }, 413);
     const body = parseVoiceRequestBody(raw);
-    const audioBase64 = String((body as { audioBase64?: unknown }).audioBase64 ?? "");
+    const audioBase64 = body.audioBase64;
     const language = optionalString((body as { language?: unknown }).language);
     try {
       const audio = decodeAudioBase64(audioBase64);
@@ -800,11 +805,14 @@ function optionalString(value: unknown): string | undefined {
   return typeof value === "string" && value.trim() ? value.trim() : undefined;
 }
 
-function decodeAudioBase64(value: string): Uint8Array {
+function decodeAudioBase64(value: unknown): Uint8Array {
+  if (typeof value !== "string")
+    throw new ORPCError("BAD_REQUEST", { message: "Recording is not valid audio." });
   if (!value.trim()) throw new ORPCError("BAD_REQUEST", { message: "Recording is empty." });
   try {
-    return new Uint8Array(Buffer.from(value, "base64"));
-  } catch {
+    return decodeAttachmentBase64(value, MAX_TRANSCRIBE_BYTES);
+  } catch (error) {
+    if (!(error instanceof AttachmentValidationError)) throw error;
     throw new ORPCError("BAD_REQUEST", { message: "Recording is not valid audio." });
   }
 }

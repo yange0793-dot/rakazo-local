@@ -248,7 +248,7 @@ function fixture(runId = "run-1") {
     },
     spaceSettingOverride: { findUnique: async () => null },
     userActionApprovalRule: { findMany: vi.fn(async () => []) },
-    userActionAutoReviewPreference: { findUnique: vi.fn(async () => ({ enabled: false })) },
+    userActionAutoReviewPreference: { findUnique: vi.fn(async () => ({ mode: "bypermission" })) },
     externalEffect,
   };
   const pauseRunForInput = vi.fn(async () => {

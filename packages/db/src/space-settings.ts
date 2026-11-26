@@ -2,6 +2,7 @@ import type { SettingsScope, SpaceSetting } from "@rakazo/contracts";
 import { SpaceSettingSchema } from "@rakazo/contracts";
 import type { PrismaClient } from "./client.js";
 import { Prisma } from "./client.js";
+import { lockAccountModels } from "./model-credentials.js";
 import { withTransactionRetry } from "./transaction-retry.js";
 
 type Scope = { userId: string; spaceId: string };
@@ -82,6 +83,7 @@ export async function setSpaceSettingOverride(
     prisma.$transaction(
       async (tx) => {
         await lockSpaceSettings(tx, scope);
+        if (setting === "models") await lockAccountModels(tx, scope.userId);
         const key = {
           spaceId_userId_setting: { spaceId: scope.spaceId, userId: scope.userId, setting },
         };
@@ -98,7 +100,12 @@ export async function setSpaceSettingOverride(
         }
         return spaceSettingOverrides(tx, scope);
       },
-      { isolationLevel: Prisma.TransactionIsolationLevel.Serializable },
+      {
+        isolationLevel:
+          setting === "models"
+            ? Prisma.TransactionIsolationLevel.ReadCommitted
+            : Prisma.TransactionIsolationLevel.Serializable,
+      },
     ),
   );
 }
@@ -160,7 +167,7 @@ async function copyAccountIntoSpace(tx: CopyClient, scope: Scope, setting: Space
     }
     if (autoReview) {
       await tx.actionAutoReviewPreference.create({
-        data: { ...member, enabled: autoReview.enabled, skipApprovals: autoReview.skipApprovals },
+        data: { ...member, mode: autoReview.mode },
       });
     }
   }

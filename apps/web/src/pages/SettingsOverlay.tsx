@@ -363,7 +363,7 @@ export function SettingsOverlay({
               </DialogClose>
             </div>
 
-            <SpaceRpcProvider spaceId={spaceId}>
+            <SpaceRpcProvider spaceId={spaceId ?? undefined}>
               <div
                 key={spaceId ?? "selected"}
                 data-testid="settings-scroll"

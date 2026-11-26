@@ -1,5 +1,5 @@
 import { execFileSync } from "node:child_process";
-import { readdir, readFile } from "node:fs/promises";
+import { readFile } from "node:fs/promises";
 import path from "node:path";
 
 /** The bucket settings CI's screenshot publisher reads; the gallery lands beside its reports. */
@@ -25,7 +25,7 @@ export function assertPublishConfigured() {
  * Uploads the gallery page and its screenshots, never logs or the manifest, which hold local
  * paths, and returns the gallery's public address.
  */
-export async function publishIosGallery(outDir: string, root: string) {
+export async function publishIosGallery(outDir: string, root: string, screenshots: string[]) {
   assertPublishConfigured();
   const env = process.env as Record<(typeof REQUIRED)[number], string>;
   const sha = execFileSync("git", ["rev-parse", "--short", "HEAD"], { cwd: root })
@@ -33,13 +33,7 @@ export async function publishIosGallery(outDir: string, root: string) {
     .trim();
   const run = `${new Date().toISOString().replace(/[:.]/g, "-")}-${sha}`;
   const prefix = `playwright/ios/${run}`;
-  const files = ["index.html"];
-  for (const entry of await readdir(outDir, { withFileTypes: true })) {
-    if (!entry.isDirectory() || entry.name.startsWith(".")) continue;
-    for (const shot of await readdir(path.join(outDir, entry.name))) {
-      if (shot.endsWith(".png")) files.push(`${entry.name}/${shot}`);
-    }
-  }
+  const files = ["index.html", ...screenshots];
 
   // Loaded only when publishing, so a capture never needs the storage client.
   const { PutObjectCommand, S3Client } = await import("@aws-sdk/client-s3");

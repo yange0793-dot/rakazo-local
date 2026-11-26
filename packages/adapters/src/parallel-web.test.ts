@@ -223,8 +223,9 @@ describe("optional Parallel web provider", () => {
         );
         expect(request.headers.has("authorization")).toBe(false);
       }
-      expect(resolveWebProviderKind({})).toBe("keyless-http");
-      for (const kind of ["", "keyless", "keyless-http"])
+      expect(resolveWebProviderKind({})).toBe("tinyfish");
+      expect(resolveWebProviderKind({ WEB_PROVIDER: "" })).toBe("tinyfish");
+      for (const kind of ["keyless", "keyless-http"])
         expect(createWebProvider(kind).describe().id).toBe("keyless-http");
       expect(createWebProvider("fake").describe().id).toBe("fake");
       expect(() => createWebProvider("invalid")).toThrow("Unknown web provider");

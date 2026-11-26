@@ -14,10 +14,8 @@ import {
   savedCompatibleEndpointMatches,
 } from "@rakazo/contracts";
 import {
-  clampCatalogThinkingLevel,
   compatibleConnectionReady,
   compatibleModelRows,
-  compatibleThinkingLevels,
   connectionFormFields,
   connectionFormModelId,
   connectionMaxTokensField,
@@ -25,6 +23,7 @@ import {
   initialModelProbeState,
   modelConnectRequest,
   savedCompatibleModelIds,
+  THINKING_LEVEL_OPTIONS,
 } from "@rakazo/core";
 import { useFocusEffect, useLocalSearchParams, useNavigation, useRouter } from "expo-router";
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
@@ -188,17 +187,7 @@ export default function ModelConnection() {
   const modelsForProvider = catalog.filter((entry) => entry.provider === provider);
   const selected = modelsForProvider.find((entry) => entry.id === modelId) ?? modelsForProvider[0];
   const credential = credentials.find((entry) => entry.id === credentialId);
-  const savedEndpointMatches = savedCompatibleEndpointMatches(baseUrl, credential?.baseUrl);
-  const reasoningCapabilities =
-    savedEndpointMatches && apiProtocol === (credential?.apiProtocol ?? "chat-completions")
-      ? credential?.reasoningCapabilities
-      : undefined;
-  const compatibleEffortLevels =
-    selected?.id === modelId &&
-    savedEndpointMatches &&
-    apiProtocol === (credential?.apiProtocol ?? "chat-completions")
-      ? (selected.thinkingLevels ?? compatibleThinkingLevels(apiProtocol, reasoningCapabilities))
-      : compatibleThinkingLevels(apiProtocol, reasoningCapabilities);
+  const compatibleEffortLevels = THINKING_LEVEL_OPTIONS;
   const {
     oauth,
     pasteCode,
@@ -311,20 +300,6 @@ export default function ModelConnection() {
 
   function updateApiProtocol(nextProtocol: ModelApiProtocol) {
     setApiProtocol(nextProtocol);
-    setThinkingLevel(
-      clampCatalogThinkingLevel(
-        thinkingLevel,
-        reasoning
-          ? compatibleThinkingLevels(
-              nextProtocol,
-              savedEndpointMatches &&
-                nextProtocol === (credential?.apiProtocol ?? "chat-completions")
-                ? credential?.reasoningCapabilities
-                : undefined,
-            )
-          : [],
-      ) as ThinkingLevel | null,
-    );
     resetOpenAiCompatibleProbe();
     clearFeedback();
   }
@@ -395,16 +370,6 @@ export default function ModelConnection() {
 
   function stageCompatibleModelId(nextModelId: string) {
     setModelId(nextModelId);
-    setThinkingLevel(
-      clampCatalogThinkingLevel(
-        credential?.modelId === nextModelId ? credential.thinkingLevel : null,
-        reasoning
-          ? ((savedEndpointMatches
-              ? modelsForProvider.find((entry) => entry.id === nextModelId)?.thinkingLevels
-              : undefined) ?? compatibleThinkingLevels(apiProtocol, reasoningCapabilities))
-          : [],
-      ) as ThinkingLevel | null,
-    );
   }
 
   async function connectKey(limitsOnly = false) {

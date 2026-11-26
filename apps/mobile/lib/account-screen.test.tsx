@@ -38,7 +38,7 @@ const { element, account } = vi.hoisted(() => ({
       unknown
     >,
     push: vi.fn(),
-    approvals: { mode: "ask", enabled: false, skipApprovals: false, checkerAvailable: true },
+    approvals: { mode: "ask", checkerAvailable: true },
     rules: [] as { id: string }[],
     messaging: { enabled: true },
     plans: [] as unknown[],

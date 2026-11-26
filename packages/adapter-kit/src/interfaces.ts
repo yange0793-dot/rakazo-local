@@ -670,6 +670,12 @@ export interface WebProvider extends WebSearchProvider, WebFetchProvider {
  */
 export interface BrowserProvider {
   describe(): AdapterDescriptor<BrowserCapabilities>;
+  /** Reads an already-bound page; undefined selects the restored session's current page. */
+  readFrame?(
+    computer: ComputerRef,
+    pageId: string | undefined,
+    context: AdapterContext,
+  ): Promise<Uint8Array | null>;
   navigate(
     computer: ComputerRef,
     request: BrowserNavigateRequest,

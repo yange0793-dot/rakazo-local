@@ -1,11 +1,11 @@
 import type { ReactNode } from "react";
 import { createContext, useContext, useMemo } from "react";
 import type { RpcClient } from "./rpc";
-import { rpc, rpcForSpace } from "./rpc";
+import { createSpaceRpc, rpc, rpcForSpace } from "./rpc";
 
-type SpaceRpc = { client: RpcClient; spaceId: string | null };
+type SpaceRpc = { client: RpcClient; spaceId?: string | null };
 
-const SpaceRpcContext = createContext<SpaceRpc>({ client: rpc, spaceId: null });
+const SpaceRpcContext = createContext<SpaceRpc>({ client: rpc });
 
 /** Points the settings panels below at one space's data. */
 export function SpaceRpcProvider({
@@ -15,9 +15,13 @@ export function SpaceRpcProvider({
   spaceId: string | null | undefined;
   children: ReactNode;
 }) {
+  const parent = useContext(SpaceRpcContext);
   const value = useMemo<SpaceRpc>(
-    () => (spaceId ? { client: rpcForSpace(spaceId), spaceId } : { client: rpc, spaceId: null }),
-    [spaceId],
+    () =>
+      spaceId === undefined
+        ? parent
+        : { client: spaceId === null ? createSpaceRpc(null) : rpcForSpace(spaceId), spaceId },
+    [parent, spaceId],
   );
   return <SpaceRpcContext.Provider value={value}>{children}</SpaceRpcContext.Provider>;
 }
@@ -27,7 +31,7 @@ export function useSpaceRpc(): RpcClient {
   return useContext(SpaceRpcContext).client;
 }
 
-/** The space settings are bound to, or null when they follow the selected space. */
-export function useBoundSpaceId(): string | null {
+/** An explicit null sends requests without a space header. Undefined follows the selection. */
+export function useBoundSpaceId(): string | null | undefined {
   return useContext(SpaceRpcContext).spaceId;
 }

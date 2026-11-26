@@ -254,12 +254,9 @@ export class PiAgentRuntime implements AgentRuntime {
         }
         const selectedModel = resolveRuntimeModel(request.model);
         if (!selectedModel.model) {
-          queue.push({
-            type: "text",
-            text: `Unknown model ${selectedModel.provider}/${selectedModel.modelId}`,
-          });
-          queue.push({ type: "done" });
-          return;
+          throw new ModelAccountError(
+            `Unknown model ${selectedModel.provider}/${selectedModel.modelId}`,
+          );
         }
         const { models, model, apiKey } = selectedModel;
         const toolDefs = request.tools;

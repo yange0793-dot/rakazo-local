@@ -1,12 +1,19 @@
 import { randomUUID } from "node:crypto";
 import type { AdapterContext } from "@rakazo/adapter-kit";
 import { MEMORY_REVISION_CONFLICT_ERROR } from "@rakazo/adapter-kit";
+import { PrismaPg } from "@prisma/adapter-pg";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import type { PrismaClient } from "./client.js";
-import { createDb } from "./client.js";
-import { runAsSystem, runAsTenant } from "./row-security.js";
+import { createDb, createPool, PrismaClient } from "./client.js";
+import { clearThread, ThreadArchiveCoverageError } from "./events.js";
+import { createThreadMessageInTransaction } from "./messages.js";
+import { runAsSystem, runAsTenant, withRowLevelSecurity } from "./row-security.js";
 import { IsolationError } from "./scope.js";
-import { lessonFactNamespace, SemanticFactStore, semanticFactNamespace } from "./semantic-facts.js";
+import {
+  lessonFactNamespace,
+  readReflectionSource,
+  SemanticFactStore,
+  semanticFactNamespace,
+} from "./semantic-facts.js";
 
 // The implementation owner never runs this. The isolated runner creates a random
 // database AND runtime role; refuse a production/default target even if opted in.
@@ -122,6 +129,14 @@ postgres("semantic fact authority (isolated PostgreSQL)", () => {
           status: "completed",
         },
       });
+      const source = await prisma.$transaction((tx) =>
+        createThreadMessageInTransaction(tx, {
+          threadId,
+          role: "user",
+          authorUserId: userId,
+          blocks: [{ kind: "text", text: "Synthetic owner source." }],
+        }),
+      );
       await prisma.run.create({
         data: {
           id: runId,
@@ -132,6 +147,7 @@ postgres("semantic fact authority (isolated PostgreSQL)", () => {
           userId,
           status: "completed",
           trigger: "user",
+          sourceMessageId: source.id,
         },
       });
       // A second member of the same space and a run that member started on the same bot;
@@ -172,6 +188,7 @@ postgres("semantic fact authority (isolated PostgreSQL)", () => {
           userId: otherUserId,
           status: "completed",
           trigger: "user",
+          sourceMessageId: source.id,
         },
       });
       // A run of the space's other bot: never a valid attribution for this bot's lesson.
@@ -204,6 +221,9 @@ postgres("semantic fact authority (isolated PostgreSQL)", () => {
   afterAll(async () => {
     if (!db) return;
     await runAsSystem("synthetic semantic-memory fixture cleanup", async () => {
+      await prisma.externalAgentExecution.deleteMany({
+        where: { spaceId, operationKey: `sm-clear-execution-${stamp}` },
+      });
       await prisma.organization.deleteMany({ where: { id: orgId } });
       await prisma.user.deleteMany({ where: { id: { in: [userId, otherUserId] } } });
       await prisma.semanticMemoryIndexOutbox.deleteMany({
@@ -1103,5 +1123,308 @@ postgres("semantic fact authority (isolated PostgreSQL)", () => {
       historyContext,
     );
     await expect(store.read(current, historyContext)).rejects.toBeInstanceOf(IsolationError);
+  });
+
+  it("clears encrypted execution content and retires all cleared history in the same transaction", async () => {
+    const clearBotId = `sm-clear-bot-${stamp}`;
+    const clearThreadId = `sm-clear-thread-${stamp}`;
+    const clearCtx = { ...ctx, botId: clearBotId };
+    const execution = await runAsTenant(clearCtx, () =>
+      prisma.$transaction(async (tx) => {
+        await tx.bot.create({
+          data: { id: clearBotId, spaceId, userId, name: "Clear fixture", color: "ink" },
+        });
+        await tx.thread.create({
+          data: { id: clearThreadId, spaceId, userId, botId: clearBotId },
+        });
+        await createThreadMessageInTransaction(tx, {
+          threadId: clearThreadId,
+          role: "user",
+          authorUserId: userId,
+          blocks: [{ kind: "text", text: "Synthetic clear request." }],
+        });
+        return tx.externalAgentExecution.create({
+          data: {
+            spaceId,
+            userId,
+            ownerBotId: clearBotId,
+            threadId: clearThreadId,
+            ticketId: "fixture-unlinked-ticket",
+            operationKey: `sm-clear-execution-${stamp}`,
+            provider: "fixture",
+            route: {},
+            request: { text: "Synthetic execution request." },
+            result: { text: "Synthetic execution result." },
+          },
+        });
+      }),
+    );
+    const saveHistory = (generation: number) =>
+      store.save(
+        {
+          botId: clearBotId,
+          scope: "isolated",
+          content: `Synthetic history generation ${generation}.`,
+          source: { kind: "history", threadId: clearThreadId, generation },
+        },
+        clearCtx,
+      );
+    const earlier = await saveHistory(0);
+    await runAsTenant(clearCtx, () =>
+      prisma.thread.update({
+        where: { id: clearThreadId },
+        data: { historyCompactionGeneration: 1 },
+      }),
+    );
+    const current = await saveHistory(1);
+
+    await runAsTenant(clearCtx, async () => {
+      await clearThread(prisma, { spaceId, botId: clearBotId, threadId: clearThreadId });
+      expect(await prisma.message.count({ where: { threadId: clearThreadId } })).toBe(0);
+      expect(
+        await prisma.externalAgentExecution.findUniqueOrThrow({ where: { id: execution.id } }),
+      ).toMatchObject({ request: null, result: null, stopRequestedAt: expect.any(Date) });
+      const factIds = [earlier.id, current.id];
+      const facts = await prisma.semanticFact.findMany({ where: { id: { in: factIds } } });
+      expect(facts.map((fact) => fact.status)).toEqual(["forgotten", "forgotten"]);
+      const revisions = await prisma.semanticFactRevision.findMany({
+        where: { factId: { in: factIds } },
+      });
+      expect(revisions.map((row) => row.revision)).toEqual([2, 2]);
+      const deletes = await prisma.semanticMemoryIndexOutbox.findMany({
+        where: { factId: { in: factIds }, action: "delete", revision: 1 },
+      });
+      expect(deletes).toHaveLength(2);
+    });
+    await expect(saveHistory(1)).rejects.toThrow(/retired/);
+  });
+
+  it("scrubs encrypted provenance across repeated sources and corrections, and erases everything on forget", async () => {
+    const addSource = async (name: string, quote: string) => {
+      const id = `provenance-${name}-${stamp}`;
+      const chat = `${id}-chat`;
+      const message = await prisma.$transaction(async (tx) => {
+        await tx.bot.create({ data: { id, spaceId, userId, name, color: "ink" } });
+        await tx.thread.create({ data: { id: chat, botId: id, spaceId, userId } });
+        return createThreadMessageInTransaction(tx, {
+          threadId: chat,
+          role: "user",
+          authorUserId: userId,
+          blocks: [{ kind: "text", text: quote }],
+        });
+      });
+      return { botId: id, threadId: chat, message, quote };
+    };
+    await runAsTenant(ctx, async () => {
+      const a = await addSource("first", "Synthetic first original source.");
+      const b = await addSource("second", "Synthetic second original source.");
+      const replay = async (
+        source: typeof a,
+        content: string,
+        correction?: { replacesId: string; expectedRevision: number },
+      ) => prisma.$transaction((tx) =>
+        store.applyArchiveChanges(tx, {
+          botId: source.botId,
+          scope: "shared",
+          threadId: source.threadId,
+          sources: new Map([[source.message.id, {
+            messageId: source.message.id,
+            threadId: source.threadId,
+            text: source.quote,
+            observedAt: source.message.createdAt,
+          }]]),
+          changes: [{
+            content,
+            category: "preference",
+            sourceMessageId: source.message.id,
+            sourceQuote: source.quote,
+            ...correction,
+          }],
+        }, { ...ctx, botId: source.botId }),
+      );
+      const list = () => store.list({ botId: a.botId, scope: "shared", includeHistory: true }, {
+        ...ctx, botId: a.botId,
+      });
+      const read = (id: string, revision: number) => store.read({
+        botId: a.botId, scope: "shared", id, expectedRevision: revision,
+      }, { ...ctx, botId: a.botId });
+      const content = "Synthetic durable repeated fact.";
+      const revised = "Synthetic corrected fact retains its body.";
+      expect(await replay(a, content)).toMatchObject({ saved: 1 });
+      const repeated = (await list()).items.find((fact) => fact.content === content)!;
+      expect(await replay(b, content)).toMatchObject({ skipped: 1 });
+      expect(await replay(b, "Different wording from the same evidence.")).toMatchObject({ skipped: 1 });
+
+      const firstTask = await prisma.task.create({
+        data: { spaceId, userId, botId: a.botId, threadId: a.threadId, prompt: a.quote, status: "completed" },
+      });
+      const firstRun = await prisma.run.create({
+        data: {
+          spaceId, userId, botId: a.botId, threadId: a.threadId, taskId: firstTask.id,
+          status: "completed", trigger: "user", sourceMessageId: a.message.id,
+        },
+      });
+      const aCtx = { ...ctx, botId: a.botId, runId: firstRun.id };
+      const moved = await store.save({
+        botId: a.botId, scope: "shared", content: "Synthetic earlier wording.",
+        source: { kind: "durable", quote: a.quote },
+      }, aCtx);
+      const changeMessage = await prisma.$transaction((tx) =>
+        createThreadMessageInTransaction(tx, {
+          threadId: b.threadId,
+          role: "user",
+          authorUserId: userId,
+          blocks: [{ kind: "text", text: "Synthetic independent correction." }],
+        }),
+      );
+      const correction = { ...b, message: changeMessage, quote: "Synthetic independent correction." };
+      expect(await replay(correction, revised, {
+        replacesId: moved.id, expectedRevision: moved.revision,
+      })).toMatchObject({ updated: 1 });
+      const lessonInput = {
+        botId: a.botId,
+        cue: "On synthetic work",
+        lesson: "Check the result",
+        provenance: lessonRun(firstRun.id, a.quote, a.threadId),
+      };
+      const source = await readReflectionSource(prisma, firstRun);
+      expect(source).not.toBeNull();
+      const lesson = (await store.saveLesson(lessonInput, aCtx))!;
+      await clearThread(prisma, { spaceId, botId: a.botId, threadId: a.threadId });
+      expect(await readReflectionSource(prisma, firstRun)).toBeNull();
+      expect(await store.saveLesson({
+        ...lessonInput,
+        lesson: "A stale model result",
+        reflectionSource: source!,
+      }, aCtx)).toBeNull();
+
+      const exported = (await list()).items;
+      expect(exported.find((fact) => fact.id === repeated.id)).toMatchObject({
+        content,
+        provenance: { threadId: b.threadId, messageId: b.message.id, quote: b.quote },
+      });
+      expect(exported.find((fact) => fact.id === moved.id)).toMatchObject({
+        content: revised,
+        provenance: { threadId: b.threadId, quote: correction.quote },
+      });
+      expect(JSON.parse((await read(repeated.id, 1)).provenance!)).toMatchObject({
+        messageId: b.message.id, quote: b.quote,
+      });
+      expect(JSON.parse((await read(moved.id, 2)).provenance!)).toMatchObject({
+        messageId: changeMessage.id, quote: correction.quote,
+      });
+      const ids = [repeated.id, moved.id, lesson.id];
+      const snapshots = await prisma.semanticFactRevision.findMany({ where: { factId: { in: ids } } });
+      const opened = JSON.stringify(snapshots);
+      expect(opened).not.toContain(a.quote);
+      expect(opened).not.toContain(a.threadId);
+      expect(opened).not.toContain(a.message.id);
+      expect(snapshots.find((row) => row.factId === moved.id && row.revision === 1)?.content)
+        .toBe("Synthetic earlier wording.");
+      const raw = await prisma.$queryRaw<Array<{ provenance: string }>>`
+        SELECT provenance FROM semantic_fact_revisions WHERE "factId" = ${repeated.id}`;
+      expect(raw[0]?.provenance).not.toContain(b.quote);
+      const lessonAfter = await prisma.semanticFact.findUniqueOrThrow({ where: { id: lesson.id } });
+      expect(lessonAfter.content).toBe(lesson.content);
+      expect(JSON.parse(lessonAfter.provenance).harness.evidence).toEqual({
+        kind: "tool_error", quote: "",
+      });
+
+      await store.forget({ botId: a.botId, scope: "shared", id: repeated.id, expectedRevision: 1 }, {
+        ...ctx, botId: a.botId,
+      });
+      expect(await replay(b, content)).toMatchObject({ skipped: 1 });
+      const forgotten = await prisma.semanticFactRevision.findMany({ where: { factId: repeated.id } });
+      expect(forgotten).toHaveLength(1);
+      expect(forgotten[0]?.content).toBe("[forgotten]");
+      expect(forgotten[0]?.provenance).not.toContain(b.quote);
+      expect(await prisma.semanticFact.findUniqueOrThrow({ where: { id: repeated.id } })).toMatchObject({
+        status: "forgotten", content: "[forgotten]", sourceThreadId: null,
+      });
+    });
+  });
+
+  it("fences missing and unscheduled archive coverage and atomically retires compatibility rows", async () => {
+    const legacySpaceId = `sm-legacy-${stamp}`;
+    const legacyBotId = `sm-legacy-bot-${stamp}`;
+    const legacyThreadId = `sm-legacy-chat-${stamp}`;
+    await runAsSystem("synthetic compatibility space", async () => {
+      await prisma.space.create({ data: { id: legacySpaceId, organizationId: orgId, name: "Legacy" } });
+      await prisma.spaceMember.create({
+        data: {
+          id: `${legacySpaceId}-member`, spaceId: legacySpaceId, userId,
+          organizationId: orgId, role: "owner", createdAt: new Date(),
+        },
+      });
+      await prisma.bot.create({
+        data: { id: legacyBotId, spaceId: legacySpaceId, userId, name: "Legacy", color: "ink" },
+      });
+      await prisma.thread.create({
+        data: { id: legacyThreadId, spaceId: legacySpaceId, userId, botId: legacyBotId },
+      });
+    });
+    const pool = createPool(databaseUrl!);
+    const client = withRowLevelSecurity(new PrismaClient({ adapter: new PrismaPg(pool) }));
+    try {
+      await runAsTenant({ spaceId: legacySpaceId, userId }, async () => {
+        await client.$transaction((tx) => createThreadMessageInTransaction(tx, {
+          threadId: legacyThreadId, role: "user", authorUserId: userId,
+          blocks: [{ kind: "text", text: "Synthetic legacy source." }],
+        }));
+        const input = { spaceId: legacySpaceId, threadId: legacyThreadId, botId: legacyBotId };
+        const fence = { expectedGeneration: 0, expectedNextMessageSeq: 1 };
+        await expect(clearThread(client, { ...input, ...fence, archiveCoverage: "required" }))
+          .rejects.toBeInstanceOf(ThreadArchiveCoverageError);
+        const progress = await client.memoryArchiveProgress.create({
+          data: {
+            ...input, userId, scope: "isolated", generation: 0, processedUpToSeq: -1,
+            throughSeq: 0, pending: false, availableAt: new Date(),
+          },
+        });
+        await expect(clearThread(client, { ...input, ...fence, archiveCoverage: "if-activated" }))
+          .rejects.toBeInstanceOf(ThreadArchiveCoverageError);
+        await client.memoryArchiveProgress.update({
+          where: { threadId: progress.threadId },
+          data: { throughSeq: -1 },
+        });
+        await expect(clearThread(client, { ...input, ...fence, archiveCoverage: "if-activated" }))
+          .rejects.toBeInstanceOf(ThreadArchiveCoverageError);
+        await client.memoryArchiveProgress.delete({ where: { threadId: progress.threadId } });
+
+        const fact = await client.semanticFact.create({
+          data: {
+            spaceId: legacySpaceId, userId, botId: legacyBotId, scope: "isolated",
+            namespace: semanticFactNamespace(legacySpaceId, "isolated", legacyBotId),
+            kind: "history", content: "Synthetic compatibility summary.",
+            provenance: JSON.stringify({ kind: "history", threadId: legacyThreadId }),
+            sourceThreadId: legacyThreadId, sourceGeneration: 0,
+          },
+        });
+        const fault = client.$extends({
+          query: { semanticMemoryIndexOutbox: {
+            upsert: async () => { throw new Error("synthetic outbox failure"); },
+          } },
+        }) as unknown as PrismaClient;
+        await expect(clearThread(fault, { ...input, ...fence, archiveCoverage: "if-activated" }))
+          .rejects.toThrow("synthetic outbox failure");
+        expect(await client.message.count({ where: { threadId: legacyThreadId } })).toBe(1);
+        expect(await client.semanticFact.findUnique({ where: { id: fact.id } })).toMatchObject({
+          status: "active", content: fact.content,
+        });
+        await clearThread(client, { ...input, ...fence, archiveCoverage: "if-activated" });
+        expect(await client.message.count({ where: { threadId: legacyThreadId } })).toBe(0);
+        expect(await client.semanticFact.findUnique({ where: { id: fact.id } })).toMatchObject({
+          status: "forgotten", content: "[forgotten]", sourceThreadId: null,
+        });
+        expect(await client.semanticMemoryIndexOutbox.findMany({
+          where: { factId: fact.id, action: "delete", revision: 1 },
+        })).toHaveLength(1);
+      });
+    } finally {
+      await runAsSystem("synthetic compatibility outbox cleanup", () =>
+        prisma.semanticMemoryIndexOutbox.deleteMany({ where: { spaceId: legacySpaceId } }),
+      );
+      await pool.end();
+    }
   });
 });

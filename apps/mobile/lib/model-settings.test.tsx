@@ -673,18 +673,18 @@ async function remountWithAdvanced(render: () => Promise<void>) {
   await act(async () => advanced!.click());
 }
 
-it("clamps a staged effort when the protocol switch drops the level", async () => {
+it("keeps Max selected and saves it after changing the wire protocol", async () => {
   saved.reasoning = true;
   saved.thinkingLevel = "max";
   try {
     await remountWithAdvanced(() => renderConnection());
     expect(currentEffort()).toBe("Max");
     await act(async () => protocolChoice("Anthropic Messages").click());
-    expect(currentEffort()).toBe("High");
+    expect(currentEffort()).toBe("Max");
     await saveConnection();
     expect(rpcCalls.find(([procedure]) => procedure === "models/connect")?.[1]).toMatchObject({
       apiProtocol: "anthropic-messages",
-      thinkingLevel: "high",
+      thinkingLevel: "max",
     });
   } finally {
     saved.reasoning = false;
@@ -692,7 +692,7 @@ it("clamps a staged effort when the protocol switch drops the level", async () =
   }
 });
 
-it("keeps declared adaptive efforts available when editing a connection", async () => {
+it("offers all effort levels regardless of adaptive catalog metadata", async () => {
   saved.apiProtocol = "anthropic-messages";
   saved.reasoning = true;
   saved.thinkingLevel = "max";
@@ -700,12 +700,16 @@ it("keeps declared adaptive efforts available when editing a connection", async 
   try {
     await remountWithAdvanced(() => renderConnection());
     expect(currentEffort()).toBe("Max");
-    expect(protocolChoice("Medium")).toBeUndefined();
-    expect(protocolChoice("Extra high")).toBeUndefined();
+    const effortMenu = container.querySelector('[aria-label="Reasoning effort"]')!;
+    expect([...effortMenu.querySelectorAll("button")].map((button) => button.textContent)).toEqual(
+      EFFORT_LABELS,
+    );
+    await act(async () => protocolChoice("Extra high").click());
+    expect(currentEffort()).toBe("Extra high");
     await saveConnection();
     expect(rpcCalls.find(([procedure]) => procedure === "models/connect")?.[1]).toMatchObject({
       apiProtocol: "anthropic-messages",
-      thinkingLevel: "max",
+      thinkingLevel: "xhigh",
     });
   } finally {
     saved.apiProtocol = undefined;

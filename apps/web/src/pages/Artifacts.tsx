@@ -53,11 +53,11 @@ import { IconTooltip } from "../components/IconTooltip";
 import { PdfViewer } from "../components/PdfViewer";
 import { SandboxedHtmlViewer } from "../components/SandboxedHtmlViewer";
 import { decodeArtifactBase64, downloadArtifactBytes } from "../lib/artifact-open";
-import { takeInitialBootstrap } from "../lib/bootstrap";
 import { desktopBridge } from "../lib/desktop";
 import { useSpaceQueries } from "../lib/query";
 import { formatRelativeTime } from "../lib/relative-time";
-import { rpc } from "../lib/rpc";
+import { selectedSpaceId } from "../lib/rpc";
+import { SpaceRpcProvider, useSpaceRpc } from "../lib/space-rpc";
 import { createStoredPreference } from "../lib/stored-preference";
 import { useObjectUrl } from "../lib/use-object-url";
 import { errorText } from "../lib/user-error";
@@ -90,6 +90,15 @@ function matchesCalendarDateFilter(iso: string, filter: DateFilter, now: Date): 
 }
 
 export function ArtifactsPage() {
+  const [spaceId] = useState(selectedSpaceId);
+  return (
+    <SpaceRpcProvider spaceId={spaceId}>
+      <ArtifactsContent />
+    </SpaceRpcProvider>
+  );
+}
+
+function ArtifactsContent() {
   const { artifactId } = useParams<{ artifactId?: string }>();
   const navigate = useNavigate();
   const { t } = useLingui();
@@ -104,12 +113,12 @@ export function ArtifactsPage() {
   const [deleteError, setDeleteError] = useState<string | null>(null);
 
   const queries = useSpaceQueries();
+  const rpc = useSpaceRpc();
   const queryClient = useQueryClient();
   // The space's bootstrap is where the shell keeps what it last loaded, bots included.
   const bots =
     useQuery({
-      queryKey: queries.bootstrap.queryKey({ input: {} }),
-      queryFn: () => takeInitialBootstrap(),
+      ...queries.bootstrap.queryOptions({ input: {} }),
       select: (bootstrap) => bootstrap.bots,
     }).data ?? NO_BOTS;
   const listingOptions = queries.artifacts.listSpace.infiniteOptions({

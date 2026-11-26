@@ -10,6 +10,7 @@ import { Chevron } from "./row-accessories";
 export type MenuPickerChoice = {
   key: string;
   label: string;
+  disabled?: boolean;
   /** An action shown in red, such as removing the item the row picks for. */
   destructive?: boolean;
 };
@@ -50,7 +51,7 @@ export function MenuPickerMenu({
               id: `choice:${choice.key}`,
               title: choice.label,
               state: choice.key === value ? ("on" as const) : ("off" as const),
-              attributes: { disabled },
+              attributes: { disabled: disabled || choice.disabled },
             })),
           // Destructive choices are actions, not values: their own section, without a checkmark.
           ...destructive(choices, disabled),

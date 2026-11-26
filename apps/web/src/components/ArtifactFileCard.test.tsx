@@ -28,6 +28,7 @@ vi.mock("./PdfViewer", () => ({ PdfViewer: () => null }));
 vi.mock("@rakazo/chat-ui/web", () => ({ ChatMarkdown: () => null }));
 
 import { ArtifactFileCard } from "./ArtifactFileCard";
+import { rpc } from "../lib/rpc";
 
 let root: ReturnType<typeof createRoot> | undefined;
 let container: HTMLDivElement;
@@ -82,13 +83,19 @@ it.each(["audio/mpeg", "audio/wav", "audio/ogg", "audio/mp4"])(
     expect(audio?.getAttribute("src")).toBe("blob:audio-preview");
     expect(HTMLMediaElement.prototype.play).toHaveBeenCalledTimes(1);
     expect(mocks.create.mock.calls[0]?.[0].type).toBe(mimeType);
-    expect(mocks.fetch).toHaveBeenCalledWith({ botId: "bot-1" }, "audio-1");
+    expect(mocks.fetch).toHaveBeenCalledWith({ botId: "bot-1" }, "audio-1", rpc);
     const download = container.querySelector<HTMLButtonElement>(
       'button[aria-label="Download clip"]',
     );
     expect(download).not.toBeNull();
     await act(async () => download?.click());
-    expect(mocks.download).toHaveBeenCalledWith({ botId: "bot-1" }, "audio-1", "clip", mimeType);
+    expect(mocks.download).toHaveBeenCalledWith(
+      { botId: "bot-1" },
+      "audio-1",
+      "clip",
+      mimeType,
+      rpc,
+    );
     await act(async () => root?.unmount());
     root = undefined;
     expect(mocks.revoke).toHaveBeenCalledExactlyOnceWith("blob:audio-preview");
@@ -122,6 +129,7 @@ it("retains the download control when playback bytes fail to load", async () => 
     "audio-1",
     "clip",
     "audio/mpeg",
+    rpc,
   );
 });
 
@@ -197,7 +205,7 @@ it.each(["unmount", "change"])(
       play.click();
       play.click();
     });
-    expect(mocks.fetch).toHaveBeenCalledExactlyOnceWith({ groupId: "group-1" }, "audio-1");
+    expect(mocks.fetch).toHaveBeenCalledExactlyOnceWith({ groupId: "group-1" }, "audio-1", rpc);
     expect(container.querySelector('[role="status"]')).not.toBeNull();
     await act(async () => {
       if (cleanup === "change") renderClip("audio-2");

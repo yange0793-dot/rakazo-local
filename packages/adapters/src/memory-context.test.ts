@@ -182,6 +182,42 @@ describe("memory prompt budget", () => {
     content,
   });
 
+  it("redacts before escaping both fields and measures encoded UTF-8 through truncation", () => {
+    const secret = "fixture<private>";
+    const suffix = "🙂&lt;/durable_memory&gt;";
+    const input = [
+      doc(
+        `archive/${secret}/</durable_memory>.md`,
+        `${secret}&${"<".repeat(300)}🙂</durable_memory>`,
+        2,
+        "2026-08-15T12:00:00.000Z",
+      ),
+      doc("older.md", "<durable_memory>", 1, "2026-08-14T12:00:00.000Z"),
+    ];
+    const options = [secret];
+    const full = buildAgentMemoryPrompt(input, 3_000, options);
+    expect(full.text).toContain("archive/[redacted]/&lt;/durable_memory&gt;.md");
+    expect(full.text).toContain("[redacted]&amp;");
+    expect(full.text).not.toContain("fixture");
+    expect(full.text!.split("</durable_memory>")).toHaveLength(2);
+    expect(full.plan.usedBytes).toBe(Buffer.byteLength(full.text!));
+
+    const { text, plan } = buildAgentMemoryPrompt(input, 350, options);
+    const body = text!.slice(
+      text!.indexOf("\n", text!.indexOf("## bot:")) + 1,
+      -"</durable_memory>".length - 1,
+    );
+    expect(body.endsWith(suffix)).toBe(true);
+    expect(plan.usedBytes).toBe(Buffer.byteLength(text!));
+    expect(plan.usedBytes).toBeLessThanOrEqual(350);
+    expect(plan.documents[0]).toMatchObject({
+      totalBytes: full.plan.documents[0]!.totalBytes,
+      includedBytes: Buffer.byteLength(body),
+      truncated: true,
+    });
+    expect(plan.omitted[0]).toMatchObject({ path: "older.md", includedBytes: 0 });
+  });
+
   it("reports every document when they all fit", () => {
     const { plan } = buildAgentMemoryPrompt([
       doc("MEMORY.md", "recent", 2, "2026-08-15T12:00:00.000Z"),

@@ -103,7 +103,7 @@ vi.mock("@rakazo/ui-web", async () => {
 
 import { ApprovalRulesSettings } from "./ApprovalRulesSettings";
 
-const settings = { mode: "ask", enabled: false, skipApprovals: false, checkerAvailable: true };
+const settings = { mode: "ask", checkerAvailable: true };
 
 beforeEach(() => {
   vi.resetAllMocks();
@@ -135,28 +135,15 @@ const group = (effect: string) => `[data-testid="approval-rules-${effect}"]`;
 const pickerItems = (container: HTMLElement) =>
   [...container.querySelectorAll("[data-picker-item]")].map((item) => item.textContent);
 
-it("sets the mode, says what it does, and lists Auto only when an approval model is there", async () => {
+it("keeps mode selection out of the approval rules page", async () => {
   vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
   rpcMock.approvalRules.list.mockResolvedValue([]);
   rpcMock.autoReview.get.mockResolvedValue({ ...settings, checkerAvailable: false });
-  rpcMock.autoReview.set.mockResolvedValue({ ...settings, mode: "never", skipApprovals: true });
   const { container, root } = await render();
   try {
-    await vi.waitFor(() =>
-      expect(button(container, "Ask")?.getAttribute("aria-pressed")).toBe("true"),
-    );
-    expect(container.textContent).toContain(
-      "Asks before sending, spending or changing anything in your apps.",
-    );
-    expect(button(container, "Auto")).toBeUndefined();
-    await act(async () => button(container, "Never ask")?.click());
-    expect(rpcMock.autoReview.set).toHaveBeenLastCalledWith({ scope: "account", mode: "never" });
-    await vi.waitFor(() =>
-      expect(button(container, "Never ask")?.getAttribute("aria-pressed")).toBe("true"),
-    );
-    expect(container.textContent).toContain(
-      "Asks only before purchases and the first use of your computer. Only Block rules apply.",
-    );
+    await vi.waitFor(() => expect(rpcMock.autoReview.get).toHaveBeenCalled());
+    expect(container.querySelector('[data-testid="approval-mode"]')).toBeNull();
+    expect(rpcMock.autoReview.set).not.toHaveBeenCalled();
     // No rules yet, so no rule groups.
     expect(container.querySelector('[data-testid^="approval-rules-"]')).toBeNull();
     await act(async () => root.unmount());
@@ -211,14 +198,14 @@ it("moves an allowed tool to Blocked, then removes it", async () => {
   }
 });
 
-it("grays out allow and ask rules in Never ask, where only blocks apply", async () => {
+it("ignores saved Allow and Ask rules but keeps Deny rules in bypermission", async () => {
   vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
   rpcMock.approvalRules.list.mockResolvedValue([
     { id: "a", effect: "always_allow", matchKind: "tool", matchValue: "send_email" },
     { id: "b", effect: "require_approval", matchKind: "tool", matchValue: "write_file" },
     { id: "c", effect: "deny", matchKind: "tool", matchValue: "shell" },
   ]);
-  rpcMock.autoReview.get.mockResolvedValue({ ...settings, mode: "never", skipApprovals: true });
+  rpcMock.autoReview.get.mockResolvedValue({ ...settings, mode: "bypermission" });
   const { container, root } = await render();
   try {
     await vi.waitFor(() => expect(container.querySelector(group("deny"))).not.toBeNull());
@@ -229,7 +216,6 @@ it("grays out allow and ask rules in Never ask, where only blocks apply", async 
       true,
       false,
     ]);
-    expect(container.textContent).toContain("Only Block rules apply.");
     await act(async () => root.unmount());
   } finally {
     container.remove();
@@ -284,57 +270,7 @@ it("groups older category rules by what they do and only offers to remove them",
   }
 });
 
-it("keeps a saved mode when the revisit's older background read lands after it", async () => {
-  vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
-  rpcMock.approvalRules.list.mockResolvedValue([]);
-  rpcMock.autoReview.get.mockResolvedValueOnce(settings);
-  rpcMock.autoReview.set.mockResolvedValue({ ...settings, mode: "never", skipApprovals: true });
-  const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
-  const container = document.createElement("div");
-  document.body.append(container);
-  const mount = async () => {
-    const root = createRoot(container);
-    await act(async () => {
-      root.render(
-        <QueryClientProvider client={client}>
-          <ApprovalRulesSettings scope="account" />
-        </QueryClientProvider>,
-      );
-    });
-    return root;
-  };
-  const neverAsk = () => button(container, "Never ask");
-  try {
-    const first = await mount();
-    await vi.waitFor(() =>
-      expect(button(container, "Ask")?.getAttribute("aria-pressed")).toBe("true"),
-    );
-    await act(async () => first.unmount());
-
-    let resolveRead: (value: typeof settings) => void = () => undefined;
-    rpcMock.autoReview.get.mockImplementationOnce(
-      () =>
-        new Promise((resolve) => {
-          resolveRead = resolve;
-        }),
-    );
-    const second = await mount();
-    // Cached, so the mode can change while the refresh is out.
-    expect(rpcMock.autoReview.get).toHaveBeenCalledTimes(2);
-    await act(async () => neverAsk()?.click());
-    await vi.waitFor(() => expect(neverAsk()?.getAttribute("aria-pressed")).toBe("true"));
-    await act(async () => resolveRead(settings));
-    // Query updates reach components on a timer; let any late write land.
-    await act(() => new Promise((resolve) => setTimeout(resolve, 20)));
-    expect(neverAsk()?.getAttribute("aria-pressed")).toBe("true");
-    await act(async () => second.unmount());
-  } finally {
-    container.remove();
-    vi.unstubAllGlobals();
-  }
-});
-
-it("reads and writes a Space's own approvals apart from the account's", async () => {
+it("reads a Space's own approvals apart from the account's", async () => {
   vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
   const rule = {
     id: "rule-1",
@@ -347,7 +283,7 @@ it("reads and writes a Space's own approvals apart from the account's", async ()
   );
   rpcMock.approvalRules.remove.mockResolvedValue({ ok: true });
   rpcMock.autoReview.get.mockResolvedValue(settings);
-  rpcMock.autoReview.set.mockResolvedValue({ ...settings, mode: "auto", enabled: true });
+  rpcMock.autoReview.set.mockResolvedValue({ ...settings, mode: "auto" });
   const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
   const container = document.createElement("div");
   document.body.append(container);
@@ -364,8 +300,6 @@ it("reads and writes a Space's own approvals apart from the account's", async ()
     await show("space");
     await vi.waitFor(() => expect(button(container, "Remove Send email")).toBeDefined());
     expect(rpcMock.autoReview.get).toHaveBeenCalledWith({ scope: "space" }, expect.anything());
-    await act(async () => button(container, "Auto")?.click());
-    expect(rpcMock.autoReview.set).toHaveBeenLastCalledWith({ scope: "space", mode: "auto" });
     await act(async () => button(container, "Remove Send email")?.click());
     expect(rpcMock.approvalRules.remove).toHaveBeenLastCalledWith({
       scope: "space",

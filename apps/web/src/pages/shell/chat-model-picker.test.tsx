@@ -82,32 +82,90 @@ describe("ChatModelPicker", () => {
       input.dispatchEvent(new Event("input", { bubbles: true }));
     });
 
-  it("keeps the native select for a short list", () => {
+  it("shows separate channel and model selects for a short list", () => {
     render(choices(9), "");
-    expect(container.querySelector("select")?.options).toHaveLength(10);
+    expect(
+      container.querySelector<HTMLSelectElement>('select[aria-label="Provider"]')?.options,
+    ).toHaveLength(2);
+    expect(
+      container.querySelector<HTMLSelectElement>('select[aria-label="Model"]')?.options,
+    ).toHaveLength(1);
   });
 
-  it("marks a short list's selected model when it cannot read images", () => {
-    const list = choices(2).map((choice, index) =>
-      index === 1 ? { ...choice, images: false } : { ...choice, images: true },
-    );
+  it("keeps compatible connections separate and filters models by the selected connection", () => {
+    const list: ChatModelChoice[] = [
+      {
+        key: "openai-compatible::channel-a/model-a",
+        connectionId: "connection-a",
+        provider: "openai-compatible",
+        providerLabel: "Channel A",
+        label: "Model A",
+      },
+      {
+        key: "openai-compatible::channel-b/model-b",
+        connectionId: "connection-b",
+        provider: "openai-compatible",
+        providerLabel: "Channel B",
+        label: "Model B",
+      },
+    ];
+    render(list, list[0]!.key);
+    const channel = container.querySelector<HTMLSelectElement>('select[aria-label="Provider"]')!;
+    const models = () =>
+      [...container.querySelector<HTMLSelectElement>('select[aria-label="Model"]')!.options].map(
+        (option) => option.textContent,
+      );
+    expect([...channel.options].map((option) => option.textContent)).toEqual([
+      "Channel A",
+      "Channel B",
+    ]);
+    expect(models()).toEqual(["Model A"]);
+    act(() => {
+      channel.value = "connection:connection-b";
+      channel.dispatchEvent(new Event("change", { bubbles: true }));
+    });
+    expect(onChange).toHaveBeenCalledWith(list[1]!.key);
+    render(list, list[1]!.key);
+    expect(models()).toEqual(["Model B"]);
+  });
+
+  it("changes the selected model with the channel and marks text-only models", () => {
+    const list = [
+      ...choices(2).map((choice, index) =>
+        index === 1 ? { ...choice, images: false } : { ...choice, images: true },
+      ),
+      {
+        key: "anthropic::claude",
+        label: "Claude (Anthropic)",
+        provider: "anthropic",
+        providerLabel: "Anthropic",
+        modelLabel: "Claude",
+        modelId: "claude",
+      },
+    ];
     render(list, "openrouter::vendor/model-1");
-    const select = container.querySelector("select")!;
+    const channel = container.querySelector<HTMLSelectElement>('select[aria-label="Provider"]')!;
+    const select = container.querySelector<HTMLSelectElement>('select[aria-label="Model"]')!;
     const hint = () => document.getElementById(select.getAttribute("aria-describedby") ?? "");
     expect(container.querySelector('[title="Can\'t read images"]')).not.toBeNull();
     expect(hint()?.textContent).toBe("Can't read images");
 
+    act(() => {
+      channel.value = "anthropic";
+      channel.dispatchEvent(new Event("change", { bubbles: true }));
+    });
+    expect(onChange).toHaveBeenCalledWith("anthropic::claude");
     render(list, "openrouter::vendor/model-2");
     expect(container.querySelector('[title="Can\'t read images"]')).toBeNull();
     expect(select.hasAttribute("aria-describedby")).toBe(false);
   });
 
-  it("marks text-only rows and the selected model in a long list", () => {
+  it("marks text-only rows and the selected model in a searchable model list", () => {
     const list = choices(11).map((choice) =>
       choice.modelId === "vendor/model-3" ? { ...choice, images: false } : choice,
     );
     render(list, "openrouter::vendor/model-3");
-    const trigger = container.querySelector<HTMLButtonElement>("button#model")!;
+    const trigger = container.querySelector<HTMLButtonElement>('button[aria-label="Model"]')!;
     expect(trigger.querySelector('[title="Can\'t read images"]')).not.toBeNull();
     act(() => trigger.click());
     const marked = options().filter((option) =>
@@ -120,15 +178,17 @@ describe("ChatModelPicker", () => {
   });
 
   it("searches a long list by name or id and picks from it", () => {
-    render(choices(11), "openrouter::vendor/model-2");
-    expect(container.querySelector("select")).toBeNull();
-    const trigger = container.querySelector<HTMLButtonElement>("button#model")!;
-    expect(trigger.textContent).toBe("Model 2 (OpenRouter)");
+    const list = choices(11);
+    render(list, "openrouter::vendor/model-2");
+    expect(container.querySelector('select[aria-label="Provider"]')).not.toBeNull();
+    expect(container.querySelector('select[aria-label="Model"]')).toBeNull();
+    const trigger = container.querySelector<HTMLButtonElement>('button[aria-label="Model"]')!;
+    expect(trigger.textContent).toBe("Model 2");
 
     act(() => trigger.click());
-    expect(options()).toHaveLength(12);
+    expect(options()).toHaveLength(11);
     expect(document.querySelector("[cmdk-group-heading]")?.textContent).toBe("OpenRouter");
-    expect(options()[2]?.getAttribute("aria-label")).toBe("Model 2 (OpenRouter)");
+    expect(options()[1]?.getAttribute("aria-label")).toBe("Model 2 (OpenRouter)");
     const checked = options().filter((option) => option.getAttribute("data-checked") === "true");
     expect(checked.map((option) => option.textContent)).toEqual(["Model 2"]);
 
@@ -147,8 +207,8 @@ describe("ChatModelPicker", () => {
   });
 
   it("says when nothing matches", () => {
-    render(choices(11), "");
-    act(() => container.querySelector<HTMLButtonElement>("button#model")!.click());
+    render(choices(11), "openrouter::vendor/model-1");
+    act(() => container.querySelector<HTMLButtonElement>('button[aria-label="Model"]')!.click());
     search("no such model");
     expect(options()).toHaveLength(0);
     expect(document.querySelector("[cmdk-group-heading]")).toBeNull();
@@ -156,8 +216,8 @@ describe("ChatModelPicker", () => {
   });
 
   it("lets the popup flip vertically without switching axes", () => {
-    render(choices(11), "");
-    act(() => container.querySelector<HTMLButtonElement>("button#model")!.click());
+    render(choices(11), "openrouter::vendor/model-1");
+    act(() => container.querySelector<HTMLButtonElement>('button[aria-label="Model"]')!.click());
     expect(popoverProps.mock.lastCall?.[0]).toMatchObject({
       side: "bottom",
       align: "start",

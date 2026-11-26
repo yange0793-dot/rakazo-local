@@ -198,7 +198,7 @@ describe("plugin detail", () => {
     expect(api.preview).not.toHaveBeenCalled();
     expect(container.textContent).toContain("notes-mcp");
     await click("Sign in");
-    expect(api.connect).toHaveBeenCalledWith(server.id);
+    expect(api.connect).toHaveBeenCalledWith(server.id, expect.anything());
     expect(container.querySelector("[role=alert]")?.textContent).toContain("Sign-in cancelled");
     await click("Use in this bot");
     expect(api.approve).toHaveBeenCalledWith({ botId: "bot-1", serverId: server.id });

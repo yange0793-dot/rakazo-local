@@ -121,6 +121,7 @@ export const BotSchema = z.object({
   autoSpeak: z.boolean(),
   modelProvider: z.string().nullable(),
   modelId: z.string().nullable(),
+  modelCredentialId: Id.nullable().optional(),
   thinkingLevel: ThinkingLevelSchema.nullable(),
   teamChatAmbientEnabled: z.boolean(),
   teamChatRules: z.string(),
@@ -493,6 +494,7 @@ export const UpdateBotInput = z
     autoSpeak: z.boolean().optional(),
     modelProvider: z.string().trim().min(1).max(80).nullable().optional(),
     modelId: z.string().trim().min(1).max(200).nullable().optional(),
+    modelCredentialId: Id.nullable().optional(),
     thinkingLevel: ThinkingLevelSchema.nullable().optional(),
     teamChatAmbientEnabled: z.boolean().optional(),
     teamChatRules: z.string().max(TEAM_CHAT_RULES_MAX_LENGTH).optional(),
@@ -507,6 +509,18 @@ export const UpdateBotInput = z
   .superRefine((value, ctx) => {
     const providerProvided = value.modelProvider !== undefined;
     const modelProvided = value.modelId !== undefined;
+    if (
+      value.modelCredentialId !== undefined &&
+      (!providerProvided ||
+        !modelProvided ||
+        (value.modelCredentialId !== null && (!value.modelProvider || !value.modelId)))
+    ) {
+      ctx.addIssue({
+        code: "custom",
+        message: "A model connection must be saved with its provider and model",
+        path: ["modelCredentialId"],
+      });
+    }
     if (!providerProvided && !modelProvided) return;
     // Reject partial shapes like `{ modelId: null }` (provider omitted) so a
     // clear cannot succeed without updating both persisted fields.
@@ -884,16 +898,13 @@ export const ActionApprovalRuleSchema = z.object({
 });
 export type ActionApprovalRule = z.infer<typeof ActionApprovalRuleSchema>;
 
-/** How much a space asks before acting; see VISION.md. */
-export const ApprovalModeSchema = z.enum(["never", "auto", "ask"]);
+/** How a space reviews actions before acting. */
+export const ApprovalModeSchema = z.enum(["auto", "ask", "bypermission"]);
 export type ApprovalMode = z.infer<typeof ApprovalModeSchema>;
 
 export const ActionAutoReviewSettingsSchema = z.object({
   mode: ApprovalModeSchema,
-  /** The stored form of `mode`, kept for clients that predate it. */
-  enabled: z.boolean(),
   checkerAvailable: z.boolean(),
-  skipApprovals: z.boolean(),
 });
 export type ActionAutoReviewSettings = z.infer<typeof ActionAutoReviewSettingsSchema>;
 
@@ -1316,6 +1327,7 @@ export const ThreadSnapshotSchema = z.object({
   members: z.array(GroupMemberSchema).optional(),
   run: RunSchema.nullable(),
   activeRuns: z.array(RunSchema).optional(),
+  hasManagedWork: z.boolean().optional(),
   computer: ComputerStatusSchema.optional(),
 });
 export type ThreadSnapshot = z.infer<typeof ThreadSnapshotSchema>;

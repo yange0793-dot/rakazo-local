@@ -4,7 +4,7 @@ import { displayName } from "@rakazo/core";
 import { cancelRunsInTransaction } from "./cancel-runs.js";
 import type { Prisma, PrismaClient } from "./client.js";
 import { expireComputerExecutionLeases, restoreBotUnderComputerQuota } from "./computers.js";
-import { transientRunEventsWhere } from "./events.js";
+import { deleteTransientRunEvents } from "./events.js";
 import { deletePageShareSecrets } from "./page-shares.js";
 import { withNewestThreadMessages } from "./preview-messages.js";
 import { IsolationError } from "./scope.js";
@@ -581,11 +581,7 @@ export function createGroupRepos(prisma: PrismaClient) {
         });
         const now = new Date();
         const runIds = (await cancelRunsInTransaction(tx, activeRuns, now)).map((run) => run.id);
-        if (runIds.length) {
-          await tx.event.deleteMany({
-            where: { ...transientRunEventsWhere(), runId: { in: runIds } },
-          });
-        }
+        if (runIds.length) await deleteTransientRunEvents(tx, { in: runIds });
         // Snapshot after cancelling, before commit: the run row locks keep these runs from
         // acquiring a computer, and an expired lease not yet reclaimed still names a screen.
         const { targets } = await snapshotRunTeardownTargets(tx, runIds);
@@ -617,17 +613,34 @@ export function createGroupRepos(prisma: PrismaClient) {
      * A group needs its bots to open, so its archived bots come back with it, each within its
      * computer's quota and all in one transaction: one that doesn't fit leaves everything archived.
      */
-    async restoreGroup(actor: Actor, groupId: string) {
+    async restoreGroup(
+      actor: Actor,
+      groupId: string,
+      validateModelPins?: (
+        tx: Prisma.TransactionClient,
+        bots: Array<{ id: string; userId: string }>,
+      ) => Promise<void>,
+    ) {
       await withTransactionRetry(() =>
         prisma.$transaction(async (tx) => {
           await lockSpaceGroup(tx, actor, groupId);
           const archived = await tx.chatGroupMember.findMany({
             where: { groupId, bot: { archivedAt: { not: null } } },
             select: {
-              bot: { select: { id: true, computer: { select: { id: true, userId: true } } } },
+              bot: {
+                select: {
+                  id: true,
+                  userId: true,
+                  computer: { select: { id: true, userId: true } },
+                },
+              },
             },
             orderBy: groupMemberOrder,
           });
+          await validateModelPins?.(
+            tx,
+            archived.map(({ bot }) => bot),
+          );
           for (const { bot } of archived) {
             // The limit is the computer's owner's: a shared Team Computer is the space owner's.
             if (bot.computer) {

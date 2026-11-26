@@ -63,6 +63,7 @@ describeIntegration("run executor lifecycle", () => {
 
   it("allows only one worker to claim a queued run", async () => {
     const seeded = await seedRun("concurrent", "write a file that says one-claim");
+    await rpc(seeded.scope, "autoReview/set", { mode: "bypermission" });
 
     await Promise.all([
       runAsSystem("background job run.continue", () =>
@@ -90,6 +91,7 @@ describeIntegration("run executor lifecycle", () => {
       leaseExpiresAt: new Date(Date.now() - 60_000),
       startedAt: new Date(Date.now() - 120_000),
     });
+    await rpc(seeded.scope, "autoReview/set", { mode: "bypermission" });
 
     await runAsSystem("background job run.continue", () =>
       handles.executor.continueRun(seeded.run.id, "recovery-worker"),
@@ -846,6 +848,7 @@ describeIntegration("run executor lifecycle", () => {
 
   it("recovers a computer a crashed worker left booting", async () => {
     const seeded = await seedRun("stale-boot", "write a file that says recovered");
+    await rpc(seeded.scope, "autoReview/set", { mode: "bypermission" });
     const bot = await db.bot.findUniqueOrThrow({ where: { id: seeded.bot.id } });
     const computerId = bot.computerId!;
     expect(computerId).toBeTruthy();
@@ -871,13 +874,14 @@ describeIntegration("run executor lifecycle", () => {
     const computer = await db.computer.findUniqueOrThrow({
       where: { id: computerId },
     });
-    expect(computer.state).toBe("running");
     const run = await db.run.findUniqueOrThrow({ where: { id: seeded.run.id } });
+    expect(computer.state, run.error ?? `Run status: ${run.status}`).toBe("running");
     expect(run.status).toBe("completed");
   });
 
   it("leaves a booting computer alone while its worker still holds the lease", async () => {
     const seeded = await seedRun("live-boot", "write a file that says waited");
+    await rpc(seeded.scope, "autoReview/set", { mode: "bypermission" });
     const bot = await db.bot.findUniqueOrThrow({ where: { id: seeded.bot.id } });
     const computerId = bot.computerId!;
 
@@ -1345,7 +1349,7 @@ describeIntegration("run executor lifecycle", () => {
 
   it("takes the computer lease only when a helper's first computer tool runs", async () => {
     const seeded = await seedRun("helper-lazy-lease", "unused", {}, "team");
-    await rpc(seeded.scope, "autoReview/set", { mode: "never" });
+    await rpc(seeded.scope, "autoReview/set", { mode: "bypermission" });
     const helper = await seedHelperRun(seeded, "run the shell command echo lazy-lease");
     await db.run.update({
       where: { id: seeded.run.id },
@@ -1379,7 +1383,7 @@ describeIntegration("run executor lifecycle", () => {
 
   it("reports a computer held by another run as a tool error without failing the helper", async () => {
     const seeded = await seedRun("helper-busy-computer", "unused", {}, "team");
-    await rpc(seeded.scope, "autoReview/set", { mode: "never" });
+    await rpc(seeded.scope, "autoReview/set", { mode: "bypermission" });
     const helper = await seedHelperRun(seeded, "run the shell command echo busy");
     const heldUntil = new Date(Date.now() + 60_000);
     await db.run.update({

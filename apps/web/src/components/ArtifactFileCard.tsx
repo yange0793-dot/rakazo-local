@@ -10,6 +10,7 @@ import type { RefObject } from "react";
 import { useEffect, useRef, useState } from "react";
 import type { ArtifactTarget } from "../lib/artifact-open";
 import { downloadArtifact, downloadArtifactBytes, fetchArtifactBytes } from "../lib/artifact-open";
+import { useSpaceRpc } from "../lib/space-rpc";
 import { errorText } from "../lib/user-error";
 import { BuiCard } from "./ai/primitives";
 import { IconTooltip } from "./IconTooltip";
@@ -39,6 +40,7 @@ function isPreviewable(mimeType: string) {
 
 export function ArtifactFileCard(props: ArtifactFileCardProps) {
   const { t } = useLingui();
+  const rpc = useSpaceRpc();
   const previewable = isPreviewable(props.mimeType);
   const previewButton = useRef<HTMLButtonElement>(null);
   const closeButton = useRef<HTMLButtonElement>(null);
@@ -51,7 +53,7 @@ export function ArtifactFileCard(props: ArtifactFileCardProps) {
     setDownloading(true);
     setDownloadError(null);
     try {
-      await downloadArtifact(props.target, props.artifactId, props.name, props.mimeType);
+      await downloadArtifact(props.target, props.artifactId, props.name, props.mimeType, rpc);
     } catch {
       setDownloadError(t`Could not download ${props.name}. Try again.`);
     } finally {
@@ -163,6 +165,7 @@ function FilePreview({
   closeButtonRef,
 }: ArtifactFileCardProps & { closeButtonRef: RefObject<HTMLButtonElement | null> }) {
   const { t } = useLingui();
+  const rpc = useSpaceRpc();
   const [downloadError, setDownloadError] = useState<string | null>(null);
   const [downloading, setDownloading] = useState(false);
   const [state, setState] = useState<
@@ -177,7 +180,7 @@ function FilePreview({
     let cancelled = false;
     const artifactTarget: ArtifactTarget =
       targetBotId !== undefined ? { botId: targetBotId } : { groupId: targetGroupId! };
-    void fetchArtifactBytes(artifactTarget, artifactId)
+    void fetchArtifactBytes(artifactTarget, artifactId, rpc)
       .then((bytes) => {
         if (cancelled) return;
         if (!isTextPreview(mimeType)) {
@@ -201,7 +204,7 @@ function FilePreview({
     return () => {
       cancelled = true;
     };
-  }, [artifactId, targetBotId, targetGroupId, mimeType, t]);
+  }, [rpc, artifactId, targetBotId, targetGroupId, mimeType, t]);
   const kind = artifactPreviewKind(mimeType);
 
   return (
@@ -225,7 +228,7 @@ function FilePreview({
                 setDownloadError(null);
                 try {
                   if (state.status === "ready") downloadArtifactBytes(name, mimeType, state.bytes);
-                  else await downloadArtifact(target, artifactId, name, mimeType);
+                  else await downloadArtifact(target, artifactId, name, mimeType, rpc);
                 } catch {
                   setDownloadError(t`Could not download ${name}. Try again.`);
                 } finally {
@@ -290,6 +293,7 @@ function AudioArtifactPreview({
   downloading,
 }: ArtifactFileCardProps & { onDownload: () => Promise<void>; downloading: boolean }) {
   const { t } = useLingui();
+  const rpc = useSpaceRpc();
   const [state, setState] = useState<
     { status: "idle" | "loading" } | { status: "ready"; src: string } | { status: "error" }
   >({ status: "idle" });
@@ -316,7 +320,7 @@ function AudioArtifactPreview({
     current.started = true;
     setState({ status: "loading" });
     try {
-      const bytes = await fetchArtifactBytes(target, artifactId);
+      const bytes = await fetchArtifactBytes(target, artifactId, rpc);
       if (current.cancelled) return;
       if (!isAttachmentAudioMimeType(mimeType)) throw new Error("Unsupported audio type");
       current.url = URL.createObjectURL(new Blob([new Uint8Array(bytes)], { type: mimeType }));

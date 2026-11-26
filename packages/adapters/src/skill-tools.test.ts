@@ -160,6 +160,9 @@ describe("skill tools", () => {
     expect(
       await skillReadFromTool(prisma as never, owner, { name: "billing", file: "../secrets.md" }),
     ).toMatchObject({ error: expect.stringContaining("No file") });
+    expect(
+      await skillReadFromTool(prisma as never, owner, { name: "billing", file: "toString" }),
+    ).toMatchObject({ error: expect.stringContaining("No file") });
   });
 
   it("preserves extra frontmatter keys on update", async () => {

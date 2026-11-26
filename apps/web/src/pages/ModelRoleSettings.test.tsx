@@ -37,7 +37,15 @@ const catalog: ModelCatalogEntry[] = [
     billing: "",
     protocol: "decisions",
   },
-  { provider: "openrouter", id: "chat", label: "Chat", providerName: "OpenRouter", billing: "" },
+  {
+    provider: "openrouter",
+    id: "chat",
+    label: "Chat",
+    providerName: "OpenRouter",
+    billing: "",
+    reasoning: true,
+    thinkingLevels: ["off", "low", "high"],
+  },
   { provider: "openrouter", id: "mini", label: "Mini", providerName: "OpenRouter", billing: "" },
 ];
 const credentials = [
@@ -187,7 +195,7 @@ describe("shared role editor", () => {
     expect(api.setRole).not.toHaveBeenCalled();
   });
 
-  it("labels the effective effort instead of the unsupported stored value", async () => {
+  it("preserves the selected effort even when catalog metadata omits it", async () => {
     saved = { primary: { ...chat, thinkingLevel: "max" }, backups: [] };
     api.forRole.mockResolvedValue(
       catalog.map((entry) => ({
@@ -196,9 +204,8 @@ describe("shared role editor", () => {
       })),
     );
     await render({ thinking: true });
-    expect(container.textContent).toContain("Thinking: High");
-    expect(container.textContent).not.toContain("Thinking: Max");
-    expect(container.querySelector('[title="Saved Max; using High."]')).not.toBeNull();
+    expect(container.textContent).toContain("Thinking: Max");
+    expect(container.textContent).not.toContain("Saved Max; using High.");
     expect(api.setRole).not.toHaveBeenCalled();
   });
 
@@ -417,6 +424,11 @@ describe("shared role editor", () => {
     saved = { primary: { ...chat, thinkingLevel: "high" }, backups: [jev] };
     await render({ thinking: true });
     await menu("Chat", "Thinking");
+    expect(
+      [...document.querySelectorAll<HTMLElement>('[role="menuitemradio"]')].map(
+        (entry) => entry.textContent,
+      ),
+    ).toEqual(["Default", "Minimal", "Low", "Medium", "High", "Extra high", "Max"]);
     await click(
       [...document.querySelectorAll<HTMLElement>('[role="menuitemradio"]')].find(
         (entry) => entry.textContent === "Low",
@@ -489,34 +501,76 @@ it("names rows and menus by their connection", async () => {
   ).toContain("Manage Claude subscription");
 });
 
-it("groups models by connection and runs the same model on either account", async () => {
-  const work = {
-    id: "work",
-    provider: "openrouter",
-    label: "Work",
-    isDefault: false,
-    hasKey: true,
-  };
-  saved = { primary: pin(chat), backups: [] };
-  await render({ credentials: [...credentials, work] });
-  expect(rows()).toEqual(["ChatOpenRouter"]);
-  await click(trigger("Add fallback"));
-  expect(
-    [...document.querySelectorAll("[cmdk-group-heading]")].map((entry) => entry.textContent),
-  ).toEqual(["OpenRouter", "OpenRouter (Work)"]);
-  const workChat = [...document.querySelectorAll<HTMLElement>('[role="option"]')].find(
-    (entry) =>
-      optionName(entry) === "Chat" &&
-      entry.closest("[cmdk-group]")?.textContent?.startsWith("OpenRouter (Work)"),
-  );
-  await click(workChat);
-  expect(saved).toEqual({
-    primary: pin(chat),
-    backups: [{ ...chat, credentialId: "work" }],
+it.each([pin(chat), chat])(
+  "offers the same fallback only on the unused connection: %j",
+  async (primary) => {
+    const work = {
+      id: "work",
+      provider: "openrouter",
+      label: "Work",
+      isDefault: false,
+      hasKey: true,
+    };
+    saved = { primary, backups: [] };
+    await render({ credentials: [work, ...credentials] });
+    expect(rows()).toEqual(["ChatOpenRouter"]);
+    await click(trigger("Add fallback"));
+    expect(
+      [...document.querySelectorAll("[cmdk-group-heading]")].map((entry) => entry.textContent),
+    ).toEqual(["OpenRouter (Work)", "OpenRouter"]);
+    const offered = [...document.querySelectorAll<HTMLElement>('[role="option"]')].filter(
+      (entry) => optionName(entry) === "Chat",
+    );
+    expect(offered).toHaveLength(1);
+    expect(offered[0]?.closest("[cmdk-group]")?.textContent).toContain("OpenRouter (Work)");
+    await click(offered[0]);
+    expect(saved).toEqual({
+      primary,
+      backups: [{ ...chat, credentialId: "work" }],
+    });
+    expect(rows()).toEqual(["ChatOpenRouter", "ChatOpenRouter (Work)"]);
+    await menu("Chat", "Manage OpenRouter");
+    expect(onManage).toHaveBeenLastCalledWith("openrouter", "key");
+  },
+);
+
+it("selects the same model from identically named gateway connections by credential ID", async () => {
+  const provider = "openai-compatible";
+  const modelId = "channel/chat";
+  api.forRole.mockResolvedValue([]);
+  await render({
+    credentials: ["messages", "responses"].map((group) => ({
+      id: `connection-${group}`,
+      provider,
+      label: "Gateway",
+      modelId,
+      isDefault: false,
+      hasKey: false,
+      catalogSource: {
+        id: `source-${group}`,
+        group,
+        providerId: "channel",
+        label: "Source",
+        available: true,
+        unavailableModelIds: [],
+      },
+    })),
   });
-  expect(rows()).toEqual(["ChatOpenRouter", "ChatOpenRouter (Work)"]);
-  await menu("Chat", "Manage OpenRouter");
-  expect(onManage).toHaveBeenLastCalledWith("openrouter", "key");
+  await click(trigger("Change Main model"));
+  const groups = [...document.querySelectorAll("[cmdk-group]")].filter((group) =>
+    group.querySelector("[cmdk-group-heading]"),
+  );
+  expect(groups.map((group) => group.querySelector("[cmdk-group-heading]")?.textContent)).toEqual([
+    "Gateway (messages)",
+    "Gateway (responses)",
+  ]);
+  await click(groups[1]?.querySelector<HTMLElement>('[role="option"]'));
+  await pick("Add fallback", modelId);
+  expect(saved).toEqual({
+    primary: { provider, modelId, credentialId: "connection-responses" },
+    backups: [{ provider, modelId, credentialId: "connection-messages" }],
+  });
+  expect(rows()).toEqual([`${modelId}Gateway (responses)`, `${modelId}Gateway (messages)`]);
 });
 
 it("reads and saves a Space's own list without mixing it with the account's", async () => {

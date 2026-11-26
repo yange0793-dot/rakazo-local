@@ -572,6 +572,7 @@ function fixturePage(
 ) {
   const calls: FixtureCall[] = [];
   let url = options.url ?? "https://example.test/form";
+  let loaderId = 1;
   const snapshotText = options.snapshotText ?? (() => SINGLE_BUTTON_SNAPSHOT);
   const downloads: Array<{ saved?: string; deleted: boolean; cancelled: boolean }> = [];
   const stats = { waiters: 0, maxPending: 0, clicks: 0 };
@@ -588,6 +589,7 @@ function fixturePage(
     stats,
     setUrl(value: string) {
       url = value;
+      loaderId++;
       options.document?.reconfigure({ url: value });
     },
     async info() {
@@ -599,6 +601,11 @@ function fixturePage(
     },
     async title() {
       return "Signup";
+    },
+    async screenshot(options?: { path?: string }) {
+      calls.push({ method: "screenshot", args: [options] });
+      if (!options?.path) throw new Error("Screenshot path is required");
+      await writeFile(options.path, "png");
     },
     async snapshot(snapshotOptions?: unknown) {
       calls.push({ method: "snapshot", args: [snapshotOptions] });
@@ -644,10 +651,13 @@ function fixturePage(
     async goto(target: string) {
       calls.push({ method: "goto", args: [target] });
       url = target;
+      loaderId++;
     },
     async cdp(method: string, params?: { expression?: string }) {
+      if (method === "Page.getFrameTree") {
+        return { frameTree: { frame: { id: "frame-1", loaderId: String(loaderId), url } } };
+      }
       if (!options.document) throw new Error("No test document");
-      if (method === "Page.getFrameTree") return { frameTree: { frame: { id: "frame-1" } } };
       if (method === "Page.createIsolatedWorld") return { executionContextId: 1 };
       if (method === "Runtime.evaluate") {
         return { result: { value: options.document.window.eval(params?.expression ?? "") } };
@@ -783,15 +793,121 @@ function executingRunner(
   options: { expired?: boolean; listingError?: boolean } = {},
 ) {
   const seen: EgoInvocation[] = [];
+  const results: string[] = [];
   const run: EgoRunner = async (invocation) => {
     seen.push(invocation);
     await executeHelper(invocation, task, options);
+    results.push(await readFile(invocation.resultPath, "utf8"));
     return { exitCode: 0, stdout: "", stderr: "" };
   };
-  return { run, seen };
+  return { run, seen, results };
 }
 
 describe("ego browser helper execution", () => {
+  it("finds and acts on a queried field beyond the displayed snapshot limit", async () => {
+    const page = fixturePage({
+      snapshotText: () =>
+        `root\n  text "${"Long history ".repeat(1200)}"\n  textbox "Prompt" [ref=90, loc=css:#prompt]`,
+    });
+    const { run } = executingRunner(fixtureTask([page]));
+    const browser = new EgoBrowserProvider({ run, blockedOrigins: [] });
+    const result = await browser.snapshot(computer, { query: "Prompt" }, context);
+    expect(result.elements).toEqual([expect.objectContaining({ role: "textbox", name: "Prompt" })]);
+    const acted = await browser.act(
+      computer,
+      { actions: [{ kind: "fill", ref: result.elements[0]!.ref, text: "draft" }] },
+      context,
+    );
+    expect(acted).toMatchObject({ ok: true, completed: 1 });
+    expect(page.calls).toContainEqual({
+      method: "fill",
+      args: ["@90", "draft", { clearFirst: true }],
+    });
+  });
+
+  it("reads a frame only from the bound Gemini page", async () => {
+    const page = fixturePage({ url: "https://gemini.google.com/app" });
+    const task = fixtureTask([page]);
+    const { run, seen, results } = executingRunner(task);
+    const browser = new EgoBrowserProvider({ run, blockedOrigins: [] });
+    await browser.snapshot(computer, {}, context);
+
+    const frame = await browser.readFrame(computer, "7:p1", context);
+    expect(frame, results.at(-1)).not.toBeNull();
+    expect(Buffer.from(frame!).toString()).toBe("png");
+    expect(page.calls).toContainEqual({
+      method: "screenshot",
+      args: [{ path: expect.stringMatching(/result\.json\.png$/) }],
+    });
+    expect(await browser.readFrame(computer, "7:p2", context)).toBeNull();
+    expect(seen).toHaveLength(2);
+  });
+
+  it("does not capture a page outside Gemini", async () => {
+    const page = fixturePage({ url: "https://example.test/" });
+    const task = fixtureTask([page]);
+    const { run } = executingRunner(task);
+    const browser = new EgoBrowserProvider({ run, blockedOrigins: [] });
+    await browser.snapshot(computer, {}, context);
+
+    expect(await browser.readFrame(computer, "7:p1", context)).toBeNull();
+    expect(page.calls.some((call) => call.method === "screenshot")).toBe(false);
+  });
+
+  it.each(["https://example.test/", "https://gemini.google.com/app"])(
+    "discards a frame when the document changes during capture to %s",
+    async (nextUrl) => {
+      const page = fixturePage({ url: "https://gemini.google.com/app" });
+      const screenshot = page.screenshot;
+      page.screenshot = async (options) => {
+        page.setUrl(nextUrl);
+        await screenshot(options);
+      };
+      const { run } = executingRunner(fixtureTask([page]));
+      const browser = new EgoBrowserProvider({ run, blockedOrigins: [] });
+      await browser.snapshot(computer, {}, context);
+
+      expect(await browser.readFrame(computer, "7:p1", context)).toBeNull();
+      expect(page.calls).toContainEqual({
+        method: "screenshot",
+        args: [{ path: expect.stringMatching(/result\.json\.png$/) }],
+      });
+    },
+  );
+
+  it("reads the restored session's selected page without a fixed page id", async () => {
+    const page = fixturePage({ url: "https://gemini.google.com/app", label: "p3" });
+    const task = fixtureTask([page]);
+    const { run } = executingRunner(task);
+    const original = new EgoBrowserProvider({ run, blockedOrigins: [] });
+    await original.snapshot(computer, {}, context);
+    const browser = new EgoBrowserProvider({ run, blockedOrigins: [] });
+    const restoredComputer = { ...computer, id: computer.providerRef! };
+    browser.restore(restoredComputer, original.checkpoint(computer, context), context);
+
+    const frame = await browser.readFrame(restoredComputer, undefined, context);
+    expect(Buffer.from(frame!).toString()).toBe("png");
+  });
+
+  it("does not create a browser space when a saved frame session has expired", async () => {
+    const page = fixturePage({ url: "https://gemini.google.com/app" });
+    const task = fixtureTask([page]);
+    const original = new EgoBrowserProvider({
+      run: executingRunner(task).run,
+      blockedOrigins: [],
+    });
+    await original.snapshot(computer, {}, context);
+    page.calls.length = 0;
+    const browser = new EgoBrowserProvider({
+      run: executingRunner(task, { expired: true }).run,
+      blockedOrigins: [],
+    });
+    browser.restore(computer, original.checkpoint(computer, context), context);
+
+    expect(await browser.readFrame(computer, undefined, context)).toBeNull();
+    expect(page.calls).toEqual([]);
+  });
+
   it("binds a snapshot to the URL settled during navigation", async () => {
     const main = fixturePage({
       snapshotText: () => {
@@ -885,7 +1001,7 @@ describe("ego browser helper execution", () => {
     expect(main.stats.clicks).toBe(0);
     expect(popup.stats.clicks).toBe(1);
     for (const changed of [
-      { computer: { ...computer, id: "other-computer" }, context },
+      { computer: { ...computer, kind: "docker" as const }, context },
       { computer: { ...computer, providerRef: "/another/workspace" }, context },
       { computer, context: { ...context, userId: "other-user" } },
     ]) {

@@ -391,7 +391,7 @@ export function attachmentsForBot<T extends { botId: string }>(
 
 /**
  * The message whose attachments this run receives: a person's message, or a message or
- * handoff another bot delivered, whose files arrive the same way.
+ * handoff another bot delivered, or an explicit internal delivery source.
  */
 export function userTurnMessageForRun<
   T extends { id?: string; role: string; runId?: string | null; blocks: MessageBlock[] },
@@ -402,7 +402,10 @@ export function userTurnMessageForRun<
       (message) =>
         message.id === sourceMessageId &&
         message.blocks.some(
-          (block) => block.kind === "bot_message_received" || block.kind === "handoff",
+          (block) =>
+            block.kind === "bot_message_received" ||
+            block.kind === "handoff" ||
+            block.kind === "delivery",
         ),
     );
   }

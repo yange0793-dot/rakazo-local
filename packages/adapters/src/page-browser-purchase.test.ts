@@ -52,6 +52,9 @@ function page(html: string) {
     },
   );
   const win = dom.window;
+  // jsdom runs the checkout logic without a layout engine. Give semantic tests a
+  // deterministic clock and let the budget test advance it explicitly.
+  win.performance.now = () => 0;
   // jsdom has no layout: every element is a 10 px square.
   (win.Element.prototype as unknown as { getBoundingClientRect: unknown }).getBoundingClientRect =
     () => ({ width: 10, height: 10, top: 0, left: 0, right: 10, bottom: 10, x: 0, y: 0 });
@@ -685,11 +688,9 @@ describe("a key on the screen", () => {
   });
 
   it("finds the order summary at the end of a long page", () => {
-    const { intent, win } = page(`<div>${"<span>Item</span>".repeat(8000)}</div>
+    const { intent } = page(`<div>${"<span>Item</span>".repeat(8000)}</div>
       <p><span>Bananas × 6</span> <span>$3.00</span></p>
       <p>Total: $3.00</p><button>Place order</button>`);
-    // jsdom is slow over so many elements: the clock stands still, so the time budget is not what is tested.
-    (win as unknown as { performance: { now: () => number } }).performance.now = () => 0;
     expect(intent("Place order")?.items).toEqual([{ name: "Bananas × 6", amount: "$3.00" }]);
   });
 
@@ -699,8 +700,7 @@ describe("a key on the screen", () => {
     const { intent, win } = page(html);
     let now = 0;
     // Each look at the clock moves it a second on: the reader is out of time at once.
-    (win as unknown as { performance: { now: () => number } }).performance.now = () =>
-      (now += 1000);
+    win.performance.now = () => (now += 1000);
     expect(intent("Place order")).toMatchObject({ label: "Place order", amount: "$3.00" });
     expect(intent("Place order")).not.toHaveProperty("items");
   });

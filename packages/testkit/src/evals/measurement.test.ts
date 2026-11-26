@@ -162,6 +162,14 @@ it("uses provider-reported charge when cache buckets are unavailable", () => {
     ).costUsd,
   ).toBe(0.002);
 });
+
+it("attributes learning calls to the learning cost bucket", () => {
+  const report = measureCalls([
+    { id: "learn", operation: "learning", costUsd: 0.002, costSource: "provider-reported" },
+  ]);
+  expect(report.operationCosts.learning).toBe(report.costUsd);
+  expect(report.operationCosts.answer).toBe(0);
+});
 it("uses long-context rates and bounds missing cache classifications", () => {
   const tiered = {
     ...pricing,

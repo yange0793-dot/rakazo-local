@@ -4,7 +4,7 @@ import { releasedTakeoverComputerBlocks } from "@rakazo/core";
 import type { Prisma, PrismaClient } from "./client.js";
 import { hasActiveComputerControl, holdsUserControl } from "./computers.js";
 import { notifyRealtime } from "./event-stream.js";
-import { appendEventInTransaction, transientRunEventsWhere } from "./events.js";
+import { appendEventInTransaction, deleteTransientRunEvents } from "./events.js";
 import type { RunLease } from "./messages.js";
 import { THREAD_LOCK_TRANSACTION_OPTIONS } from "./transaction-retry.js";
 
@@ -149,9 +149,7 @@ export async function pauseRunForTakeover(
         retainedControl: retainControl,
       },
     });
-    await tx.event.deleteMany({
-      where: { runId: input.runId, ...transientRunEventsWhere() },
-    });
+    await deleteTransientRunEvents(tx, input.runId);
     return { threadId: waitingEvent.threadId, seq: waitingEvent.seq, continuationRunId: null };
   }, THREAD_LOCK_TRANSACTION_OPTIONS);
 

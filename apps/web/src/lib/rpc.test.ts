@@ -109,6 +109,39 @@ describe("unavailable space", () => {
     expect(items.has("rakazo:space-id")).toBe(false);
   });
 
+  it("keeps a switch to an active Space while the old Space is being checked", async () => {
+    const { items, reload } = browser("space-deleting", ["home"]);
+    const fetch = vi.mocked(globalThis.fetch);
+    const list = fetch.getMockImplementation()!;
+    let release!: () => void;
+    const pendingList = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    fetch.mockImplementation(async (request, init) => {
+      const space = new Headers(init?.headers).get("x-rakazo-space-id");
+      if (space === "space-deleting")
+        return Response.json({ json: { code: "UNAUTHORIZED", status: 401 } }, { status: 401 });
+      if (space === "home") return Response.json({ json: { me: { spaceId: "home" } } });
+      await pendingList;
+      return list(request, init);
+    });
+    await expect(createSpaceRpc("space-deleting").bots.list()).rejects.toMatchObject({
+      status: 401,
+    });
+    const recovery = leaveUnavailableSpace("space-deleting");
+    try {
+      await expect(createSpaceRpc("home").bootstrap({})).resolves.toMatchObject({
+        me: { spaceId: "home" },
+      });
+      items.set("rakazo:space-id", "home");
+    } finally {
+      release();
+      await recovery;
+    }
+    expect(selectedSpaceId()).toBe("home");
+    expect(reload).not.toHaveBeenCalled();
+  });
+
   it("keeps a space the user still has, and keeps it when signed out", async () => {
     for (const spaces of [["home", "space-a"], null]) {
       const { items, reload } = browser("space-a", spaces);

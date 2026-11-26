@@ -8,6 +8,16 @@ const publishedSlugs = [
 ].map((match) => match[1]);
 
 describe("Rakazo skill", () => {
+  it("scopes itself to user-facing help and makes documentation fetch conditional", () => {
+    const skill = BUILTIN_AGENT_SKILLS.find((s) => s.name === "Rakazo")!;
+    expect(skill.description).toContain("User-facing Rakazo help");
+    expect(skill.description.length).toBeLessThanOrEqual(72);
+    expect(skill.content).toContain("Do not use it for repository implementation");
+    expect(skill.content).toContain("when exact current UI steps or page details are needed");
+    expect(skill.content).toContain("answer without browsing");
+    expect(skill.content).not.toContain("Fetch the matching page with web_fetch before answering");
+  });
+
   it("links only to published docs pages", () => {
     const skill = BUILTIN_AGENT_SKILLS.find((s) => s.name === "Rakazo")!;
     const urls = [...skill.content.matchAll(/https?:\/\/\S+/g)].map((match) => match[0]);

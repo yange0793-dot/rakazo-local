@@ -87,6 +87,7 @@ vi.mock("./pages/Shell", () => ({
   ShellPage: () => <Link to="/app/artifacts">Artifacts</Link>,
 }));
 vi.mock("./pages/Artifacts", () => ({ ArtifactsPage: () => <div>Artifacts page</div> }));
+vi.mock("./pages/SharedPage", () => ({ SharedPagePage: () => <div>Shared page</div> }));
 
 import { App } from "./App";
 import { endCall, startCall } from "./lib/call-session";
@@ -153,6 +154,12 @@ afterEach(async () => {
   await act(async () => root.unmount());
   container.remove();
   vi.unstubAllGlobals();
+});
+
+it("opens a shared link without loading workspace identity", async () => {
+  await render("/p/shared-page");
+  expect(container.textContent).toBe("Shared page");
+  expect(mocks.me).not.toHaveBeenCalled();
 });
 
 it("keeps an ongoing call in reach after leaving the shell", async () => {

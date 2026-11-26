@@ -6,6 +6,7 @@ import { executeCloudAgentTool } from "./cloud-agent-service.js";
 import { collectLogIds } from "./composio-connector.js";
 import { connectApp } from "./connect-app.js";
 import { redactConnectorPayload, sanitizeConnectorError } from "./connector-safety.js";
+import { executeManagedExternalTool } from "./external-execution.js";
 import { mcpAppViewArguments, mcpAppViewResult } from "./mcp-app.js";
 import { addMcpServerFromTool } from "./mcp-server-tool.js";
 import { serviceCallFromTool, serviceSearchFromTool } from "./paid-service-tools.js";
@@ -35,6 +36,8 @@ export async function cloudAgentTool(ctx: RunContext, call: ToolCall) {
 export async function connectorTool(ctx: RunContext, call: ToolCall) {
   const { deps, run, bot, thread, context } = ctx;
   const { name, args, effectKey, connectorCall } = call;
+  const managed = await executeManagedExternalTool(ctx, call);
+  if (managed !== undefined) return call.finish(managed);
   if (deps.connector) {
     let result: unknown = { error: `unknown tool ${name}` };
     // Background work posts no cards, so it does not fetch the app either.

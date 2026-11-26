@@ -1,5 +1,6 @@
 import { createHash } from "node:crypto";
 import { ORPCError } from "@orpc/server";
+import type { ModelChoice } from "@rakazo/adapters";
 import {
   aiRecipient,
   cloudAgentsEnabled,
@@ -67,7 +68,12 @@ export async function aiConsentStatus(
               archivedAt: null,
               ...(botIds ? { id: { in: botIds } } : {}),
             },
-            select: { modelProvider: true, modelId: true, thinkingLevel: true },
+            select: {
+              modelProvider: true,
+              modelId: true,
+              modelCredentialId: true,
+              thinkingLevel: true,
+            },
           })
         : [],
       // An active routine with its own model is another recipient for this bot.
@@ -118,16 +124,27 @@ export async function aiConsentStatus(
     const deployment = deps.env.deploymentModelConfigured
       ? { provider: deps.env.defaultProvider, model: deps.env.defaultModel }
       : null;
+    const overrides: Array<ModelChoice | null> = target
+      ? [...bots, ...routines]
+      : [null, ...bots, ...routines];
     const selected = await Promise.all(
-      (target ? [...bots, ...routines] : [null, ...bots, ...routines]).map(async (override) => {
+      overrides.map(async (override) => {
+        const credentialId = override?.modelCredentialId;
         const overrideCredential =
           override?.modelProvider && override.modelId
-            ? await findModelCredential(
-                deps.prisma,
-                actor,
-                override.modelProvider,
-                override.modelId,
-              )
+            ? credentialId
+              ? await findModelCredentialById(
+                  deps.prisma,
+                  actor,
+                  credentialId,
+                  override.modelProvider,
+                )
+              : await findModelCredential(
+                  deps.prisma,
+                  actor,
+                  override.modelProvider,
+                  override.modelId,
+                )
             : null;
         return selectConfiguredModel({
           override,

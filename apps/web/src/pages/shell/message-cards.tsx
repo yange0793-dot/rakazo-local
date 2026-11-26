@@ -13,6 +13,7 @@ import { chartViewport } from "../../lib/chart-viewport";
 import { connectMcpOauth } from "../../lib/mcp-connect";
 import { importChunk } from "../../lib/preload-recovery";
 import { rpc } from "../../lib/rpc";
+import { useSpaceRpc } from "../../lib/space-rpc";
 import { useArtifactImage } from "../../lib/use-artifact-image";
 import type { ErrorDetails } from "../../lib/user-error";
 import { errorDetails, errorText } from "../../lib/user-error";
@@ -335,6 +336,7 @@ export function McpApprovalCard({
   block: Extract<MessageBlock, { kind: "mcp_approval" }>;
 }) {
   const { t } = useLingui();
+  const client = useSpaceRpc();
   const { name, serverId, transport, endpoint, needsOAuth, status: savedStatus } = block;
   const [localStatus, setLocalStatus] = useState<McpApprovalState>("pending");
   const [error, setError] = useState<ErrorDetails | null>(null);
@@ -361,13 +363,13 @@ export function McpApprovalCard({
     setError(null);
     try {
       if (needsOAuth) {
-        const result = await connectMcpOauth(serverId);
+        const result = await connectMcpOauth(serverId, client);
         if (result === "cancelled") {
           setLocalStatus("pending");
           return;
         }
       }
-      await rpc.mcp.assignments.approve({ botId, serverId, threadId });
+      await client.mcp.assignments.approve({ botId, serverId, threadId });
       setLocalStatus("connected");
     } catch (err) {
       setError(errorDetails(err, t`Could not approve this server`));
@@ -383,7 +385,7 @@ export function McpApprovalCard({
     setError(null);
     try {
       if (botId) {
-        await rpc.mcp.assignments.dismiss({ botId, serverId, threadId });
+        await client.mcp.assignments.dismiss({ botId, serverId, threadId });
       }
       setLocalStatus("dismissed");
     } catch (err) {

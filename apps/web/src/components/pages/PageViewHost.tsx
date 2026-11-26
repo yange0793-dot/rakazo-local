@@ -9,6 +9,7 @@ import { useSpaceQueries } from "../../lib/query";
 import { errorCode } from "../../lib/user-error";
 import { PageNotice } from "./PageNotice";
 import { PageView } from "./PageView";
+import { hasPrivateBrowserPage, PrivateBrowserPage } from "./PrivateBrowserPage";
 import { SharePopover } from "./SharePopover";
 
 const COARSE = "(pointer: coarse)";
@@ -102,6 +103,10 @@ function OpenPage({
     [session],
   );
   const data = page.data;
+  const liveFrame = hasPrivateBrowserPage(data) ? (
+    <PrivateBrowserPage pageId={shownId} />
+  ) : undefined;
+  const runtimeFailed = !liveFrame && viewer.failed;
   const open = pageId !== null && (data !== undefined || failed || page.isPending);
   const dockPage = pageId !== null && data ? { id: data.id, title: data.title } : null;
   useEffect(() => {
@@ -115,7 +120,8 @@ function OpenPage({
         if (!open) close();
       }}
       title={data?.title ?? ""}
-      document={viewer.document}
+      document={liveFrame ? null : viewer.document}
+      liveFrame={liveFrame}
       returnFocus={session.restoreFocus}
       compact={compact}
       notice={
@@ -125,13 +131,13 @@ function OpenPage({
             detail={t`It may have been deleted, or it belongs to someone else.`}
             onClose={close}
           />
-        ) : failed || viewer.failed ? (
+        ) : failed || runtimeFailed ? (
           <PageNotice
             title={t`This page couldn't load`}
             detail={t`Check your connection and try again.`}
             onRetry={() => {
               if (failed) void page.refetch();
-              if (viewer.failed) viewer.retry();
+              if (runtimeFailed) viewer.retry();
             }}
             onClose={close}
           />
