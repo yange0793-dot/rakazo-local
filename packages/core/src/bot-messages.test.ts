@@ -424,6 +424,19 @@ describe("inbound wake prompt", () => {
     expect(prompt).toContain("unless you believe its premise is wrong");
   });
 
+  it("requires evidence for delegated factual claims without treating a pass receipt as proof", () => {
+    const wake = buildBotMessageWakePrompt({
+      from: bots[0]!,
+      text: "The result is complete.",
+      intent: "result",
+    });
+    expect(wake).toContain(
+      "verify consequential or changing factual claims against source evidence",
+    );
+    expect(wake).toContain('a submitter\'s "pass" is a claim, not proof');
+    expect(wake).toContain("state what remains uncertain");
+  });
+
   it("leaves an FYI free to go unanswered", () => {
     const wake = buildBotMessageWakePrompt({ from: bots[0]!, text: "Deploy done.", intent: "fyi" });
     expect(wake).not.toContain(BOT_DELIBERATION_GUIDANCE);

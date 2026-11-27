@@ -190,6 +190,14 @@ pg("chat ticket work delivery", () => {
             },
           });
           expect(delivered).toMatchObject({ ok: true, status: "done", managed: true });
+          expect(
+            await f.prisma.ticket.findUniqueOrThrow({ where: { id: child.id } }),
+          ).toMatchObject({
+            status: "done",
+            receiptVersion: previousVersion + 1,
+            acceptedRequirementsVersion: 1,
+            acceptedReceiptVersion: previousVersion + 1,
+          });
           if (!("messageId" in delivered)) throw new Error("Missing child receipt");
           const receipt = await f.prisma.message.findUniqueOrThrow({
             where: { id: delivered.messageId },
@@ -231,6 +239,14 @@ pg("chat ticket work delivery", () => {
             ok: true,
             status: "done",
             version: previousVersion + 1,
+          });
+          expect(
+            await f.prisma.ticket.findUniqueOrThrow({ where: { id: parentRun.ticketId! } }),
+          ).toMatchObject({
+            status: "done",
+            receiptVersion: previousVersion + 1,
+            acceptedRequirementsVersion: 1,
+            acceptedReceiptVersion: previousVersion + 1,
           });
           expect(await deliverTicketWork(f.base, parentRun, input)).toEqual(forwarded);
           if (!("messageId" in forwarded)) throw new Error("Missing parent delivery");

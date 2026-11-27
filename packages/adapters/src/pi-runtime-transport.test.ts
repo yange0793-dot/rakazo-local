@@ -55,6 +55,20 @@ describe("Pi runtime transport", () => {
     expect(reliableStreamOptions(codexModel).timeoutMs).toBe(MODEL_STREAM_TIMEOUT_MS);
   });
 
+  it("marks loopback MixRouter calls so Rakazo sessions are not stored as native Codex", () => {
+    const localRouter = reliableStreamOptions({
+      ...codexModel,
+      baseUrl: "http://127.0.0.1:8787/v1",
+    } as Model<Api>);
+    expect(localRouter.headers).toMatchObject({ "x-rakazo-client": "rakazo" });
+
+    const otherLocalProvider = reliableStreamOptions({
+      ...codexModel,
+      baseUrl: "http://127.0.0.1:11434/v1",
+    } as Model<Api>);
+    expect(otherLocalProvider.headers).not.toHaveProperty("x-rakazo-client");
+  });
+
   it.each([0, 2])("preserves an explicit retry limit of %i", (maxRetries) => {
     vi.stubEnv("MODEL_STREAM_MAX_RETRIES", "3");
     expect(reliableStreamOptions(codexModel, { maxRetries }).maxRetries).toBe(maxRetries);

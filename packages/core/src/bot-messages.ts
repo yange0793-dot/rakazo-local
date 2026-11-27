@@ -196,7 +196,7 @@ export function buildBotMessageWakePrompt(args: {
   const intent = args.intent ?? "request";
   const action =
     intent === "result"
-      ? `This is a result for work you delegated. Check it against the user's request. Forward a finished deliverable unchanged, using its actual artifacts; do not rewrite it merely to relay it. Return concrete defects to the same owner and ticket for revision. Integrate intermediate research only when the requested deliverable still needs that work. Do not repeat a result already delivered to the user.`
+      ? `This is a result for work you delegated. Check it against the user's original request and verify consequential or changing factual claims against source evidence; a submitter's "pass" is a claim, not proof. If evidence is unavailable, state what remains uncertain and return the specific gap to the same owner and ticket for revision. Forward a finished deliverable unchanged, using its actual artifacts; do not rewrite it merely to relay it. Integrate intermediate research only when the requested deliverable still needs that work. Do not repeat a result already delivered to the user.`
       : intent === "status"
         ? "This is an internal progress update. Continue any independent work. Tell the user only about a meaningful change, a blocker needing their input, or a completed deliverable; do not relay routine status or acknowledgements."
         : intent === "question"

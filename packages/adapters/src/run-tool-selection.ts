@@ -88,6 +88,7 @@ export const BACKGROUND_HELPER_TOOL_NAMES: ReadonlySet<string> = new Set([
   "scratchpad_list",
   "board_tickets",
   "ticket_get",
+  "ticket_update",
   "cloud_agent_status",
 ]);
 
@@ -108,6 +109,8 @@ export function offersAgentConnectionTools(options: {
 
 export function selectBuiltinToolsForRun(options: {
   ticketBoardEnabled?: boolean;
+  /** The helper is assigned to a managed ticket and must deliver its receipt. */
+  managedTicket?: boolean;
   phoneCallsEnabled?: boolean;
   historyRetrievalEnabled?: boolean;
   graphicalToolsAllowed: boolean;
@@ -175,7 +178,8 @@ export function selectBuiltinToolsForRun(options: {
       !disabled.has(tool.name) &&
       (options.trigger !== "created" || CREATED_RUN_TOOL_NAMES.has(tool.name)) &&
       (options.trigger !== BACKGROUND_HELPER_TRIGGER ||
-        BACKGROUND_HELPER_TOOL_NAMES.has(tool.name)) &&
+        (BACKGROUND_HELPER_TOOL_NAMES.has(tool.name) &&
+          (tool.name !== "ticket_update" || options.managedTicket === true))) &&
       (!FLEET_TOOL_NAMES_SET.has(tool.name) ||
         (Boolean(options.fleetManagement) && ownerStartedRun)) &&
       (ownerStartedRun || (tool.name !== "update_preferences" && tool.name !== "feedback")) &&

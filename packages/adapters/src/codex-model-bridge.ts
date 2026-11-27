@@ -7,7 +7,7 @@ import { DEFAULT_MODEL_MAX_TOKENS, parseModelHeaders } from "@rakazo/contracts";
 import { withAbort } from "@rakazo/core";
 import { getLogger } from "@rakazo/logging";
 import { estimateTextTokens } from "./context-selection.js";
-import { modelClientHeaders } from "./model-client-headers.js";
+import { modelClientHeaders, tagMixRouterRequest } from "./model-client-headers.js";
 import {
   assertAllowedOpenAiCompatibleUrl,
   assertHttpsForKeyedOpenAiCompatibleUrl,
@@ -211,7 +211,9 @@ export async function createCodexModelBridge(options: {
         "content-type": "application/json",
         accept: "text/event-stream, application/json",
       });
-      for (const [name, value] of Object.entries(modelClientHeaders("openai-responses"))) {
+      for (const [name, value] of Object.entries(
+        tagMixRouterRequest(modelClientHeaders("openai-responses"), upstream.href),
+      )) {
         if (typeof value === "string") headers.set(name, value);
       }
       for (const name of [

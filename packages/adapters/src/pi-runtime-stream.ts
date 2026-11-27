@@ -10,7 +10,7 @@ import type {
   ProviderHeaders,
 } from "@earendil-works/pi-ai";
 import { AssistantMessageEventStream } from "@earendil-works/pi-ai/utils/event-stream";
-import { modelClientHeaders } from "./model-client-headers.js";
+import { modelClientHeaders, tagMixRouterRequest } from "./model-client-headers.js";
 import { codexComputeResidency } from "./pi-oauth.js";
 import {
   modelStreamIdleTimeoutMs,
@@ -256,7 +256,7 @@ function hasHeader(headers: ProviderHeaders | undefined, name: string): boolean 
 
 export function reliableStreamOptions(
   model: Pick<Model<Api>, "api" | "provider" | "maxTokens" | "reasoning"> &
-    Partial<Pick<Model<Api>, "contextWindow" | "headers">>,
+    Partial<Pick<Model<Api>, "baseUrl" | "contextWindow" | "headers">>,
   options?: ModelsSimpleStreamOptions,
   configuredMaxTokens?: number,
   accessToken?: string | (() => string | undefined),
@@ -264,7 +264,10 @@ export function reliableStreamOptions(
 ): ModelsSimpleStreamOptions {
   let next: ModelsSimpleStreamOptions = {
     ...options,
-    headers: modelClientHeaders(model.api, model.headers, options?.headers),
+    headers: tagMixRouterRequest(
+      modelClientHeaders(model.api, model.headers, options?.headers),
+      model.baseUrl,
+    ),
     ...(cacheRetention ? { cacheRetention } : {}),
     timeoutMs: options?.timeoutMs ?? modelStreamTimeoutMs(),
     maxRetries: options?.maxRetries ?? modelStreamMaxRetries(),

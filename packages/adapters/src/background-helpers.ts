@@ -13,11 +13,14 @@ import {
   appendEventInTransaction,
   assertRunCanWriteHistory,
   createThreadMessageInTransaction,
+  ManagedWorkError,
+  recordWorkEventInTransaction,
   THREAD_LOCK_TRANSACTION_OPTIONS,
 } from "@rakazo/db";
 import { getLogger } from "@rakazo/logging";
 import { resolveDeploymentModel } from "./deployment-model.js";
 import type { ExecutorDeps } from "./executor-deps.js";
+import { managedWorkEnabled, prepareManagedWorkInTransaction } from "./managed-work.js";
 import { validateConnectedModelChoice } from "./model-selection.js";
 import { helperResultText, MAX_PARALLEL_SUBAGENTS } from "./pi-runtime-subagent.js";
 import type { RunContext } from "./run-context.js";
@@ -117,7 +120,8 @@ export async function startBackgroundHelper(
     modelPinned: true,
   };
   const clientNonce = `background-helper:${input.effectKey}`;
-  const started = { ok: true as const, name: input.name, note: startedNote(input.name) };
+  const managedWork =
+    managedWorkEnabled(deps) && ctx.source.ownerAuthoredRun && thread.botId === bot.id;
   const card: HelperBlock = {
     kind: "subagent",
     agentId: input.executionId,
@@ -125,86 +129,149 @@ export async function startBackgroundHelper(
     task: input.task,
     status: "running",
   };
-  const committed = await deps.prisma.$transaction(async (tx) => {
-    // Every start goes through this chat, so its lock makes the replay check and the cap exact
-    // even when one turn starts several helpers at once.
-    await tx.$queryRaw`SELECT id FROM threads WHERE id = ${thread.id} FOR UPDATE`;
-    if (
-      await tx.run.findFirst({ where: { spaceId: run.spaceId, clientNonce }, select: { id: true } })
-    )
-      return null;
-    const [working, waiting] = await Promise.all([
-      tx.run.count({
-        where: {
-          botId: bot.id,
-          trigger: BACKGROUND_HELPER_TRIGGER,
-          status: { in: [...WORKING_RUN_STATUSES] },
-        },
-      }),
-      // A helper paused on an approval card holds no slot: it is not computing anything.
-      tx.run.count({
-        where: {
-          botId: bot.id,
-          trigger: BACKGROUND_HELPER_TRIGGER,
-          status: "waiting_input",
-        },
-      }),
-    ]);
-    if (working >= MAX_PARALLEL_SUBAGENTS) return { full: true as const, waiting };
-    // Only this turn's live worker may start one, but the card is not part of the turn: a turn
-    // ending settles its own helper cards as stopped, while this helper keeps working.
-    await assertRunCanWriteHistory(tx, runId, { lease: runLeaseFor(deps, runId) });
-    const message = await createThreadMessageInTransaction(tx, {
-      threadId: thread.id,
-      role: "bot",
-      blocks: [card],
-      botId: bot.id,
-      markUnread: false,
-    });
-    const event = await appendEventInTransaction(tx, {
-      spaceId: run.spaceId,
-      threadId: thread.id,
-      botId: bot.id,
-      type: "thread.message.created",
-      payload: { messageId: message.id, role: "bot", blocks: [card] },
-    });
-    // The helper's own thread: no chat list shows it, nothing sent to the bot waits behind the
-    // helper, and it goes when the bot is deleted.
-    const helperThread = await tx.thread.create({
-      data: { spaceId: run.spaceId, userId: run.userId, helperBotId: bot.id },
-      select: { id: true },
-    });
-    const task = await tx.task.create({
-      data: {
-        spaceId: run.spaceId,
+  let committed:
+    | {
+        eventSeq: number;
+        helperRunId: string;
+        ticketId?: string;
+      }
+    | { full: true; waiting: number }
+    | null;
+  try {
+    committed = await deps.prisma.$transaction(async (tx) => {
+      // Every start goes through this chat, so its lock makes the replay check and the cap exact
+      // even when one turn starts several helpers at once.
+      await tx.$queryRaw`SELECT id FROM threads WHERE id = ${thread.id} FOR UPDATE`;
+      if (
+        await tx.run.findFirst({
+          where: { spaceId: run.spaceId, clientNonce },
+          select: { id: true },
+        })
+      )
+        return null;
+      const [working, waiting] = await Promise.all([
+        tx.run.count({
+          where: {
+            botId: bot.id,
+            trigger: BACKGROUND_HELPER_TRIGGER,
+            status: { in: [...WORKING_RUN_STATUSES] },
+          },
+        }),
+        // A helper paused on an approval card holds no slot: it is not computing anything.
+        tx.run.count({
+          where: {
+            botId: bot.id,
+            trigger: BACKGROUND_HELPER_TRIGGER,
+            status: "waiting_input",
+          },
+        }),
+      ]);
+      if (working >= MAX_PARALLEL_SUBAGENTS) return { full: true as const, waiting };
+      // Only this turn's live worker may start one, but the card is not part of the turn: a turn
+      // ending settles its own helper cards as stopped, while this helper keeps working.
+      await assertRunCanWriteHistory(tx, runId, { lease: runLeaseFor(deps, runId) });
+      const assignment = managedWork
+        ? await prepareManagedWorkInTransaction(tx, {
+            run: {
+              id: run.id,
+              spaceId: run.spaceId,
+              userId: run.userId,
+              botId: run.botId,
+              threadId: run.threadId,
+            },
+            ownerBotId: bot.id,
+            brief: input.task || "Complete the delegated task.",
+            operationKey: `${run.id}:${input.effectKey}`,
+            newTask: true,
+          })
+        : undefined;
+      if (assignment && !assignment.admission.admitted)
+        throw new ManagedWorkError("Managed work prerequisites are not accepted.");
+      const message = await createThreadMessageInTransaction(tx, {
+        threadId: thread.id,
+        role: "bot",
+        blocks: [card],
         botId: bot.id,
-        threadId: helperThread.id,
-        userId: run.userId,
-        prompt: helperPrompt(input),
-        status: "queued",
-      },
-    });
-    const helperRun = await tx.run.create({
-      data: {
+        markUnread: false,
+      });
+      const event = await appendEventInTransaction(tx, {
         spaceId: run.spaceId,
+        threadId: thread.id,
         botId: bot.id,
-        threadId: helperThread.id,
-        taskId: task.id,
-        userId: run.userId,
-        status: "queued",
-        trigger: BACKGROUND_HELPER_TRIGGER,
-        sourceMessageId: message.id,
-        clientNonce,
-        ...model,
-      },
-      select: { id: true },
-    });
-    return { eventSeq: event.seq, helperRunId: helperRun.id };
-  }, THREAD_LOCK_TRANSACTION_OPTIONS);
-  if (committed && "full" in committed && committed.full === true) {
+        type: "thread.message.created",
+        payload: { messageId: message.id, role: "bot", blocks: [card] },
+      });
+      // The helper's own thread: no chat list shows it, nothing sent to the bot waits behind the
+      // helper, and it goes when the bot is deleted.
+      const helperThread = await tx.thread.create({
+        data: { spaceId: run.spaceId, userId: run.userId, helperBotId: bot.id },
+        select: { id: true },
+      });
+      const task = await tx.task.create({
+        data: {
+          spaceId: run.spaceId,
+          botId: bot.id,
+          threadId: helperThread.id,
+          userId: run.userId,
+          prompt: helperPrompt({ ...input, managedTicketId: assignment?.ticket.id }),
+          status: "queued",
+        },
+      });
+      const helperRun = await tx.run.create({
+        data: {
+          spaceId: run.spaceId,
+          botId: bot.id,
+          threadId: helperThread.id,
+          taskId: task.id,
+          userId: run.userId,
+          status: "queued",
+          trigger: BACKGROUND_HELPER_TRIGGER,
+          sourceMessageId: message.id,
+          clientNonce,
+          ...(assignment
+            ? {
+                ticketId: assignment.ticket.id,
+                workControlEpoch: assignment.ticket.controlEpoch,
+                workRequirementsVersion: assignment.ticket.requirementsVersion,
+              }
+            : {}),
+          ...model,
+        },
+        select: { id: true },
+      });
+      if (assignment) {
+        const dispatch = await recordWorkEventInTransaction(tx, {
+          spaceId: run.spaceId,
+          userId: run.userId,
+          ticketId: assignment.ticket.id,
+          eventKey: `managed:dispatch:background-helper:${clientNonce}`,
+          kind: "dispatch",
+          controlEpoch: assignment.ticket.controlEpoch,
+          targetBotId: bot.id,
+          targetThreadId: helperThread.id,
+          sourceTicketId: assignment.parentTicket.id,
+          sourceRunId: run.id,
+          payload: { taskId: task.id, messageId: message.id },
+        });
+        await tx.workEvent.update({
+          where: { id: dispatch.id },
+          data: { status: "handled", wakeRunId: helperRun.id, handledAt: new Date() },
+        });
+      }
+      return {
+        eventSeq: event.seq,
+        helperRunId: helperRun.id,
+        ...(assignment ? { ticketId: assignment.ticket.id } : {}),
+      };
+    }, THREAD_LOCK_TRANSACTION_OPTIONS);
+  } catch (error) {
+    if (error instanceof ManagedWorkError) return { error: error.message };
+    throw error;
+  }
+  if (committed && "full" in committed) {
     return { error: helperLimitMessage(committed.waiting) };
   }
-  if (!committed) return started;
+  if (!committed) return { ok: true as const, name: input.name, note: startedNote(input.name) };
   await deps.events.notify(thread.id, committed.eventSeq).catch((error) => {
     getLogger().error("background helper card notification", error);
   });
@@ -212,7 +279,12 @@ export async function startBackgroundHelper(
     // The queued run is durable; the job reconciler repairs a missed wake.
     getLogger().error("background helper enqueue", error);
   });
-  return started;
+  return {
+    ok: true as const,
+    name: input.name,
+    note: startedNote(input.name),
+    ...("ticketId" in committed ? { ticketId: committed.ticketId } : {}),
+  };
 }
 
 /** Says what the full slots are doing: waiting on an approval is not working. */
@@ -227,10 +299,18 @@ function startedNote(name: string) {
   return `Helper "${name}" is working in the background. End your turn now if nothing else needs doing; its result comes back to you later as a new message. Do not wait for it or check on it.`;
 }
 
-export function helperPrompt(input: { name: string; task: string; instructions: string }) {
+export function helperPrompt(input: {
+  name: string;
+  task: string;
+  instructions: string;
+  managedTicketId?: string;
+}) {
   return [
     `${BACKGROUND_HELPER_TASK_CUE} named "${input.name}", working for this bot while it keeps talking with the user.`,
     "Do the work with the tools your task needs — read and write files, run commands, use the page browser, and use this bot's computer when the task needs it; work that shares the computer waits its turn. A tool that changes something, or a site the owner has not allowed, runs only after the owner approves: its card goes to the chat that started you, and you continue once it is answered — never retry it another way or work around it. You cannot talk to the user, ask them anything, buy anything, type saved logins or cards, or change memory, skills or routines. Finish with a concise result for the bot; include the exact workspace paths of requested deliverables and name anything it should ask the user or change itself.",
+    input.managedTicketId
+      ? `This is managed ticket ${input.managedTicketId}. Read ticket_get and deliver findings and evidence with ticket_update using the delivery.previousVersion returned there. A final text alone is not a work receipt.`
+      : "",
     input.instructions,
     `Task from the bot (not from the user):\n${input.task || "Complete the delegated task."}`,
   ]
@@ -249,6 +329,7 @@ export async function returnHelperOutcome(
     spaceId: string;
     botId: string;
     userId: string;
+    ticketId?: string | null;
     sourceMessageId?: string | null;
   },
   outcome: { status: "completed" | "failed" | "stopped"; text: string },
@@ -260,6 +341,22 @@ export async function returnHelperOutcome(
         select: { threadId: true },
       })
     : null;
+  const managedReceipt =
+    outcome.status === "completed" && run.ticketId
+      ? await deps.prisma.ticket.findFirst({
+          where: {
+            id: run.ticketId,
+            spaceId: run.spaceId,
+            createdByUserId: run.userId,
+            assigneeBotId: run.botId,
+            managedVersion: { gt: 0 },
+            parentTicketId: { not: null },
+            receiptVersion: { gt: 0 },
+            executions: { some: { id: run.id } },
+          },
+          select: { id: true },
+        })
+      : null;
   const committed = await deps.prisma.$transaction(async (tx) => {
     // Same lock order as clearing chat (and the cloud-agent wake): thread first.
     if (source) await tx.$queryRaw`SELECT id FROM threads WHERE id = ${source.threadId} FOR UPDATE`;
@@ -316,7 +413,7 @@ export async function returnHelperOutcome(
         select: { id: true },
       }),
     ]);
-    if (!member || !bot) return { threadId: card.threadId, eventSeq: event.seq };
+    if (!member || !bot || managedReceipt) return { threadId: card.threadId, eventSeq: event.seq };
     const task = await tx.task.create({
       data: {
         spaceId: run.spaceId,

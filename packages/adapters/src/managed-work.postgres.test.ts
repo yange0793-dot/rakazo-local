@@ -20,6 +20,7 @@ import {
 } from "@rakazo/db";
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { LocalArtifactStore } from "./artifacts.js";
+import { returnHelperOutcome, startBackgroundHelper } from "./background-helpers.js";
 import { messageBot, returnBotMessageOutcome } from "./bot-messages.js";
 import type { ExecutorDeps } from "./executor-deps.js";
 import { reconcileExternalExecutions } from "./external-execution.js";
@@ -309,6 +310,117 @@ describePostgres("managed work coordination (PostgreSQL)", () => {
     });
     return stopped;
   }
+
+  it("starts a managed helper with a ticket and returns its receipt through the parent event", async () => {
+    const helper = {
+      deps: deps(),
+      run,
+      runId: run.id,
+      bot: { id: chief.id, name: chief.name },
+      thread: { id: chief.threadId, botId: chief.id },
+      model: { provider: "fixture", id: "model", thinkingLevel: null },
+      source: { ownerAuthoredRun: true },
+      secrets: [],
+    } as never;
+    const started = await within(() =>
+      startBackgroundHelper(helper, {
+        name: "source checker",
+        task: "Verify the original source.",
+        instructions: "",
+        modelProvider: "",
+        modelId: "",
+        executionId: "helper-call",
+        effectKey: "helper-managed-receipt",
+      }),
+    );
+    expect(started).toMatchObject({ ok: true, ticketId: expect.any(String) });
+
+    const parent = await work();
+    const delegated = await child();
+    const helperRun = await runFor(delegated);
+    expect(parent).toMatchObject({
+      originMessageId: run.sourceMessageId,
+      originRunId: run.id,
+      originThreadId: chief.threadId,
+      managedVersion: 1,
+    });
+    expect(delegated).toMatchObject({
+      parentTicketId: parent.id,
+      originMessageId: run.sourceMessageId,
+      originRunId: run.id,
+      managedVersion: 1,
+    });
+    expect(helperRun).toMatchObject({
+      trigger: "helper",
+      ticketId: delegated.id,
+      workControlEpoch: delegated.controlEpoch,
+      workRequirementsVersion: delegated.requirementsVersion,
+    });
+    expect(
+      await fixtures.workEvent.findFirstOrThrow({
+        where: { ticketId: delegated.id, kind: "dispatch" },
+      }),
+    ).toMatchObject({ status: "handled", wakeRunId: helperRun.id });
+    expect(
+      await within(() => getManagedCoordinationWait(prisma, { spaceId, runId: run.id })),
+    ).toMatchObject({
+      waiting: true,
+      childTicketIds: [delegated.id],
+    });
+
+    await fixtures.run.update({ where: { id: run.id }, data: { status: "completed" } });
+    await fixtures.run.update({ where: { id: helperRun.id }, data: { status: "running" } });
+    const result = {
+      previousVersion: 0,
+      summary: "Original source verified.",
+      findings: [
+        {
+          conclusion: "The source supports the result",
+          outcome: "pass",
+          evidence: "Checked the source text.",
+        },
+      ],
+    };
+    expect(
+      await within(() =>
+        deliverTicketWork(deps(), helperRun, {
+          id: delegated.id,
+          result,
+          ownerAuthored: false,
+          secrets: [],
+        }),
+      ),
+    ).toMatchObject({ ok: true, status: "done", version: 1 });
+
+    await fixtures.run.update({ where: { id: helperRun.id }, data: { status: "completed" } });
+    await within(() =>
+      returnHelperOutcome(deps(), helperRun, {
+        status: "completed",
+        text: "Original source verified.",
+      }),
+    );
+    expect(
+      await fixtures.run.findFirst({
+        where: { spaceId, clientNonce: `helper-result:${helperRun.id}` },
+      }),
+    ).toBeNull();
+
+    await within(() => reconcileManagedWorkEvents(deps(), { spaceId }));
+    const outcome = await fixtures.workEvent.findFirstOrThrow({
+      where: { ticketId: parent.id, kind: "child_outcome", sourceRunId: helperRun.id },
+    });
+    expect(outcome.status).toBe("prepared");
+    const wake = await fixtures.run.findUniqueOrThrow({ where: { id: outcome.wakeRunId! } });
+    expect(wake).toMatchObject({ trigger: "bot_message", ticketId: parent.id });
+    expect(
+      await fixtures.message.findFirst({
+        where: {
+          threadId: chief.threadId,
+          clientNonce: { startsWith: `work-receipt:${delegated.id}:1:` },
+        },
+      }),
+    ).not.toBeNull();
+  });
 
   it("defaults requests to one parent/child relationship and one bot_message execution", async () => {
     const result = await dispatch();

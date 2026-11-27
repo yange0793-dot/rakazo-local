@@ -28,7 +28,11 @@ import type { CompatibleReasoningCapabilities } from "@rakazo/core";
 import { COMPATIBLE_THINKING_LEVELS, compatibleThinkingLevels } from "@rakazo/core";
 import type { Dispatcher } from "undici";
 import { Agent } from "undici";
-import { CODEX_CLIENT_HEADERS, modelClientHeaders } from "./model-client-headers.js";
+import {
+  CODEX_CLIENT_HEADERS,
+  modelClientHeaders,
+  tagMixRouterRequest,
+} from "./model-client-headers.js";
 import { declaredVisionModelIds, inputModalities } from "./model-modalities.js";
 import type { ResolvedAddress, ResolveHostname } from "./network-address.js";
 import { createAddressCheckedLookup } from "./network-address.js";
@@ -170,7 +174,10 @@ function openAiCompatibleProvider(
         model,
         api(model.api).stream(model, context, {
           ...options,
-          headers: modelClientHeaders(model.api, model.headers, options?.headers),
+          headers: tagMixRouterRequest(
+            modelClientHeaders(model.api, model.headers, options?.headers),
+            model.baseUrl,
+          ),
           fetch: createOpenAiCompatibleFetch(options?.fetch, undefined, streamPolicy),
         }),
       ),
@@ -180,7 +187,10 @@ function openAiCompatibleProvider(
         model,
         api(model.api).streamSimple(model, context, {
           ...options,
-          headers: modelClientHeaders(model.api, model.headers, options?.headers),
+          headers: tagMixRouterRequest(
+            modelClientHeaders(model.api, model.headers, options?.headers),
+            model.baseUrl,
+          ),
           reasoning: reasoning === "off" ? undefined : reasoning,
           fetch: createOpenAiCompatibleFetch(options?.fetch, undefined, streamPolicy),
         }),

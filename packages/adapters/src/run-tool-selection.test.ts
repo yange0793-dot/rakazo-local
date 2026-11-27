@@ -11,6 +11,21 @@ const helperOptions = {
 };
 
 describe("background helper tools", () => {
+  it("offers ticket delivery only to a managed helper", () => {
+    const unassigned = selectBuiltinToolsForRun({
+      ...helperOptions,
+      ticketBoardEnabled: true,
+    }).map((tool) => tool.name);
+    const assigned = selectBuiltinToolsForRun({
+      ...helperOptions,
+      ticketBoardEnabled: true,
+      managedTicket: true,
+    }).map((tool) => tool.name);
+    expect(unassigned).toContain("ticket_get");
+    expect(unassigned).not.toContain("ticket_update");
+    expect(assigned).toContain("ticket_update");
+  });
+
   it("offers the page browser beside its files, shell and reads", () => {
     const names = selectBuiltinToolsForRun(helperOptions).map((tool) => tool.name);
     expect(names).toEqual(

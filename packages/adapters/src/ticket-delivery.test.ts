@@ -140,7 +140,13 @@ describe("ticket delivery boundary", () => {
         ownerAuthored: false,
         secrets: [],
       }),
-    ).toEqual({ ok: true, version: 1, messageId: "receipt-1", status: "review" });
+    ).toEqual({
+      ok: true,
+      version: 1,
+      messageId: "receipt-1",
+      status: "review",
+      managed: false,
+    });
     expect(s.prisma.artifact.findMany).not.toHaveBeenCalled();
     expect(s.artifacts.put).not.toHaveBeenCalled();
     expect(s.events.notify).not.toHaveBeenCalled();
@@ -215,6 +221,7 @@ describe("ticket delivery boundary", () => {
         messageId: "receipt-1",
         status: "review",
         acceptance,
+        managed: false,
       });
       expect(s.artifacts.get).toHaveBeenCalledWith("saved-receipt", expect.any(Object));
       expect(s.artifacts.put).not.toHaveBeenCalled();
@@ -465,6 +472,7 @@ describe("ticket delivery boundary", () => {
       status: "done",
       requirementsVersion: 2,
       acceptance,
+      managed: false,
     });
     expect(judge).not.toHaveBeenCalled();
     expect(judge.calibrate).not.toHaveBeenCalled();

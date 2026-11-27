@@ -12,6 +12,20 @@ import {
 import { validateConnectedModelChoice } from "./model-selection.js";
 import type { RunContext } from "./run-context.js";
 
+const mocks = vi.hoisted(() => ({
+  prepareManagedWork: vi.fn(async () => ({
+    managed: true as const,
+    ticket: { id: "managed-ticket", controlEpoch: 3, requirementsVersion: 2 },
+    parentTicket: { id: "parent-ticket" },
+    admission: { admitted: true },
+  })),
+}));
+
+vi.mock("./managed-work.js", () => ({
+  managedWorkEnabled: (deps: { ticketBoardEnabled?: boolean }) => deps.ticketBoardEnabled === true,
+  prepareManagedWorkInTransaction: mocks.prepareManagedWork,
+}));
+
 vi.mock("./model-selection.js", () => ({
   validateConnectedModelChoice: vi.fn(async () => undefined),
 }));
@@ -21,6 +35,7 @@ vi.mock("@rakazo/db", async (original) => ({
   assertRunCanWriteHistory: vi.fn(async () => undefined),
   createThreadMessageInTransaction: vi.fn(async () => ({ id: "card" })),
   appendEventInTransaction: vi.fn(async () => ({ seq: 7 })),
+  recordWorkEventInTransaction: vi.fn(async () => ({ id: "dispatch-event" })),
 }));
 
 const START = {
@@ -33,17 +48,20 @@ const START = {
   effectKey: "effect-1",
 };
 
-function harness(overrides: { trigger?: string; threadBotId?: string | null } = {}) {
+function harness(
+  overrides: { trigger?: string; threadBotId?: string | null; managed?: boolean } = {},
+) {
   const createRun = vi.fn(async (_args: unknown) => ({ id: "helper-run" }));
   const tx = {
     $queryRaw: vi.fn(async () => []),
     thread: { create: vi.fn(async () => ({ id: "helper-thread" })) },
-    task: { create: vi.fn(async () => ({ id: "helper-task" })) },
+    task: { create: vi.fn(async (_args: unknown) => ({ id: "helper-task" })) },
     run: {
       findFirst: vi.fn(async () => null),
       count: vi.fn(async (_args?: { where?: { status?: unknown } }) => 0),
       create: createRun,
     },
+    workEvent: { update: vi.fn(async () => ({})) },
   };
   const prisma = {
     $transaction: vi.fn(async (work: (client: typeof tx) => Promise<unknown>) => work(tx)),
@@ -55,6 +73,7 @@ function harness(overrides: { trigger?: string; threadBotId?: string | null } = 
       events: { notify: vi.fn(async () => undefined) },
       jobs: { enqueue },
       billingEnabled: false,
+      ticketBoardEnabled: overrides.managed === true,
     },
     run: { id: "run-1", spaceId: "space", userId: "user", trigger: overrides.trigger ?? "user" },
     model: { provider: "openai-compatible", id: "route/model", thinkingLevel: "high" },
@@ -64,6 +83,7 @@ function harness(overrides: { trigger?: string; threadBotId?: string | null } = 
       id: "chat",
       botId: overrides.threadBotId === undefined ? "bot" : overrides.threadBotId,
     },
+    source: { ownerAuthoredRun: overrides.managed === true },
   } as unknown as RunContext;
   return { ctx, prisma, tx, createRun, enqueue };
 }
@@ -94,6 +114,40 @@ describe("starting a background helper", () => {
     expect(h.prisma.$transaction).toHaveBeenCalledWith(expect.any(Function), {
       timeout: 20_000,
     });
+  });
+
+  it("starts an owner-chat helper as a managed ticket assignment", async () => {
+    const h = harness({ managed: true });
+    await expect(startBackgroundHelper(h.ctx, START)).resolves.toMatchObject({
+      ok: true,
+      ticketId: "managed-ticket",
+    });
+    expect(mocks.prepareManagedWork).toHaveBeenCalledWith(
+      h.tx,
+      expect.objectContaining({
+        ownerBotId: "bot",
+        brief: START.task,
+        operationKey: "run-1:effect-1",
+        newTask: true,
+      }),
+    );
+    expect(h.createRun).toHaveBeenCalledWith({
+      data: expect.objectContaining({
+        ticketId: "managed-ticket",
+        workControlEpoch: 3,
+        workRequirementsVersion: 2,
+      }),
+      select: { id: true },
+    });
+    expect(h.tx.workEvent.update).toHaveBeenCalledWith({
+      where: { id: "dispatch-event" },
+      data: expect.objectContaining({ status: "handled", wakeRunId: "helper-run" }),
+    });
+    const task = vi.mocked(h.tx.task.create).mock.calls[0]?.[0] as {
+      data: { prompt: string };
+    };
+    expect(task.data.prompt).toContain("managed ticket managed-ticket");
+    expect(task.data.prompt).toContain("ticket_update");
   });
 
   it("keeps its card running when the turn that started it ends", async () => {
